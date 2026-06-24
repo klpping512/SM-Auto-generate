@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>平台配置 - 南非物流社交媒体营销工具</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .sidebar-item-active { background-color: rgba(59, 130, 246, 0.1); border-right: 4px solid #3b82f6; color: #3b82f6; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-800 flex h-screen overflow-hidden">
+<aside class="w-64 bg-white border-r border-gray-200 flex flex-col flex-none">
+    <div class="p-6 border-b border-gray-100 flex items-center gap-3">
+        <div class="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center text-white">
+            <iconify-icon icon="mdi:truck-fast" width="24"></iconify-icon>
+        </div>
+        <span class="font-bold text-lg tracking-tight text-blue-900">SA-LogiFlow</span>
+    </div>
+    <nav class="flex-1 py-6 space-y-1">
+        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/home.html">
+            <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="20"></iconify-icon><span>分发总览</span>
+        </a>
+        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/accounts.html">
+            <iconify-icon class="mr-3" icon="mdi:account-group" width="20"></iconify-icon><span>账号管理</span>
+        </a>
+        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/editor.html">
+            <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="20"></iconify-icon><span>内容创作</span>
+        </a>
+        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/queue.html">
+            <iconify-icon class="mr-3" icon="mdi:clock-list" width="20"></iconify-icon><span>发布队列</span>
+        </a>
+        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 sidebar-item-active" href="/config.html">
+            <iconify-icon class="mr-3" icon="mdi:cog" width="20"></iconify-icon><span>平台配置</span>
+        </a>
+    </nav>
+</aside>
+
+<main class="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 flex-none">
+        <h1 class="text-xl font-semibold text-gray-800">平台配置</h1>
+    </header>
+    <div class="flex-1 overflow-y-auto p-8 space-y-6">
+        <!-- AI 引擎配置 -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-purple-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-purple-600 text-2xl" icon="mdi:brain"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">AI 引擎配置 (DeepSeek)</h3>
+                </div>
+                <span id="aiStatus" class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 未配置
+                </span>
+            </div>
+            <div class="p-6">
+                <div class="max-w-xl">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">DeepSeek API Key</label>
+                    <div class="flex gap-3">
+                        <input id="apiKey" type="password" class="flex-1 border-gray-300 rounded-lg" placeholder="sk-..." />
+                        <button onclick="saveApiKey()" class="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700">保存</button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">用于 AI 文案生成。没有配置时将使用模板生成内容。</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 小红书 (RPA) -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-red-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-red-600 text-2xl" icon="ri:xiaohongshu-fill"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">小红书配置 (RPA 模拟)</h3>
+                </div>
+                <span class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 待配置
+                </span>
+            </div>
+            <div class="p-6 grid grid-cols-2 gap-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Chrome 浏览器路径</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Cookie 存储路径</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="./data/cookies/xhs_main.json"/>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">发布间隔 (秒)</label>
+                            <input class="w-full text-sm border-gray-300 rounded-lg" type="number" value="300"/>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">单日上限</label>
+                            <input class="w-full text-sm border-gray-300 rounded-lg" type="number" value="10"/>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">图片上传策略</label>
+                        <select class="w-full text-sm border-gray-300 rounded-lg">
+                            <option>原始尺寸</option>
+                            <option selected>自动优化 (WebP)</option>
+                            <option>添加物流水印</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 抖音 (RPA) -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-gray-900 text-2xl" icon="ri:tiktok-fill"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">抖音配置 (RPA 模拟)</h3>
+                </div>
+                <span class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 待配置
+                </span>
+            </div>
+            <div class="p-6 grid grid-cols-2 gap-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Chrome 浏览器路径</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Cookie 存储路径</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="./data/cookies/douyin_main.json"/>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">发布间隔 (秒)</label>
+                            <input class="w-full text-sm border-gray-300 rounded-lg" type="number" value="600"/>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">单日上限</label>
+                            <input class="w-full text-sm border-gray-300 rounded-lg" type="number" value="5"/>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">视频时长限制</label>
+                        <select class="w-full text-sm border-gray-300 rounded-lg">
+                            <option selected>&lt; 60秒</option>
+                            <option>&lt; 3分钟</option>
+                            <option>&lt; 10分钟</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Facebook -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-blue-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-blue-700 text-2xl" icon="ri:facebook-box-fill"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">Facebook 配置 (Graph API)</h3>
+                </div>
+                <span class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 待配置
+                </span>
+            </div>
+            <div class="p-6 grid grid-cols-2 gap-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Page ID</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="输入 Page ID"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 Access Token"/>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">API 版本</label>
+                        <select class="w-full text-sm border-gray-300 rounded-lg">
+                            <option>v19.0</option>
+                            <option selected>v18.0</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">App Secret</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 App Secret"/>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Twitter -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-gray-900 text-2xl" icon="ri:twitter-x-fill"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">Twitter/X 配置 (API v2)</h3>
+                </div>
+                <span class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 待配置
+                </span>
+            </div>
+            <div class="p-6 grid grid-cols-2 gap-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 API Key"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">API Secret</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 API Secret"/>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 Access Token"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Access Token Secret</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 Access Token Secret"/>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reddit -->
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-orange-50/30">
+                <div class="flex items-center gap-3">
+                    <iconify-icon class="text-orange-600 text-2xl" icon="ri:reddit-fill"></iconify-icon>
+                    <h3 class="font-bold text-gray-800">Reddit 配置 (PRAW/API)</h3>
+                </div>
+                <span class="flex items-center gap-1.5 text-gray-500 text-xs font-medium">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full"></span> 待配置
+                </span>
+            </div>
+            <div class="p-6 grid grid-cols-2 gap-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="输入 Client ID"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="password" placeholder="输入 Client Secret"/>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">User Agent</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="SA-LogiFlow-v1.0"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">目标 Subreddits</label>
+                        <input class="w-full text-sm border-gray-300 rounded-lg" type="text" placeholder="r/logistics, r/southafrica"/>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部说明 -->
+        <div class="bg-white p-6 rounded-xl border border-gray-200 flex justify-between items-center">
+            <div class="text-sm text-gray-500 flex items-center gap-2">
+                <iconify-icon class="text-green-500" icon="mdi:shield-check"></iconify-icon>
+                所有配置均加密存储在本地。
+            </div>
+            <div class="flex gap-3">
+                <button class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">导出配置</button>
+                <button class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">测试所有连接</button>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script>
+const API = '';
+
+async function saveApiKey() {
+    const key = document.getElementById('apiKey').value;
+    if (!key) { alert('请输入 API Key'); return; }
+    try {
+        const resp = await fetch(`${API}/api/config/apikey`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ key }),
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            document.getElementById('aiStatus').innerHTML = '<span class="w-2 h-2 bg-green-500 rounded-full"></span> 已配置';
+            document.getElementById('aiStatus').className = 'flex items-center gap-1.5 text-green-600 text-xs font-medium';
+            alert('✅ API Key 已保存，AI 内容生成已启用');
+        }
+    } catch (e) {
+        alert('保存失败: ' + e.message);
+    }
+}
+</script>
+</body>
+</html>
