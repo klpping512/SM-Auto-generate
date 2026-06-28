@@ -3,177 +3,220 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>分发总览 - 南非物流社交媒体营销工具</title>
+<title>SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script>
+tailwind.config = {
+    theme: {
+        extend: {
+            colors: {
+                dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
+                accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
+            }
+        }
+    }
+}
+</script>
 <style>
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .sidebar-item-active { background-color: rgba(59, 130, 246, 0.1); border-right: 4px solid #3b82f6; color: #3b82f6; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
+    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
+    .glass-hover:hover { border-color: rgba(99, 102, 241, 0.3); background: rgba(15, 23, 42, 0.8); }
+    .gradient-text { background: linear-gradient(135deg, #818cf8, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .gradient-border { border-image: linear-gradient(135deg, #6366f1, #818cf8) 1; }
+    .card-glow:hover { box-shadow: 0 0 30px rgba(99, 102, 241, 0.15); }
+    .stat-card { background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(15, 23, 42, 0.8)); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 </style>
 </head>
-<body class="bg-gray-50 text-gray-800 flex h-screen overflow-hidden">
-<!-- 左侧导航栏 -->
-<aside class="w-64 bg-white border-r border-gray-200 flex flex-col flex-none">
-    <div class="p-6 border-b border-gray-100 flex items-center gap-3">
-        <div class="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center text-white">
-            <iconify-icon icon="mdi:truck-fast" width="24"></iconify-icon>
-        </div>
-        <span class="font-bold text-lg tracking-tight text-blue-900">SA-LogiFlow</span>
-    </div>
-    <nav class="flex-1 py-6 space-y-1">
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 sidebar-item-active" href="/home.html">
-            <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="20"></iconify-icon>
-            <span>分发总览</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/accounts.html">
-            <iconify-icon class="mr-3" icon="mdi:account-group" width="20"></iconify-icon>
-            <span>账号管理</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/editor.html">
-            <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="20"></iconify-icon>
-            <span>内容创作</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/queue.html">
-            <iconify-icon class="mr-3" icon="mdi:clock-list" width="20"></iconify-icon>
-            <span>发布队列</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/config.html">
-            <iconify-icon class="mr-3" icon="mdi:cog" width="20"></iconify-icon>
-            <span>平台配置</span>
-        </a>
-    </nav>
-    <div class="p-4 border-t border-gray-100">
-        <div class="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
-            <div class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold">AD</div>
-            <div class="flex-1 min-w-0">
-                <p class="text-sm font-medium truncate">Admin 用户</p>
-                <p class="text-xs text-gray-500 truncate">SA Logistics Co.</p>
+<body class="text-gray-100 min-h-screen">
+<div class="flex h-screen overflow-hidden">
+    <!-- Sidebar -->
+    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
+        <div class="p-6 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
+                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
+            </div>
+            <div>
+                <span class="font-bold text-lg tracking-tight text-white">LogiFlow</span>
+                <p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p>
             </div>
         </div>
-    </div>
-</aside>
-
-<!-- 主内容区 -->
-<main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-    <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 flex-none">
-        <h1 class="text-xl font-semibold text-gray-800">分发总览</h1>
-        <div class="flex items-center gap-4">
-            <div class="text-sm text-gray-500">
-                最后同步: <span id="lastSync" class="font-medium text-gray-700">加载中...</span>
-            </div>
-        </div>
-    </header>
-
-    <div class="flex-1 overflow-y-auto p-8 space-y-8">
-        <!-- 统计卡片 -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <div class="flex justify-between items-start">
-                    <div>
-                        <p class="text-sm text-gray-500 mb-1">队列总数</p>
-                        <h3 id="statTotal" class="text-2xl font-bold text-gray-900">-</h3>
-                    </div>
-                    <div class="p-2 bg-blue-50 text-blue-600 rounded-lg">
-                        <iconify-icon icon="mdi:send-check" width="24"></iconify-icon>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <div class="flex justify-between items-start">
-                    <div>
-                        <p class="text-sm text-gray-500 mb-1">待发布</p>
-                        <h3 id="statQueued" class="text-2xl font-bold text-gray-900">-</h3>
-                    </div>
-                    <div class="p-2 bg-yellow-50 text-yellow-600 rounded-lg">
-                        <iconify-icon icon="mdi:clock-outline" width="24"></iconify-icon>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <div class="flex justify-between items-start">
-                    <div>
-                        <p class="text-sm text-gray-500 mb-1">已发布</p>
-                        <h3 id="statPublished" class="text-2xl font-bold text-gray-900">-</h3>
-                    </div>
-                    <div class="p-2 bg-green-50 text-green-600 rounded-lg">
-                        <iconify-icon icon="mdi:check-circle" width="24"></iconify-icon>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <div class="flex justify-between items-start">
-                    <div>
-                        <p class="text-sm text-gray-500 mb-1">绑定账号</p>
-                        <h3 id="statAccounts" class="text-2xl font-bold text-gray-900">-</h3>
-                    </div>
-                    <div class="p-2 bg-purple-50 text-purple-600 rounded-lg">
-                        <iconify-icon icon="mdi:account-switch" width="24"></iconify-icon>
-                    </div>
-                </div>
-                <div class="mt-4 flex items-center text-xs">
-                    <span id="accountStatus" class="text-gray-500">加载中...</span>
+        <nav class="flex-1 px-3 py-4 space-y-1">
+            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/home.html">
+                <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon>
+                <span class="text-sm font-medium">Dashboard</span>
+            </a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/accounts.html">
+                <iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon>
+                <span class="text-sm font-medium">Accounts</span>
+            </a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/editor.html">
+                <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon>
+                <span class="text-sm font-medium">Content Studio</span>
+            </a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/queue.html">
+                <iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon>
+                <span class="text-sm font-medium">Publish Queue</span>
+            </a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/config.html">
+                <iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon>
+                <span class="text-sm font-medium">Settings</span>
+            </a>
+        </nav>
+        <div class="p-4 mx-3 mb-4 rounded-xl glass">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-500 to-purple-500 flex items-center justify-center text-white text-xs font-bold">A</div>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-white truncate">Admin</p>
+                    <p class="text-[10px] text-dark-400">SA Logistics</p>
                 </div>
             </div>
         </div>
+    </aside>
 
-        <!-- 平台状态面板 -->
-        <div id="platformPanel" class="grid grid-cols-1 md:grid-cols-5 gap-4">
-            <!-- Dynamic platform cards -->
-        </div>
+    <!-- Main -->
+    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <!-- Header -->
+        <header class="h-16 glass border-b border-dark-700/50 flex items-center justify-between px-8 flex-none">
+            <div>
+                <h1 class="text-lg font-semibold text-white">Dashboard</h1>
+                <p class="text-xs text-dark-400">Real-time distribution analytics</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-dark-800/50 border border-dark-700/50">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span class="text-xs text-dark-300">Last sync: <span id="lastSync" class="text-white">--</span></span>
+                </div>
+                <button onclick="loadDashboard()" class="p-2 rounded-lg hover:bg-dark-800/50 text-dark-400 hover:text-white transition-colors">
+                    <iconify-icon icon="mdi:refresh" width="18"></iconify-icon>
+                </button>
+            </div>
+        </header>
 
-        <!-- 图表区域 -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div class="lg:col-span-2 bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <h3 class="font-bold text-gray-800 mb-6">队列状态分布</h3>
-                <div class="h-[300px] w-full" id="statusChart"></div>
-            </div>
-            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                <h3 class="font-bold text-gray-800 mb-6">平台分布</h3>
-                <div class="h-[300px] w-full" id="distChart"></div>
-            </div>
-        </div>
+        <div class="flex-1 overflow-y-auto p-6 space-y-6">
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div class="stat-card rounded-2xl p-5 border border-dark-700/50 card-glow transition-all">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-xs text-dark-400 uppercase tracking-wider">Queue Total</p>
+                            <h3 id="statTotal" class="text-3xl font-bold text-white mt-1">--</h3>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-accent-500/10">
+                            <iconify-icon icon="mdi:send-check" width="20" class="text-accent-400"></iconify-icon>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-dark-700/30">
+                        <span class="text-xs text-dark-400">Across all platforms</span>
+                    </div>
+                </div>
 
-        <!-- 最近活动 -->
-        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div class="p-6 border-b border-gray-100 flex justify-between items-center">
-                <h3 class="font-bold text-gray-800">最近发布活动</h3>
-                <a href="/queue.html" class="text-sm text-blue-600 font-medium hover:underline">查看全部</a>
+                <div class="stat-card rounded-2xl p-5 border border-dark-700/50 card-glow transition-all">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-xs text-dark-400 uppercase tracking-wider">Pending</p>
+                            <h3 id="statQueued" class="text-3xl font-bold text-white mt-1">--</h3>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-amber-500/10">
+                            <iconify-icon icon="mdi:clock-outline" width="20" class="text-amber-400"></iconify-icon>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-dark-700/30">
+                        <span class="text-xs text-dark-400">Ready to publish</span>
+                    </div>
+                </div>
+
+                <div class="stat-card rounded-2xl p-5 border border-dark-700/50 card-glow transition-all">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-xs text-dark-400 uppercase tracking-wider">Published</p>
+                            <h3 id="statPublished" class="text-3xl font-bold text-white mt-1">--</h3>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-emerald-500/10">
+                            <iconify-icon icon="mdi:check-circle" width="20" class="text-emerald-400"></iconify-icon>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-dark-700/30">
+                        <span class="text-xs text-dark-400">Successfully posted</span>
+                    </div>
+                </div>
+
+                <div class="stat-card rounded-2xl p-5 border border-dark-700/50 card-glow transition-all">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-xs text-dark-400 uppercase tracking-wider">Accounts</p>
+                            <h3 id="statAccounts" class="text-3xl font-bold text-white mt-1">--</h3>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-purple-500/10">
+                            <iconify-icon icon="mdi:account-switch" width="20" class="text-purple-400"></iconify-icon>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-dark-700/30">
+                        <span id="accountStatus" class="text-xs text-dark-400">--</span>
+                    </div>
+                </div>
             </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left">
-                    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
-                        <tr>
-                            <th class="px-6 py-4 font-medium">时间</th>
-                            <th class="px-6 py-4 font-medium">平台</th>
-                            <th class="px-6 py-4 font-medium">内容标题</th>
-                            <th class="px-6 py-4 font-medium">状态</th>
-                        </tr>
-                    </thead>
-                    <tbody id="activityTable" class="divide-y divide-gray-100">
-                        <tr><td colspan="4" class="px-6 py-8 text-center text-gray-400">加载中...</td></tr>
-                    </tbody>
-                </table>
+
+            <!-- Platform Cards -->
+            <div id="platformPanel" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+
+            <!-- Charts -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div class="lg:col-span-2 glass rounded-2xl p-5 border border-dark-700/50">
+                    <h3 class="text-sm font-semibold text-white mb-4">Queue Status Distribution</h3>
+                    <div class="h-[250px]" id="statusChart"></div>
+                </div>
+                <div class="glass rounded-2xl p-5 border border-dark-700/50">
+                    <h3 class="text-sm font-semibold text-white mb-4">Platform Distribution</h3>
+                    <div class="h-[250px]" id="distChart"></div>
+                </div>
+            </div>
+
+            <!-- Activity Table -->
+            <div class="glass rounded-2xl border border-dark-700/50 overflow-hidden">
+                <div class="p-5 border-b border-dark-700/30 flex justify-between items-center">
+                    <h3 class="text-sm font-semibold text-white">Recent Activity</h3>
+                    <a href="/queue.html" class="text-xs text-accent-400 hover:text-accent-300 transition-colors">View all →</a>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead>
+                            <tr class="text-xs text-dark-400 uppercase tracking-wider">
+                                <th class="px-5 py-3 font-medium">Time</th>
+                                <th class="px-5 py-3 font-medium">Platform</th>
+                                <th class="px-5 py-3 font-medium">Title</th>
+                                <th class="px-5 py-3 font-medium">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="activityTable" class="divide-y divide-dark-700/30">
+                            <tr><td colspan="4" class="px-5 py-8 text-center text-dark-500">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
-    </div>
-</main>
+    </main>
+</div>
 
 <script>
 const API = '';
 const platformIcons = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-600', bg: 'bg-red-50', name: '小红书' },
-    douyin: { icon: 'ri:tiktok-fill', color: 'text-gray-900', bg: 'bg-gray-50', name: '抖音' },
-    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-700', bg: 'bg-blue-50', name: 'Facebook' },
-    twitter: { icon: 'ri:twitter-x-fill', color: 'text-gray-900', bg: 'bg-gray-50', name: 'Twitter' },
-    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-600', bg: 'bg-orange-50', name: 'Reddit' },
+    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-400', bg: 'bg-red-500/10', name: 'XHS' },
+    douyin: { icon: 'ri:tiktok-fill', color: 'text-white', bg: 'bg-dark-700/50', name: 'Douyin' },
+    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-400', bg: 'bg-blue-500/10', name: 'Facebook' },
+    twitter: { icon: 'ri:twitter-x-fill', color: 'text-white', bg: 'bg-dark-700/50', name: 'Twitter' },
+    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-400', bg: 'bg-orange-500/10', name: 'Reddit' },
 };
 const statusStyles = {
-    queued: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '待发布' },
-    reviewing: { bg: 'bg-blue-100', text: 'text-blue-700', label: '审核中' },
-    published: { bg: 'bg-green-100', text: 'text-green-700', label: '已发布' },
-    failed: { bg: 'bg-red-100', text: 'text-red-700', label: '失败' },
-    draft: { bg: 'bg-gray-100', text: 'text-gray-700', label: '草稿' },
+    queued: { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20', label: 'Pending' },
+    reviewing: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20', label: 'Reviewing' },
+    published: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', label: 'Published' },
+    failed: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/20', label: 'Failed' },
 };
 
 async function loadDashboard() {
@@ -181,44 +224,44 @@ async function loadDashboard() {
         const resp = await fetch(`${API}/api/dashboard`);
         const data = await resp.json();
 
-        // Stats
         document.getElementById('statTotal').textContent = data.queue_stats.total;
         document.getElementById('statQueued').textContent = data.queue_stats.queued;
         document.getElementById('statPublished').textContent = data.queue_stats.published;
         document.getElementById('statAccounts').textContent = data.account_total;
-        document.getElementById('accountStatus').textContent = `${data.account_active} 个活跃 / ${data.account_expired} 个过期`;
+        document.getElementById('accountStatus').textContent = `${data.account_active} active / ${data.account_expired} expired`;
         document.getElementById('lastSync').textContent = data.last_sync;
 
-        // Platform panel
         const panel = document.getElementById('platformPanel');
         panel.innerHTML = '';
         Object.entries(platformIcons).forEach(([key, p]) => {
             const stats = data.platform_stats[key] || { total: 0, active: 0 };
             panel.innerHTML += `
-                <div class="bg-white p-4 rounded-xl border border-gray-200 flex flex-col items-center">
-                    <iconify-icon class="${p.color} text-3xl mb-2" icon="${p.icon}"></iconify-icon>
-                    <span class="text-sm font-semibold mb-1">${p.name}</span>
-                    <span class="px-2 py-0.5 ${stats.active > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'} text-[10px] rounded-full mb-3 font-medium">
-                        ${stats.active > 0 ? '已连接' : '未配置'}
-                    </span>
-                    <div class="w-full text-center">
-                        <div class="text-xs text-gray-500">账号: <span class="font-bold text-gray-900">${stats.total}</span></div>
+                <div class="glass rounded-xl p-4 border border-dark-700/50 hover:border-accent-500/20 transition-all cursor-pointer">
+                    <div class="flex items-center gap-3 mb-3">
+                        <div class="p-2 rounded-lg ${p.bg}">
+                            <iconify-icon class="${p.color}" icon="${p.icon}" width="18"></iconify-icon>
+                        </div>
+                        <span class="text-sm font-medium text-white">${p.name}</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs text-dark-400">${stats.total} accounts</span>
+                        <span class="w-2 h-2 rounded-full ${stats.active > 0 ? 'bg-emerald-400' : 'bg-dark-600'}"></span>
                     </div>
                 </div>`;
         });
 
-        // Status chart
+        // Charts
         const statusChart = echarts.init(document.getElementById('statusChart'));
         statusChart.setOption({
-            tooltip: { trigger: 'item' },
-            xAxis: { type: 'category', data: ['待发布', '审核中', '已发布', '失败'], axisLine: { lineStyle: { color: '#e5e7eb' } } },
-            yAxis: { type: 'value', splitLine: { lineStyle: { type: 'dashed' } } },
+            tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0' } },
+            xAxis: { type: 'category', data: ['Pending', 'Reviewing', 'Published', 'Failed'], axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8' } },
+            yAxis: { type: 'value', splitLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#94a3b8' } },
             series: [{
                 type: 'bar',
                 data: [
-                    { value: data.queue_stats.queued, itemStyle: { color: '#eab308' } },
-                    { value: data.queue_stats.reviewing, itemStyle: { color: '#3b82f6' } },
-                    { value: data.queue_stats.published, itemStyle: { color: '#22c55e' } },
+                    { value: data.queue_stats.queued, itemStyle: { color: '#f59e0b' } },
+                    { value: data.queue_stats.reviewing, itemStyle: { color: '#6366f1' } },
+                    { value: data.queue_stats.published, itemStyle: { color: '#10b981' } },
                     { value: data.queue_stats.failed, itemStyle: { color: '#ef4444' } },
                 ],
                 barWidth: '40%',
@@ -227,19 +270,18 @@ async function loadDashboard() {
             grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
         });
 
-        // Distribution chart
         const distData = Object.entries(data.platform_stats).map(([k, v]) => ({
             value: v.total,
             name: platformIcons[k]?.name || k,
-            itemStyle: { color: { xiaohongshu: '#ef4444', douyin: '#111827', facebook: '#1d4ed8', twitter: '#374151', reddit: '#ea580c' }[k] || '#6b7280' }
+            itemStyle: { color: { xiaohongshu: '#f87171', douyin: '#e2e8f0', facebook: '#60a5fa', twitter: '#e2e8f0', reddit: '#fb923c' }[k] || '#64748b' }
         }));
         const distChart = echarts.init(document.getElementById('distChart'));
         distChart.setOption({
-            tooltip: { trigger: 'item' },
+            tooltip: { trigger: 'item', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0' } },
             series: [{
-                type: 'pie', radius: ['40%', '70%'],
+                type: 'pie', radius: ['45%', '75%'],
                 avoidLabelOverlap: false,
-                itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
+                itemStyle: { borderRadius: 8, borderColor: '#0f172a', borderWidth: 2 },
                 label: { show: false },
                 data: distData,
             }],
@@ -247,26 +289,25 @@ async function loadDashboard() {
 
         window.addEventListener('resize', () => { statusChart.resize(); distChart.resize(); });
 
-        // Recent activity
         const tbody = document.getElementById('activityTable');
         if (data.recent_activity.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-8 text-center text-gray-400">暂无活动记录，去<a href="/editor.html" class="text-blue-600 hover:underline ml-1">内容创作</a>生成第一条内容吧！</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="px-5 py-8 text-center text-dark-500">No activity yet. <a href="/editor.html" class="text-accent-400 hover:underline ml-1">Create content →</a></td></tr>';
         } else {
             tbody.innerHTML = data.recent_activity.map(item => {
-                const p = platformIcons[item.platform] || { icon: 'mdi:help', color: 'text-gray-400', name: item.platform };
+                const p = platformIcons[item.platform] || { icon: 'mdi:help', color: 'text-dark-400', name: item.platform };
                 const s = statusStyles[item.status] || statusStyles.queued;
                 return `
-                    <tr class="hover:bg-gray-50 transition-colors">
-                        <td class="px-6 py-4 text-sm text-gray-600">${item.created_at || '-'}</td>
-                        <td class="px-6 py-4">
+                    <tr class="hover:bg-dark-800/30 transition-colors">
+                        <td class="px-5 py-3.5 text-sm text-dark-400">${item.created_at || '-'}</td>
+                        <td class="px-5 py-3.5">
                             <div class="flex items-center gap-2">
-                                <iconify-icon class="${p.color}" icon="${p.icon}"></iconify-icon>
-                                <span class="text-sm">${p.name}</span>
+                                <iconify-icon class="${p.color}" icon="${p.icon}" width="16"></iconify-icon>
+                                <span class="text-sm text-dark-200">${p.name}</span>
                             </div>
                         </td>
-                        <td class="px-6 py-4 text-sm font-medium text-gray-800">${item.title}</td>
-                        <td class="px-6 py-4">
-                            <span class="px-2 py-1 ${s.bg} ${s.text} text-xs rounded-full">${s.label}</span>
+                        <td class="px-5 py-3.5 text-sm font-medium text-white">${item.title}</td>
+                        <td class="px-5 py-3.5">
+                            <span class="px-2.5 py-1 ${s.bg} ${s.text} text-xs rounded-full border ${s.border}">${s.label}</span>
                         </td>
                     </tr>`;
             }).join('');

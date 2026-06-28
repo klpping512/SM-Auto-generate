@@ -1,12 +1,15 @@
 """AI Content Generation Engine using DeepSeek API."""
 import httpx
 import json
+import logging
 import re
 from models import Platform, GeneratedContent
 from topic_library import PLATFORM_PROMPTS
 
+logger = logging.getLogger(__name__)
+
 # DeepSeek API config
-DEEPSEEK_API_KEY = ""  # Will be set from env or config
+DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 
@@ -24,7 +27,6 @@ async def generate_content(
 ) -> list[GeneratedContent]:
     """Generate platform-specific content for a given topic."""
     results = []
-
     for platform in platforms:
         prompt_config = PLATFORM_PROMPTS.get(platform.value, PLATFORM_PROMPTS["facebook"])
 
@@ -73,7 +75,6 @@ async def generate_content(
                 data = resp.json()
                 content_text = data["choices"][0]["message"]["content"]
 
-                # Parse JSON from response
                 parsed = _parse_json_response(content_text)
                 results.append(GeneratedContent(
                     platform=platform,
@@ -81,8 +82,9 @@ async def generate_content(
                     body=parsed.get("body", content_text),
                     hashtags=parsed.get("hashtags", []),
                 ))
+                logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
         except Exception as e:
-            # Fallback: generate template content
+            logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%s", platform.value, topic, e)
             results.append(_fallback_content(platform, topic, category))
 
     return results
@@ -90,20 +92,16 @@ async def generate_content(
 
 def _parse_json_response(text: str) -> dict:
     """Try to extract JSON from LLM response."""
-    # Try direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    # Try to find JSON block
     json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
     if json_match:
         try:
             return json.loads(json_match.group())
         except json.JSONDecodeError:
             pass
-
     return {"title": "", "body": text, "hashtags": []}
 
 
@@ -153,5 +151,11 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
             hashtags=["logistics", "southafrica", "supplychain"],
         ),
     }
-
-    return templates.get(platform, templates[Platform.FACEBOOK])
+    # 通用 fallback
+    generic = GeneratedContent(
+        platform=platform,
+        title=f"{topic}",
+        body=f"关于「{topic}」的最新资讯。\n\n持续关注南非物流行业动态，为您带来第一手信息。",
+        hashtags=["南非物流", "跨境货运"],
+    )
+    return templates.get(platform, generic)

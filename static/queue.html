@@ -3,100 +3,106 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>发布队列 - 南非物流社交媒体营销工具</title>
+<title>SA-LogiFlow - Publish Queue</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<script>
+tailwind.config = {
+    theme: { extend: { colors: {
+        dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
+        accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
+    }}}
+}
+</script>
 <style>
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .sidebar-item-active { background-color: rgba(59, 130, 246, 0.1); border-right: 4px solid #3b82f6; color: #3b82f6; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
+    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 </style>
 </head>
-<body class="bg-gray-50 text-gray-800 flex h-screen overflow-hidden">
-<aside class="w-64 bg-white border-r border-gray-200 flex flex-col flex-none">
-    <div class="p-6 border-b border-gray-100 flex items-center gap-3">
-        <div class="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center text-white">
-            <iconify-icon icon="mdi:truck-fast" width="24"></iconify-icon>
-        </div>
-        <span class="font-bold text-lg tracking-tight text-blue-900">SA-LogiFlow</span>
-    </div>
-    <nav class="flex-1 py-6 space-y-1">
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/home.html">
-            <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="20"></iconify-icon><span>分发总览</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/accounts.html">
-            <iconify-icon class="mr-3" icon="mdi:account-group" width="20"></iconify-icon><span>账号管理</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/editor.html">
-            <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="20"></iconify-icon><span>内容创作</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 sidebar-item-active" href="/queue.html">
-            <iconify-icon class="mr-3" icon="mdi:clock-list" width="20"></iconify-icon><span>发布队列</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/config.html">
-            <iconify-icon class="mr-3" icon="mdi:cog" width="20"></iconify-icon><span>平台配置</span>
-        </a>
-    </nav>
-</aside>
-
-<main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-    <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 flex-none">
-        <h1 class="text-xl font-semibold text-gray-800">发布队列</h1>
-        <div class="flex items-center gap-3">
-            <span id="queueCount" class="text-sm text-gray-500"></span>
-            <button onclick="loadQueue()" class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
-                <iconify-icon icon="mdi:refresh" class="mr-1"></iconify-icon>刷新
-            </button>
-        </div>
-    </header>
-    <div class="flex-1 overflow-y-auto p-8">
-        <!-- 筛选栏 -->
-        <div class="bg-white p-4 rounded-xl border border-gray-200 shadow-sm mb-6 flex flex-wrap gap-4 items-center">
-            <div class="flex items-center gap-2">
-                <span class="text-sm text-gray-500">平台:</span>
-                <select id="filterPlatform" onchange="loadQueue()" class="text-sm border-gray-300 rounded-lg">
-                    <option value="">全部</option>
-                    <option value="xiaohongshu">小红书</option>
-                    <option value="douyin">抖音</option>
-                    <option value="facebook">Facebook</option>
-                    <option value="twitter">Twitter</option>
-                    <option value="reddit">Reddit</option>
-                </select>
+<body class="text-gray-100 min-h-screen">
+<div class="flex h-screen overflow-hidden">
+    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
+        <div class="p-6 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
+                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
             </div>
-            <div class="flex items-center gap-2">
-                <span class="text-sm text-gray-500">状态:</span>
-                <select id="filterStatus" onchange="loadQueue()" class="text-sm border-gray-300 rounded-lg">
-                    <option value="">全部</option>
-                    <option value="queued">待发布</option>
-                    <option value="reviewing">审核中</option>
-                    <option value="published">已发布</option>
-                    <option value="failed">失败</option>
-                </select>
-            </div>
-            <div class="ml-auto text-sm text-gray-500" id="filterInfo"></div>
+            <div><span class="font-bold text-lg tracking-tight text-white">LogiFlow</span><p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p></div>
         </div>
+        <nav class="flex-1 px-3 py-4 space-y-1">
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/home.html"><iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon><span class="text-sm font-medium">Dashboard</span></a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/accounts.html"><iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon><span class="text-sm font-medium">Accounts</span></a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/editor.html"><iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon><span class="text-sm font-medium">Content Studio</span></a>
+            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/queue.html"><iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon><span class="text-sm font-medium">Publish Queue</span></a>
+            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/config.html"><iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon><span class="text-sm font-medium">Settings</span></a>
+        </nav>
+    </aside>
 
-        <!-- 队列列表 -->
-        <div id="queueList" class="space-y-4">
-            <div class="text-center py-12 text-gray-400">加载中...</div>
+    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <header class="h-14 glass border-b border-dark-700/50 flex items-center justify-between px-6 flex-none">
+            <div>
+                <h1 class="text-base font-semibold text-white">Publish Queue</h1>
+            </div>
+            <div class="flex items-center gap-3">
+                <span id="queueCount" class="text-xs text-dark-400"></span>
+                <button onclick="loadQueue()" class="p-2 rounded-lg hover:bg-dark-800/50 text-dark-400 hover:text-white transition-colors">
+                    <iconify-icon icon="mdi:refresh" width="16"></iconify-icon>
+                </button>
+            </div>
+        </header>
+
+        <div class="flex-1 overflow-y-auto p-6">
+            <!-- Filters -->
+            <div class="glass rounded-xl p-4 border border-dark-700/50 mb-5 flex flex-wrap gap-3 items-center">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-dark-400">Platform:</span>
+                    <select id="filterPlatform" onchange="loadQueue()" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
+                        <option value="">All</option>
+                        <option value="xiaohongshu">XHS</option>
+                        <option value="douyin">Douyin</option>
+                        <option value="facebook">Facebook</option>
+                        <option value="twitter">Twitter</option>
+                        <option value="reddit">Reddit</option>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-dark-400">Status:</span>
+                    <select id="filterStatus" onchange="loadQueue()" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
+                        <option value="">All</option>
+                        <option value="queued">Pending</option>
+                        <option value="reviewing">Reviewing</option>
+                        <option value="published">Published</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                </div>
+                <div class="ml-auto text-xs text-dark-400" id="filterInfo"></div>
+            </div>
+
+            <!-- Queue List -->
+            <div id="queueList" class="space-y-3">
+                <div class="text-center py-16 text-dark-500">Loading...</div>
+            </div>
         </div>
-    </div>
-</main>
+    </main>
+</div>
 
 <script>
 const API = '';
 const platformInfo = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-600', bg: 'bg-red-50', textC: 'text-red-600', name: '小红书' },
-    douyin: { icon: 'ri:tiktok-fill', color: 'text-gray-900', bg: 'bg-black', textC: 'text-white', name: '抖音' },
-    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-700', bg: 'bg-blue-50', textC: 'text-blue-600', name: 'Facebook' },
-    twitter: { icon: 'ri:twitter-x-fill', color: 'text-gray-900', bg: 'bg-gray-50', textC: 'text-gray-600', name: 'Twitter' },
-    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-600', bg: 'bg-orange-50', textC: 'text-orange-600', name: 'Reddit' },
+    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/20', name: 'XHS' },
+    douyin: { icon: 'ri:tiktok-fill', color: 'text-white', bg: 'bg-dark-700/50', border: 'border-dark-600', name: 'Douyin' },
+    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/20', name: 'Facebook' },
+    twitter: { icon: 'ri:twitter-x-fill', color: 'text-white', bg: 'bg-dark-700/50', border: 'border-dark-600', name: 'Twitter' },
+    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/20', name: 'Reddit' },
 };
 const statusInfo = {
-    queued: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '待发布', border: 'border-l-yellow-400' },
-    reviewing: { bg: 'bg-blue-100', text: 'text-blue-700', label: '审核中', border: 'border-l-blue-400' },
-    published: { bg: 'bg-green-100', text: 'text-green-700', label: '已发布', border: 'border-l-green-400' },
-    failed: { bg: 'bg-red-100', text: 'text-red-700', label: '发布失败', border: 'border-l-red-400' },
-    draft: { bg: 'bg-gray-100', text: 'text-gray-700', label: '草稿', border: 'border-l-gray-400' },
+    queued: { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/30', label: 'Pending', accent: 'border-l-amber-500' },
+    reviewing: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/30', label: 'Reviewing', accent: 'border-l-blue-500' },
+    published: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/30', label: 'Published', accent: 'border-l-emerald-500' },
+    failed: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/30', label: 'Failed', accent: 'border-l-red-500' },
 };
 
 async function loadQueue() {
@@ -105,16 +111,13 @@ async function loadQueue() {
     let url = `${API}/api/queue?`;
     if (platform) url += `platform=${platform}&`;
     if (status) url += `status=${status}&`;
-
     try {
         const resp = await fetch(url);
         const items = await resp.json();
         renderQueue(items);
-        document.getElementById('queueCount').textContent = `共 ${items.length} 条`;
-        document.getElementById('filterInfo').textContent = items.length > 0 ? `显示 ${items.length} 条记录` : '';
-    } catch (e) {
-        console.error('Failed to load queue:', e);
-    }
+        document.getElementById('queueCount').textContent = `${items.length} items`;
+        document.getElementById('filterInfo').textContent = items.length > 0 ? `Showing ${items.length}` : '';
+    } catch (e) { console.error('Failed to load queue:', e); }
 }
 
 function renderQueue(items) {
@@ -122,52 +125,49 @@ function renderQueue(items) {
     if (items.length === 0) {
         container.innerHTML = `
             <div class="text-center py-16">
-                <iconify-icon icon="mdi:tray-arrow-down" width="48" class="text-gray-300 mb-4"></iconify-icon>
-                <p class="text-gray-400 text-lg">队列为空</p>
-                <p class="text-gray-400 text-sm mt-2">去<a href="/editor.html" class="text-blue-600 hover:underline ml-1">内容创作</a>生成并添加内容</p>
+                <div class="w-16 h-16 rounded-2xl bg-dark-800/50 flex items-center justify-center mx-auto mb-4">
+                    <iconify-icon icon="mdi:tray-arrow-down" width="28" class="text-dark-600"></iconify-icon>
+                </div>
+                <p class="text-dark-400 font-medium">Queue is empty</p>
+                <p class="text-dark-500 text-sm mt-1">Go to <a href="/editor.html" class="text-accent-400 hover:underline">Content Studio</a> to create content</p>
             </div>`;
         return;
     }
 
     container.innerHTML = items.map(item => {
-        const p = platformInfo[item.platform] || { icon: 'mdi:help', color: 'text-gray-400', bg: 'bg-gray-50', textC: 'text-gray-600', name: item.platform };
+        const p = platformInfo[item.platform] || { icon: 'mdi:help', color: 'text-dark-400', bg: 'bg-dark-700/50', border: 'border-dark-600', name: item.platform };
         const s = statusInfo[item.status] || statusInfo.queued;
         const hashtags = (item.hashtags || []).map(h => `#${h}`).join(' ');
         return `
-            <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden border-l-4 ${s.border}">
-                <div class="p-5 flex items-center justify-between">
+            <div class="glass rounded-xl border-l-4 ${s.accent} border border-dark-700/50 hover:border-dark-600 transition-all">
+                <div class="p-4 flex items-center justify-between">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-2">
-                            <span class="px-2 py-0.5 ${p.bg} ${p.textC} text-[10px] rounded flex items-center gap-1 font-medium">
-                                <iconify-icon icon="${p.icon}"></iconify-icon> ${p.name}
+                            <span class="px-2 py-0.5 ${p.bg} ${p.color} text-[10px] rounded flex items-center gap-1 font-medium border ${p.border}">
+                                <iconify-icon icon="${p.icon}" width="12"></iconify-icon> ${p.name}
                             </span>
-                            <span class="px-2 py-0.5 ${s.bg} ${s.text} text-[10px] rounded-full font-bold">${s.label}</span>
+                            <span class="px-2 py-0.5 ${s.bg} ${s.text} text-[10px] rounded-full font-medium border ${s.border}">${s.label}</span>
                         </div>
-                        <h3 class="font-bold text-gray-900 mb-1 truncate">${item.title}</h3>
-                        <p class="text-sm text-gray-500 line-clamp-2">${item.body.substring(0, 150)}${item.body.length > 150 ? '...' : ''}</p>
-                        ${hashtags ? `<p class="text-xs text-blue-500 mt-2">${hashtags}</p>` : ''}
-                        ${item.error_msg ? `<p class="text-xs text-red-500 mt-1">❌ ${item.error_msg}</p>` : ''}
+                        <h3 class="font-semibold text-white text-sm mb-1 truncate">${item.title}</h3>
+                        <p class="text-xs text-dark-400 line-clamp-1">${item.body.substring(0, 120)}${item.body.length > 120 ? '...' : ''}</p>
+                        ${hashtags ? `<p class="text-[10px] text-accent-400/70 mt-1.5">${hashtags}</p>` : ''}
+                        ${item.error_msg ? `<p class="text-[10px] text-red-400 mt-1">✕ ${item.error_msg}</p>` : ''}
                     </div>
-                    <div class="w-40 text-right px-4 border-l border-gray-100 flex-none">
-                        <div class="text-xs text-gray-400 mb-1">创建时间</div>
-                        <div class="text-sm font-medium text-gray-700">${item.created_at || '-'}</div>
-                        ${item.scheduled_at ? `<div class="text-xs text-gray-400 mt-2">计划: ${item.scheduled_at}</div>` : ''}
+                    <div class="w-32 text-right px-3 border-l border-dark-700/30 flex-none">
+                        <div class="text-[10px] text-dark-500 mb-0.5">Created</div>
+                        <div class="text-xs font-medium text-dark-300">${item.created_at || '-'}</div>
                     </div>
-                    <div class="flex gap-1 pl-4 flex-none">
+                    <div class="flex gap-1 pl-3 flex-none">
                         ${item.status === 'queued' ? `
-                            <button onclick="publishItem(${item.id})" class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors" title="发布">
-                                <iconify-icon icon="mdi:send" width="18"></iconify-icon>
-                            </button>` : ''}
-                        ${item.status === 'queued' ? `
-                            <button onclick="updateStatus(${item.id}, 'published')" class="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors" title="标记已发布">
-                                <iconify-icon icon="mdi:check" width="18"></iconify-icon>
+                            <button onclick="publishItem(${item.id})" class="p-2 text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-colors" title="Publish">
+                                <iconify-icon icon="mdi:send" width="16"></iconify-icon>
                             </button>` : ''}
                         ${item.status === 'failed' ? `
-                            <button onclick="updateStatus(${item.id}, 'queued')" class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="重试">
-                                <iconify-icon icon="mdi:refresh" width="18"></iconify-icon>
+                            <button onclick="updateStatus(${item.id}, 'queued')" class="p-2 text-accent-400 hover:bg-accent-500/10 rounded-lg transition-colors" title="Retry">
+                                <iconify-icon icon="mdi:refresh" width="16"></iconify-icon>
                             </button>` : ''}
-                        <button onclick="deleteItem(${item.id})" class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="删除">
-                            <iconify-icon icon="mdi:close-circle-outline" width="18"></iconify-icon>
+                        <button onclick="deleteItem(${item.id})" class="p-2 text-dark-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors" title="Delete">
+                            <iconify-icon icon="mdi:close" width="16"></iconify-icon>
                         </button>
                     </div>
                 </div>
@@ -175,43 +175,29 @@ function renderQueue(items) {
     }).join('');
 }
 
-async function updateStatus(id, status) {
-    try {
-        await fetch(`${API}/api/queue/${id}/status`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ status }),
-        });
-        loadQueue();
-    } catch (e) {
-        alert('操作失败');
-    }
-}
-
 async function publishItem(id) {
-    if (!confirm('确定通过慧媒发布此内容？')) return;
+    if (!confirm('Publish via Huimei?')) return;
     try {
         const resp = await fetch(`${API}/api/publish/${id}`, { method: 'POST' });
         const result = await resp.json();
-        if (result.success) {
-            alert('✅ 发布成功！');
-        } else {
-            alert('❌ 发布失败: ' + (result.error || '未知错误'));
-        }
+        alert(result.success ? 'Published!' : 'Failed: ' + (result.error || 'Unknown error'));
         loadQueue();
-    } catch (e) {
-        alert('发布失败: ' + e.message);
-    }
+    } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function updateStatus(id, status) {
+    try {
+        await fetch(`${API}/api/queue/${id}/status`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ status }) });
+        loadQueue();
+    } catch (e) { alert('Failed'); }
 }
 
 async function deleteItem(id) {
-    if (!confirm('确定删除此任务？')) return;
+    if (!confirm('Delete this item?')) return;
     try {
         await fetch(`${API}/api/queue/${id}`, { method: 'DELETE' });
         loadQueue();
-    } catch (e) {
-        alert('删除失败');
-    }
+    } catch (e) { alert('Failed'); }
 }
 
 loadQueue();

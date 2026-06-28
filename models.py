@@ -1,24 +1,45 @@
-"""Pydantic models for SA-LogiFlow MVP."""
+"""Pydantic models for SA-LogiFlow v2.0."""
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
 from enum import Enum
 
 
+# ==================== Enums ====================
+
 class Platform(str, Enum):
+    # 慧媒支持的国内平台
     XIAOHONGSHU = "xiaohongshu"
     DOUYIN = "douyin"
+    TIKTOK = "tiktok"
+    BILIBILI = "bilibili"
+    WEIBO = "weibo"
+    KUAISHOU = "kuaishou"
+    TOUTIAO = "toutiao"
+    ZHIHU = "zhihu"
+    WECHAT_CHANNELS = "wechat_channels"
+    WECHAT_MP = "wechat_mp"
+    BAIJIAHAO = "baijiahao"
+    # 外部平台（需 API 接入）
     FACEBOOK = "facebook"
     TWITTER = "twitter"
     REDDIT = "reddit"
 
 
-class TaskStatus(str, Enum):
+class UserRole(str, Enum):
+    ADMIN = "admin"
+    EDITOR = "editor"
+    REVIEWER = "reviewer"
+
+
+class ContentStatus(str, Enum):
+    """内容审批状态机: draft → pending_review → approved → queued → published"""
     DRAFT = "draft"
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
     QUEUED = "queued"
-    REVIEWING = "reviewing"
     PUBLISHED = "published"
     FAILED = "failed"
+    REJECTED = "rejected"
 
 
 class AccountStatus(str, Enum):
@@ -27,7 +48,38 @@ class AccountStatus(str, Enum):
     ERROR = "error"
 
 
-# --- Content Generation ---
+# ==================== Auth ====================
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    role: UserRole = UserRole.EDITOR
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: UserRole
+    username: str
+    display_name: str
+
+
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    role: UserRole
+    display_name: str
+    status: str
+
+
+# ==================== Content Generation ====================
+
 class GenerateRequest(BaseModel):
     topic: str = Field(..., description="物流主题，如 '德班港拥堵'")
     category: str = Field(default="port_rates", description="主题分类")
@@ -49,18 +101,7 @@ class GenerateResponse(BaseModel):
     generated_at: str
 
 
-# --- Queue ---
-class QueueItem(BaseModel):
-    id: Optional[int] = None
-    title: str
-    body: str
-    platform: Platform
-    hashtags: list[str] = []
-    status: TaskStatus = TaskStatus.QUEUED
-    scheduled_at: Optional[str] = None
-    created_at: Optional[str] = None
-    error_msg: Optional[str] = None
-
+# ==================== Queue ====================
 
 class QueueCreateRequest(BaseModel):
     title: str
@@ -68,18 +109,15 @@ class QueueCreateRequest(BaseModel):
     platforms: list[Platform]
     hashtags: list[str] = []
     scheduled_at: Optional[str] = None
+    status: ContentStatus = ContentStatus.DRAFT
 
 
-# --- Accounts ---
-class Account(BaseModel):
-    id: Optional[int] = None
-    platform: Platform
-    name: str
-    account_id: str
-    status: AccountStatus = AccountStatus.ACTIVE
-    config_summary: str = ""
-    last_sync: Optional[str] = None
+class ReviewRequest(BaseModel):
+    action: str = Field(..., description="'approve' or 'reject'")
+    note: str = ""
 
+
+# ==================== Accounts ====================
 
 class AccountCreateRequest(BaseModel):
     platform: Platform
@@ -88,7 +126,8 @@ class AccountCreateRequest(BaseModel):
     config_summary: str = ""
 
 
-# --- Topics ---
+# ==================== Topics ====================
+
 class TopicCategory(BaseModel):
     id: str
     name_zh: str
