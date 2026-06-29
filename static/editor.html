@@ -3,368 +3,232 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>SA-LogiFlow - Content Studio</title>
+<title>AI 工作区 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<script>
-tailwind.config = {
-    theme: { extend: { colors: {
-        dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
-        accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
-    }}}
-}
-</script>
+<link rel="stylesheet" href="/static/design-system.css"/>
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
-    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
-    .preview-tab-active { color: #818cf8; border-bottom: 2px solid #6366f1; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .animate-spin { animation: spin 1s linear infinite; }
-    .fade-in { animation: fadeIn 0.3s ease-in; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+.workspace-grid { flex: 1; display: grid; grid-template-columns: 280px minmax(0, 1fr) 360px; gap: 16px; overflow: hidden; }
+.col-knowledge,
+.col-editor,
+.col-preview {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid rgba(229,230,235,0.86);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+}
+.toolbar { padding: 8px 12px; border-bottom: 1px solid var(--border-light); display: flex; gap: 4px; background:var(--bg-subcard); }
+.toolbar button { padding: 6px 8px; border-radius: var(--radius-sm); border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 16px; }
+.toolbar button:hover { background: var(--bg-secondary); color: var(--text-primary); }
+.preview-card { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; background: white; box-shadow:var(--shadow-sm); }
+.preview-card.dark { background: #1a1a1a; border-color: #333; }
+.col-knowledge .nav-item {
+    width: 100%;
+    height: auto;
+    display: flex;
+    justify-content: flex-start;
+    place-items: initial;
+}
+.col-knowledge .nav-item span {
+    position: static;
+    transform: none;
+    opacity: 1;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    box-shadow: none;
+    font-size: 12px;
+}
+.col-knowledge .nav-item:hover span {
+    transform: none;
+}
+@media (max-width: 1180px) {
+    .workspace-grid { grid-template-columns: 1fr; overflow: visible; }
+    .col-knowledge, .col-editor, .col-preview { min-height: 360px; }
+}
 </style>
 </head>
-<body class="text-gray-100 min-h-screen">
-<div class="flex h-screen overflow-hidden">
-    <!-- Sidebar -->
-    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
-                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
-            </div>
-            <div>
-                <span class="font-bold text-lg tracking-tight text-white">LogiFlow</span>
-                <p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p>
-            </div>
-        </div>
-        <nav class="flex-1 px-3 py-4 space-y-1">
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/home.html">
-                <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon>
-                <span class="text-sm font-medium">Dashboard</span>
-            </a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/accounts.html">
-                <iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon>
-                <span class="text-sm font-medium">Accounts</span>
-            </a>
-            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/editor.html">
-                <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon>
-                <span class="text-sm font-medium">Content Studio</span>
-            </a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/queue.html">
-                <iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon>
-                <span class="text-sm font-medium">Publish Queue</span>
-            </a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/config.html">
-                <iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon>
-                <span class="text-sm font-medium">Settings</span>
-            </a>
-        </nav>
-    </aside>
-
-    <!-- Main -->
-    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header class="h-14 glass border-b border-dark-700/50 flex items-center justify-between px-6 flex-none">
-            <h1 class="text-base font-semibold text-white">Content Studio</h1>
-            <div class="flex items-center gap-3">
-                <span id="autoSave" class="text-xs text-dark-400"></span>
-                <button onclick="saveDraft()" class="px-3 py-1.5 rounded-lg border border-dark-600 text-xs text-dark-300 hover:text-white hover:border-accent-500/50 transition-all">Save Draft</button>
-            </div>
-        </header>
-
-        <div class="flex-1 flex overflow-hidden">
-            <!-- Left: Editor -->
-            <div class="w-1/2 border-r border-dark-700/50 flex flex-col overflow-y-auto p-5 space-y-4">
-                <!-- Topic Selection -->
-                <div class="glass rounded-xl p-4 border border-dark-700/50">
-                    <label class="text-xs font-medium text-dark-300 uppercase tracking-wider mb-2 block">Topic Selection</label>
-                    <div class="flex gap-2">
-                        <select id="topicCategory" onchange="loadTopics()" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white focus:border-accent-500 focus:outline-none">
-                            <option value="">Select category...</option>
-                        </select>
-                        <select id="topicSelect" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white focus:border-accent-500 focus:outline-none">
-                            <option value="">Select topic...</option>
-                        </select>
-                    </div>
-                    <input id="customTopic" type="text" placeholder="Or enter custom topic..." class="w-full mt-2 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none"/>
-                </div>
-
-                <!-- AI Generator -->
-                <div class="glass rounded-xl p-4 border border-accent-500/20 bg-gradient-to-br from-accent-500/5 to-transparent">
-                    <div class="flex items-center justify-between mb-3">
-                        <div class="flex items-center gap-2">
-                            <div class="p-1.5 rounded-lg bg-accent-500/10">
-                                <iconify-icon icon="mdi:sparkles" width="16" class="text-accent-400"></iconify-icon>
-                            </div>
-                            <span class="text-sm font-semibold text-white">AI Generator</span>
-                        </div>
-                        <button id="generateBtn" onclick="generateContent()" class="px-4 py-2 bg-gradient-to-r from-accent-500 to-accent-600 text-white text-xs font-semibold rounded-lg hover:from-accent-600 hover:to-accent-700 transition-all shadow-lg shadow-accent-500/25">
-                            Generate
-                        </button>
-                    </div>
-                    <div class="grid grid-cols-2 gap-3">
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Tone</label>
-                            <select id="toneSelect" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
-                                <option value="professional">Professional</option>
-                                <option value="friendly">Friendly</option>
-                                <option value="urgent">Urgent</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Length</label>
-                            <select id="lengthSelect" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
-                                <option value="short">Short</option>
-                                <option value="medium" selected>Medium</option>
-                                <option value="long">Long</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mt-3">
-                        <label class="text-[10px] text-dark-400 uppercase font-medium mb-1.5 block">Platforms</label>
-                        <div class="flex gap-2 flex-wrap">
-                            <label class="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded-lg bg-dark-800/50 border border-dark-600 hover:border-accent-500/30 transition-colors">
-                                <input type="checkbox" class="platform-cb accent-accent-500" value="xiaohongshu" checked> <iconify-icon icon="ri:xiaohongshu-fill" class="text-red-400"></iconify-icon> XHS
-                            </label>
-                            <label class="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded-lg bg-dark-800/50 border border-dark-600 hover:border-accent-500/30 transition-colors">
-                                <input type="checkbox" class="platform-cb accent-accent-500" value="douyin"> <iconify-icon icon="ri:tiktok-fill" class="text-white"></iconify-icon> Douyin
-                            </label>
-                            <label class="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded-lg bg-dark-800/50 border border-dark-600 hover:border-accent-500/30 transition-colors">
-                                <input type="checkbox" class="platform-cb accent-accent-500" value="facebook" checked> <iconify-icon icon="ri:facebook-box-fill" class="text-blue-400"></iconify-icon> Facebook
-                            </label>
-                            <label class="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded-lg bg-dark-800/50 border border-dark-600 hover:border-accent-500/30 transition-colors">
-                                <input type="checkbox" class="platform-cb accent-accent-500" value="twitter" checked> <iconify-icon icon="ri:twitter-x-fill" class="text-white"></iconify-icon> Twitter
-                            </label>
-                            <label class="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded-lg bg-dark-800/50 border border-dark-600 hover:border-accent-500/30 transition-colors">
-                                <input type="checkbox" class="platform-cb accent-accent-500" value="reddit"> <iconify-icon icon="ri:reddit-fill" class="text-orange-400"></iconify-icon> Reddit
-                            </label>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Status -->
-                <div id="genStatus" class="hidden glass rounded-lg p-3 border border-amber-500/20 bg-amber-500/5 text-sm text-amber-300 flex items-center gap-2">
-                    <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                    <span id="genStatusText">Generating...</span>
-                </div>
-
-                <!-- Editor -->
-                <div class="flex-1 flex flex-col">
-                    <div class="flex items-center justify-between mb-2">
-                        <label class="text-xs font-medium text-dark-300 uppercase tracking-wider">Content Editor</label>
-                        <button onclick="addToQueue()" class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold rounded-lg hover:bg-emerald-500/20 transition-all flex items-center gap-1">
-                            <iconify-icon icon="mdi:send" width="14"></iconify-icon> Add to Queue
-                        </button>
-                    </div>
-                    <div class="flex-1 glass rounded-xl border border-dark-700/50 flex flex-col overflow-hidden">
-                        <div class="p-3 border-b border-dark-700/30 flex gap-1">
-                            <button class="p-1.5 rounded hover:bg-dark-700/50 text-dark-400 hover:text-white"><iconify-icon icon="mdi:format-bold" width="16"></iconify-icon></button>
-                            <button class="p-1.5 rounded hover:bg-dark-700/50 text-dark-400 hover:text-white"><iconify-icon icon="mdi:format-italic" width="16"></iconify-icon></button>
-                            <button class="p-1.5 rounded hover:bg-dark-700/50 text-dark-400 hover:text-white"><iconify-icon icon="mdi:format-list-bulleted" width="16"></iconify-icon></button>
-                        </div>
-                        <textarea id="editorContent" class="flex-1 p-4 bg-transparent text-sm text-white placeholder:text-dark-500 focus:outline-none resize-none" placeholder="Select a topic and click 'Generate', or type directly..."></textarea>
-                    </div>
-                    <div class="mt-2 flex gap-2">
-                        <input id="editorTitle" type="text" placeholder="Title" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none font-medium"/>
-                        <input id="editorHashtags" type="text" placeholder="Tags (comma separated)" class="w-48 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none"/>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Right: Preview -->
-            <div class="w-1/2 bg-dark-950/50 flex flex-col">
-                <div class="border-b border-dark-700/50 px-5 flex items-center h-10 flex-none">
-                    <div id="previewTabs" class="flex gap-4 h-full">
-                        <button class="h-full px-2 text-xs font-medium preview-tab-active flex items-center gap-1.5" onclick="switchPreview('xiaohongshu', this)">
-                            <iconify-icon icon="ri:xiaohongshu-fill" class="text-red-400"></iconify-icon> XHS
-                        </button>
-                        <button class="h-full px-2 text-xs font-medium text-dark-400 flex items-center gap-1.5 hover:text-white" onclick="switchPreview('facebook', this)">
-                            <iconify-icon icon="ri:facebook-box-fill" class="text-blue-400"></iconify-icon> Facebook
-                        </button>
-                        <button class="h-full px-2 text-xs font-medium text-dark-400 flex items-center gap-1.5 hover:text-white" onclick="switchPreview('twitter', this)">
-                            <iconify-icon icon="ri:twitter-x-fill"></iconify-icon> Twitter
-                        </button>
-                        <button class="h-full px-2 text-xs font-medium text-dark-400 flex items-center gap-1.5 hover:text-white" onclick="switchPreview('reddit', this)">
-                            <iconify-icon icon="ri:reddit-fill" class="text-orange-400"></iconify-icon> Reddit
-                        </button>
-                        <button class="h-full px-2 text-xs font-medium text-dark-400 flex items-center gap-1.5 hover:text-white" onclick="switchPreview('douyin', this)">
-                            <iconify-icon icon="ri:tiktok-fill"></iconify-icon> Douyin
-                        </button>
-                    </div>
-                </div>
-                <div id="previewArea" class="flex-1 p-6 flex justify-center items-start overflow-y-auto">
-                    <div id="previewContent" class="text-dark-500 text-center mt-20">
-                        <div class="w-16 h-16 rounded-2xl bg-dark-800/50 flex items-center justify-center mx-auto mb-4">
-                            <iconify-icon icon="mdi:sparkles" width="28" class="text-dark-600"></iconify-icon>
-                        </div>
-                        <p class="text-base font-medium text-dark-400">Click "Generate"</p>
-                        <p class="text-sm mt-1">AI will create platform-specific content</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </main>
-</div>
-
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
 <script>
-const API = '';
-
-async function loadCategories() {
-    try {
-        const resp = await fetch(`${API}/api/topics`);
-        const cats = await resp.json();
-        const sel = document.getElementById('topicCategory');
-        cats.forEach(cat => {
-            const opt = document.createElement('option');
-            opt.value = cat.id;
-            opt.textContent = cat.name_zh;
-            sel.appendChild(opt);
-        });
-    } catch (e) { console.error('Failed to load categories:', e); }
-}
-
-async function loadTopics() {
-    const catId = document.getElementById('topicCategory').value;
-    const sel = document.getElementById('topicSelect');
-    sel.innerHTML = '<option value="">Select topic...</option>';
-    if (!catId) return;
-    try {
-        const resp = await fetch(`${API}/api/topics/${catId}`);
-        const data = await resp.json();
-        data.topics.forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t;
-            opt.textContent = t;
-            sel.appendChild(opt);
-        });
-    } catch (e) { console.error('Failed to load topics:', e); }
-}
-
-function getSelectedPlatforms() {
-    return Array.from(document.querySelectorAll('.platform-cb:checked')).map(cb => cb.value);
-}
+const PAGE_ID = 'editor';
+const platformInfo = {
+    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: '#FF2442', name: '小红书' },
+    douyin: { icon: 'ri:tiktok-fill', color: '#000', name: '抖音' },
+    facebook: { icon: 'ri:facebook-box-fill', color: '#1877F2', name: 'Facebook' },
+    twitter: { icon: 'ri:twitter-x-fill', color: '#1DA1F2', name: 'Twitter' },
+    reddit: { icon: 'ri:reddit-fill', color: '#FF4500', name: 'Reddit' },
+};
 
 let generatedContents = {};
-let currentPreviewPlatform = 'xiaohongshu';
+let currentPreview = 'xiaohongshu';
+let categories = [];
 
-async function generateContent() {
-    const topic = document.getElementById('topicSelect').value || document.getElementById('customTopic').value;
-    if (!topic) { alert('Please select a topic'); return; }
-    const platforms = getSelectedPlatforms();
-    if (platforms.length === 0) { alert('Select at least one platform'); return; }
+async function init() {
+    try { const r = await apiFetch('/api/topics'); categories = await r.json(); } catch(e) { categories = []; }
 
-    const btn = document.getElementById('generateBtn');
-    const status = document.getElementById('genStatus');
-    btn.disabled = true;
-    btn.innerHTML = '<svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg> Generating...';
-    status.classList.remove('hidden');
-
-    try {
-        const resp = await fetch(`${API}/api/generate`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                topic, category: document.getElementById('topicCategory').value || 'custom',
-                platforms, tone: document.getElementById('toneSelect').value, length: document.getElementById('lengthSelect').value,
-            })
-        });
-        const data = await resp.json();
-        generatedContents = {};
-        data.contents.forEach(c => { generatedContents[c.platform] = c; });
-        const first = data.contents[0];
-        if (first) {
-            document.getElementById('editorTitle').value = first.title;
-            document.getElementById('editorContent').value = first.body;
-            document.getElementById('editorHashtags').value = (first.hashtags || []).join(', ');
-        }
-        currentPreviewPlatform = platforms[0];
-        renderPreview(currentPreviewPlatform);
-    } catch (e) {
-        console.error('Generation failed:', e);
-        alert('Generation failed: ' + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<iconify-icon icon="mdi:sparkles" width="14"></iconify-icon> Generate';
-        status.classList.add('hidden');
-    }
-}
-
-function renderPreview(platform) {
-    const content = generatedContents[platform];
-    const area = document.getElementById('previewContent');
-    if (!content) {
-        area.innerHTML = '<div class="text-dark-500 text-center mt-20"><p>No content for this platform</p></div>';
-        return;
-    }
-    area.innerHTML = `
-        <div class="max-w-lg w-full fade-in">
-            <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                <div class="p-5">
-                    <h3 class="font-bold text-base mb-3 text-white">${content.title}</h3>
-                    <p class="text-sm leading-relaxed whitespace-pre-wrap text-dark-200">${content.body}</p>
-                    ${(content.hashtags && content.hashtags.length) ? `<div class="mt-4 flex flex-wrap gap-1.5">${content.hashtags.map(h => `<span class="px-2 py-0.5 bg-accent-500/10 text-accent-400 text-xs rounded-full">#${h}</span>`).join('')}</div>` : ''}
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">AI 工作区</h1>
+            <div style="display:flex;gap:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="saveDraft()"><iconify-icon icon="mdi:content-save" width="16"></iconify-icon> 保存草稿</button>
+                <button class="btn btn-primary btn-sm" onclick="submitToQueue()"><iconify-icon icon="mdi:send" width="16"></iconify-icon> 提交发布</button>
+            </div>
+        </div>
+        <div class="workspace-grid">
+            <!-- 左栏：知识库 -->
+            <div class="col-knowledge">
+                <div style="padding:16px;border-bottom:1px solid var(--border-light);">
+                    <div style="font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+                        <iconify-icon icon="mdi:book-open-outline" style="color:var(--primary);"></iconify-icon> 知识库
+                    </div>
+                    <input class="input" placeholder="搜索知识库..." style="font-size:12px;padding:6px 10px;"/>
+                </div>
+                <div style="flex:1;overflow-y:auto;padding:8px;">
+                    ${categories.map(cat => `
+                        <div style="margin-bottom:4px;">
+                            <div class="nav-item" style="font-size:12px;padding:8px 10px;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+                                <iconify-icon icon="${cat.icon}" width="16" style="color:var(--primary);"></iconify-icon>
+                                <span style="flex:1;">${cat.name_zh}</span>
+                                <span style="font-size:10px;color:var(--text-muted);">${cat.topics.length}</span>
+                            </div>
+                            <div style="display:none;padding-left:26px;">
+                                ${cat.topics.map(t => `<div style="padding:5px 8px;font-size:12px;color:var(--text-secondary);cursor:pointer;border-radius:var(--radius-sm);" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''" onclick="selectTopic('${t.replace(/'/g,"\\'")}','${cat.id}')">${t}</div>`).join('')}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+                <div style="padding:12px;border-top:1px solid var(--border-light);">
+                    <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AI 对话</div>
+                    <div style="display:flex;gap:6px;">
+                        <input id="aiInput" class="input" placeholder="输入需求..." style="font-size:12px;padding:6px 10px;"/>
+                        <button class="btn btn-primary btn-sm" onclick="generateContent()" id="genBtn"><iconify-icon icon="mdi:sparkles" width="14"></iconify-icon></button>
+                    </div>
                 </div>
             </div>
-            <div class="mt-3 flex justify-end">
-                <button onclick="editPlatformContent('${platform}')" class="px-3 py-1.5 text-xs border border-dark-600 rounded-lg text-dark-300 hover:text-white hover:border-accent-500/50 transition-all">Edit this version</button>
+            <!-- 中栏：编辑器 -->
+            <div class="col-editor">
+                <div style="padding:12px 16px;border-bottom:1px solid var(--border-light);display:flex;gap:8px;">
+                    <select id="topicCategory" class="select" style="flex:1;font-size:12px;" onchange="loadTopics()"><option value="">选择分类...</option>${categories.map(c=>`<option value="${c.id}">${c.name_zh}</option>`).join('')}</select>
+                    <select id="topicSelect" class="select" style="flex:1;font-size:12px;"><option value="">选择主题...</option></select>
+                    <select id="toneSelect" class="select" style="font-size:12px;"><option value="professional">专业严谨</option><option value="friendly">亲切友好</option><option value="urgent">紧急通知</option></select>
+                    <select id="lengthSelect" class="select" style="font-size:12px;"><option value="short">短</option><option value="medium" selected>中</option><option value="long">长</option></select>
+                </div>
+                <div class="toolbar">
+                    <button title="加粗"><iconify-icon icon="mdi:format-bold"></iconify-icon></button>
+                    <button title="列表"><iconify-icon icon="mdi:format-list-bulleted"></iconify-icon></button>
+                    <div style="flex:1;"></div>
+                    <span id="charCount" style="font-size:11px;color:var(--text-muted);padding:6px 0;">0 字</span>
+                </div>
+                <div style="flex:1;padding:16px;overflow-y:auto;display:flex;flex-direction:column;">
+                    <input id="editorTitle" class="input" placeholder="标题" style="font-size:18px;font-weight:700;border:none;padding:0;margin-bottom:12px;"/>
+                    <textarea id="editorContent" style="flex:1;width:100%;border:none;outline:none;resize:none;font-size:14px;line-height:1.8;color:var(--text-primary);" placeholder="选择主题后点击生成，或直接输入文案..."></textarea>
+                </div>
+                <div style="padding:8px 16px;border-top:1px solid var(--border-light);">
+                    <input id="editorHashtags" class="input" placeholder="标签（逗号分隔）" style="font-size:12px;padding:6px 10px;"/>
+                </div>
             </div>
-        </div>`;
+            <!-- 右栏：预览 -->
+            <div class="col-preview">
+                <div style="padding:0 12px;border-bottom:1px solid var(--border-light);display:flex;">
+                    ${Object.entries(platformInfo).map(([k,v])=>`<button class="preview-tab" data-platform="${k}" onclick="switchPreview('${k}',this)" style="padding:10px 12px;font-size:11px;font-weight:600;border:none;background:none;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;">${v.name}</button>`).join('')}
+                </div>
+                <div id="previewArea" style="flex:1;overflow-y:auto;padding:20px;">
+                    <div class="empty-state" style="padding-top:80px;"><iconify-icon icon="mdi:sparkles" width="48"></iconify-icon><p style="margin-top:8px;">点击生成按钮预览内容</p></div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+
+    const firstTab = document.querySelector('.preview-tab');
+    if (firstTab) { firstTab.style.color='var(--primary)'; firstTab.style.borderBottomColor='var(--primary)'; }
+    document.getElementById('editorContent').addEventListener('input', e => { document.getElementById('charCount').textContent = e.target.value.length + ' 字'; });
+}
+
+function loadTopics() {
+    const catId = document.getElementById('topicCategory').value;
+    const sel = document.getElementById('topicSelect');
+    sel.innerHTML = '<option value="">选择主题...</option>';
+    const cat = categories.find(c=>c.id===catId);
+    if (cat) cat.topics.forEach(t=>{ const o=document.createElement('option'); o.value=t; o.textContent=t; sel.appendChild(o); });
+}
+
+function selectTopic(topic, catId) {
+    document.getElementById('topicCategory').value = catId;
+    loadTopics();
+    document.getElementById('topicSelect').value = topic;
 }
 
 function switchPreview(platform, btn) {
-    currentPreviewPlatform = platform;
-    document.querySelectorAll('#previewTabs button').forEach(b => {
-        b.classList.remove('preview-tab-active');
-        b.classList.add('text-dark-400');
-    });
-    btn.classList.add('preview-tab-active');
-    btn.classList.remove('text-dark-400');
+    currentPreview = platform;
+    document.querySelectorAll('.preview-tab').forEach(b=>{b.style.color='var(--text-muted)';b.style.borderBottomColor='transparent';});
+    btn.style.color='var(--primary)'; btn.style.borderBottomColor='var(--primary)';
     renderPreview(platform);
 }
 
-function editPlatformContent(platform) {
+function renderPreview(platform) {
     const c = generatedContents[platform];
-    if (c) {
-        document.getElementById('editorTitle').value = c.title;
-        document.getElementById('editorContent').value = c.body;
-        document.getElementById('editorHashtags').value = (c.hashtags || []).join(', ');
-    }
+    const area = document.getElementById('previewArea');
+    const p = platformInfo[platform];
+    if (!c) { area.innerHTML='<div class="empty-state" style="padding-top:60px;"><iconify-icon icon="mdi:file-outline" width="40"></iconify-icon><p style="margin-top:8px;">该平台暂无内容</p></div>'; return; }
+    const isDark = platform==='douyin';
+    area.innerHTML=`<div class="fade-in">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;"><iconify-icon icon="${p.icon}" style="color:${p.color};font-size:20px;"></iconify-icon><span style="font-size:13px;font-weight:700;">${p.name} 预览</span></div>
+        <div class="preview-card ${isDark?'dark':''}" style="padding:20px;">
+            <h3 style="font-size:15px;font-weight:700;margin-bottom:10px;color:${isDark?'white':'var(--text-primary)'};">${escapeHtml(c.title)}</h3>
+            <p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:${isDark?'#ccc':'var(--text-secondary)'};">${escapeHtml(c.body)}</p>
+            ${(c.hashtags||[]).length?`<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:4px;">${c.hashtags.map(h=>`<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:${isDark?'#333':'#EFF6FF'};color:${isDark?'#60A5FA':'var(--primary)'};">#${escapeHtml(h)}</span>`).join('')}</div>`:''}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:6px;justify-content:flex-end;">
+            <button class="btn btn-secondary btn-sm" onclick="editPlatform('${platform}')">编辑</button>
+            <button class="btn btn-secondary btn-sm" onclick="copyPlatform('${platform}')">复制</button>
+        </div>
+    </div>`;
 }
 
-async function addToQueue() {
-    const title = document.getElementById('editorTitle').value;
-    const body = document.getElementById('editorContent').value;
-    if (!title || !body) { alert('Generate or enter content first'); return; }
-    const platforms = Object.keys(generatedContents).length > 0 ? Object.keys(generatedContents) : getSelectedPlatforms();
-    if (platforms.length === 0) { alert('Select at least one platform'); return; }
+function editPlatform(p) { const c=generatedContents[p]; if(c){document.getElementById('editorTitle').value=c.title;document.getElementById('editorContent').value=c.body;document.getElementById('editorHashtags').value=(c.hashtags||[]).join(', ');}}
+async function copyPlatform(p) { const c=generatedContents[p]; if(!c)return; try{await navigator.clipboard.writeText(`${c.title}\n\n${c.body}\n\n${(c.hashtags||[]).map(h=>'#'+h).join(' ')}`);showToast('已复制');}catch(e){showToast('复制失败','error');}}
+
+async function generateContent() {
+    const topic = document.getElementById('topicSelect').value || document.getElementById('aiInput').value;
+    if (!topic) { showToast('请选择主题或输入需求','error'); return; }
+    const platforms = ['xiaohongshu','facebook','twitter','reddit'];
+    const btn = document.getElementById('genBtn'); btn.disabled = true;
     try {
-        const resp = await fetch(`${API}/api/queue`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                title, body, platforms,
-                hashtags: document.getElementById('editorHashtags').value.split(',').map(s => s.trim()).filter(Boolean),
-            })
-        });
+        const resp = await apiFetch('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ topic, category:document.getElementById('topicCategory').value||'custom', platforms, tone:document.getElementById('toneSelect').value, length:document.getElementById('lengthSelect').value }) });
         const data = await resp.json();
-        alert(`Added ${data.added} items to queue`);
-    } catch (e) { alert('Failed: ' + e.message); }
+        generatedContents = {}; data.contents.forEach(c=>generatedContents[c.platform]=c);
+        const first = data.contents[0];
+        if (first) { document.getElementById('editorTitle').value=first.title; document.getElementById('editorContent').value=first.body; document.getElementById('editorHashtags').value=(first.hashtags||[]).join(', '); document.getElementById('charCount').textContent=first.body.length+' 字'; }
+        renderPreview(currentPreview); showToast('内容生成成功');
+    } catch(e) { showToast('生成失败','error'); }
+    finally { btn.disabled = false; }
 }
 
-function saveDraft() {
-    localStorage.setItem('draft', JSON.stringify({
-        title: document.getElementById('editorTitle').value,
-        body: document.getElementById('editorContent').value,
-        hashtags: document.getElementById('editorHashtags').value,
-    }));
-    document.getElementById('autoSave').textContent = 'Saved';
-    setTimeout(() => document.getElementById('autoSave').textContent = '', 2000);
+async function submitToQueue() {
+    const title=document.getElementById('editorTitle').value, body=document.getElementById('editorContent').value;
+    if (!title||!body) { showToast('请先生成或输入内容','error'); return; }
+    const platforms=Object.keys(generatedContents);
+    if (!platforms.length) { showToast('请先生成内容','error'); return; }
+    let added=0;
+    for (const [platform,c] of Object.entries(generatedContents)) {
+        try { await apiFetch('/api/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:c.title,body:c.body,platforms:[platform],hashtags:c.hashtags||[],status:'pending_review'})}); added++; } catch(e){}
+    }
+    showToast(`已提交 ${added} 个平台到审核队列`);
 }
 
-loadCategories();
+function saveDraft() { localStorage.setItem('draft',JSON.stringify({title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value})); showToast('草稿已保存'); }
+
+init();
 </script>
 </body>
 </html>

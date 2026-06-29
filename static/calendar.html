@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>发布日历 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css"/>
+<style>
+.cal-grid { display: grid; grid-template-columns: 64px repeat(7, minmax(0, 1fr)); background:var(--bg-card); }
+.cal-cell { border-right: 1px solid var(--border-light); border-bottom: 1px solid var(--border-light); min-height: 52px; padding: 5px; position: relative; }
+.cal-header { background: var(--bg-subcard); font-size: 11px; font-weight: 700; color: var(--text-muted); text-align: center; padding: 12px 4px; border-right: 1px solid var(--border-light); }
+.cal-time { font-size: 11px; color: var(--text-muted); text-align: right; padding: 6px 10px; border-right: 1px solid var(--border-light); display: flex; align-items: flex-start; justify-content: flex-end; min-height: 52px; background:#FCFDFF; }
+.cal-event { font-size: 10px; font-weight: 700; padding: 4px 7px; border-radius: 8px; margin-bottom: 3px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: white; box-shadow:var(--shadow-sm); }
+.cal-event.xiaohongshu { background: #FF2442; }
+.cal-event.douyin { background: #333; }
+.cal-event.facebook { background: #1877F2; }
+.cal-event.twitter { background: #1DA1F2; }
+.cal-event.reddit { background: #FF4500; }
+.best-time { background: rgba(123,97,255,0.045); }
+.today-col { background: rgba(84,160,255,0.055); }
+</style>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
+<script>
+const PAGE_ID = 'calendar';
+const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const DAYS = ['周一','周二','周三','周四','周五','周六','周日'];
+const HOURS = [8,9,10,11,12,13,14,15,16,17,18,19,20,21,22];
+
+// 最佳发布时段
+const BEST_TIMES = {
+    xiaohongshu: [{day:1,h:19},{day:1,h:20},{day:3,h:19},{day:3,h:20},{day:5,h:19},{day:5,h:20}],
+    facebook: [{day:0,h:10},{day:0,h:11},{day:2,h:10},{day:2,h:11}],
+    twitter: [{day:1,h:14},{day:1,h:15},{day:3,h:14},{day:3,h:15}],
+    douyin: [{day:2,h:12},{day:4,h:18},{day:4,h:19}],
+    reddit: [{day:0,h:9},{day:2,h:9},{day:4,h:9}],
+};
+
+let items = [];
+let viewMode = 'week';
+let weekOffset = 0;
+
+function getWeekDates(offset) {
+    const now = new Date();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - now.getDay() + 1 + offset * 7);
+    return Array.from({length:7}, (_,i) => { const d = new Date(monday); d.setDate(monday.getDate()+i); return d; });
+}
+
+function formatDate(d) { return `${d.getMonth()+1}/${d.getDate()}`; }
+function isToday(d) { const n=new Date(); return d.getFullYear()===n.getFullYear()&&d.getMonth()===n.getMonth()&&d.getDate()===n.getDate(); }
+
+async function init() {
+    const resp = await apiFetch('/api/queue');
+    items = await resp.json();
+    render();
+}
+
+function render() {
+    const dates = getWeekDates(weekOffset);
+    const todayIdx = dates.findIndex(d => isToday(d));
+
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">发布日历</h1>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn btn-ghost btn-sm" onclick="weekOffset--;render();"><iconify-icon icon="mdi:chevron-left" width="18"></iconify-icon></button>
+                <span style="font-size:14px;font-weight:600;min-width:160px;text-align:center;">${formatDate(dates[0])} — ${formatDate(dates[6])}</span>
+                <button class="btn btn-ghost btn-sm" onclick="weekOffset++;render();"><iconify-icon icon="mdi:chevron-right" width="18"></iconify-icon></button>
+                <button class="btn btn-secondary btn-sm" onclick="weekOffset=0;render();">今天</button>
+            </div>
+        </div>
+        <div class="page-body">
+            <!-- 日历主体 -->
+            <div class="card" style="overflow:hidden;">
+                <div class="cal-grid">
+                    <!-- Header -->
+                    <div class="cal-header" style="border-left:none;"></div>
+                    ${DAYS.map((d,i) => `<div class="cal-header ${i===todayIdx?'today-col':''}" style="font-size:12px;${i===todayIdx?'color:var(--primary);font-weight:700;':''}"><div>${d}</div><div style="font-size:18px;font-weight:700;margin-top:2px;${i===todayIdx?'color:var(--primary);':''}">${formatDate(dates[i]).split('/')[1]}</div></div>`).join('')}
+                    <!-- Time rows -->
+                    ${HOURS.map(h => {
+                        const isBest = h >= 10 && h <= 12 || h >= 19 && h <= 21;
+                        return `
+                        <div class="cal-time">${h}:00</div>
+                        ${DAYS.map((_,di) => {
+                            const dayStr = `${dates[di].getFullYear()}-${String(dates[di].getMonth()+1).padStart(2,'0')}-${String(dates[di].getDate()).padStart(2,'0')}`;
+                            const hourItems = items.filter(item => {
+                                if (!item.scheduled_at) return false;
+                                const parts = item.scheduled_at.split(' ');
+                                if (parts[0] !== dayStr) return false;
+                                const itemHour = parseInt(parts[1]?.split(':')[0]||'0');
+                                return itemHour === h;
+                            });
+                            const bestClass = isBest ? 'best-time' : '';
+                            return `<div class="cal-cell ${bestClass} ${di===todayIdx?'today-col':''}">
+                                ${hourItems.map(it => `<div class="cal-event ${it.platform}" title="${it.title}" onclick="showDetail(${it.id})">${platformNames[it.platform]||it.platform} ${it.title.substring(0,8)}</div>`).join('')}
+                            </div>`;
+                        }).join('')}`;
+                    }).join('')}
+                </div>
+            </div>
+
+            <!-- 最佳时段建议 -->
+            <div class="card" style="margin-top:16px;">
+                <div class="card-header"><span class="card-title"><iconify-icon icon="mdi:lightbulb-outline" style="color:var(--warning);margin-right:4px;"></iconify-icon> 最佳发布时段建议</span></div>
+                <div class="card-body">
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+                        ${Object.entries(BEST_TIMES).map(([platform, times]) => {
+                            const p = platformNames[platform];
+                            const dayLabels = [...new Set(times.map(t => DAYS[t.day]))].join('/');
+                            const hourRange = `${Math.min(...times.map(t=>t.h))}:00-${Math.max(...times.map(t=>t.h))+1}:00`;
+                            return `<div class="small-item-card">
+                                <div style="font-size:12px;font-weight:700;margin-bottom:4px;">${p}</div>
+                                <div style="font-size:11px;color:var(--text-secondary);">${dayLabels}</div>
+                                <div style="font-size:11px;color:var(--primary);font-weight:600;">${hourRange}</div>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function showDetail(id) {
+    const item = items.find(i=>i.id===id);
+    if (!item) return;
+    showToast(`${item.title} (${platformNames[item.platform]})`);
+}
+
+init();
+</script>
+</body>
+</html>

@@ -29,6 +29,19 @@ def get_conn():
         conn.close()
 
 
+def _table_columns(conn, table: str) -> set[str]:
+    """Return the set of column names for a given table."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(conn, table: str, column: str, col_def: str):
+    """Add a column to a table if it doesn't exist."""
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+        logger.info("数据库迁移: %s.%s 已添加", table, column)
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript("""
@@ -96,6 +109,13 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now'))
             );
         """)
+        # 迁移：为旧数据库添加缺失的列
+        _ensure_column(conn, "queue", "created_by", "INTEGER")
+        _ensure_column(conn, "queue", "reviewer_id", "INTEGER")
+        _ensure_column(conn, "queue", "review_note", "TEXT")
+        _ensure_column(conn, "queue", "reviewed_at", "TEXT")
+        _ensure_column(conn, "queue", "retry_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "accounts", "credentials", "TEXT DEFAULT '{}'")
     logger.info("数据库初始化完成: %s", DB_PATH)
 
 
@@ -187,9 +207,14 @@ def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status
         )
 
 
-def update_queue_status(item_id, status, error_msg=None):
+_UNSET = object()
+
+def update_queue_status(item_id, status, error_msg=None, scheduled_at=_UNSET):
     with get_conn() as conn:
-        conn.execute("UPDATE queue SET status=?, error_msg=? WHERE id=?", (status, error_msg, item_id))
+        if scheduled_at is _UNSET:
+            conn.execute("UPDATE queue SET status=?, error_msg=? WHERE id=?", (status, error_msg, item_id))
+        else:
+            conn.execute("UPDATE queue SET status=?, error_msg=?, scheduled_at=? WHERE id=?", (status, error_msg, scheduled_at, item_id))
 
 
 def update_queue_review(item_id: int, reviewer_id: int, status: str, review_note: str = None):

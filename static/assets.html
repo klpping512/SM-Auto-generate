@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>内容资产 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css"/>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
+<script>
+const PAGE_ID = 'assets';
+const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const statusMap = { draft:{label:'草稿',cls:'badge-gray'}, pending_review:{label:'待审核',cls:'badge-purple'}, approved:{label:'已通过',cls:'badge-blue'}, queued:{label:'待发布',cls:'badge-yellow'}, published:{label:'已发布',cls:'badge-green'}, failed:{label:'失败',cls:'badge-red'}, rejected:{label:'已驳回',cls:'badge-red'} };
+
+let allItems = [];
+let filterStatus = '';
+let filterPlatform = '';
+let searchText = '';
+
+async function init() {
+    const resp = await apiFetch('/api/queue');
+    allItems = await resp.json();
+    render();
+}
+
+function getFiltered() {
+    return allItems.filter(item => {
+        if (filterStatus && item.status !== filterStatus) return false;
+        if (filterPlatform && item.platform !== filterPlatform) return false;
+        if (searchText && !item.title.includes(searchText) && !item.body.includes(searchText)) return false;
+        return true;
+    });
+}
+
+function render() {
+    const filtered = getFiltered();
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">内容资产</h1>
+            <div style="display:flex;gap:8px;">
+                <a href="/editor.html" class="btn btn-primary btn-sm"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 新建内容</a>
+            </div>
+        </div>
+        <div class="page-body">
+            <!-- 筛选栏 -->
+            <div class="card" style="margin-bottom:16px;">
+                <div style="padding:16px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                    <input class="input" placeholder="搜索标题或内容..." style="width:240px;font-size:13px;" oninput="searchText=this.value;render();" value="${searchText}"/>
+                    <select class="select" style="font-size:13px;" onchange="filterPlatform=this.value;render();">
+                        <option value="">全部平台</option>
+                        ${Object.entries(platformNames).map(([k,v])=>`<option value="${k}" ${filterPlatform===k?'selected':''}>${v}</option>`).join('')}
+                    </select>
+                    <select class="select" style="font-size:13px;" onchange="filterStatus=this.value;render();">
+                        <option value="">全部状态</option>
+                        ${Object.entries(statusMap).map(([k,v])=>`<option value="${k}" ${filterStatus===k?'selected':''}>${v.label}</option>`).join('')}
+                    </select>
+                    <span style="font-size:12px;color:var(--text-muted);margin-left:auto;">共 ${filtered.length} 条</span>
+                </div>
+            </div>
+
+            <!-- 内容列表 -->
+            <div class="card">
+                <div class="card-body" style="padding:0;">
+                    <table class="data-table">
+                        <thead><tr>
+                            <th style="width:40px;"><input type="checkbox" onchange="toggleAll(this.checked)"/></th>
+                            <th>标题</th>
+                            <th style="width:80px;">平台</th>
+                            <th style="width:80px;">状态</th>
+                            <th style="width:140px;">创建时间</th>
+                            <th style="width:140px;">定时发布</th>
+                            <th style="width:100px;">操作</th>
+                        </tr></thead>
+                        <tbody>
+                            ${filtered.length === 0 ? `<tr><td colspan="7" class="empty-state"><iconify-icon icon="mdi:tray-arrow-down" width="40"></iconify-icon><p style="margin-top:8px;">暂无内容</p></td></tr>` :
+                            filtered.map(item => {
+                                const s = statusMap[item.status] || statusMap.draft;
+                                return `<tr>
+                                    <td><input type="checkbox" class="item-cb" value="${item.id}"/></td>
+                                    <td>
+                                        <div style="font-weight:600;font-size:13px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.title)}</div>
+                                        <div style="font-size:12px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${escapeHtml(item.body.substring(0,80))}</div>
+                                    </td>
+                                    <td><span style="font-size:12px;">${platformNames[item.platform]||item.platform}</span></td>
+                                    <td><span class="badge ${s.cls}">${s.label}</span></td>
+                                    <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(item.created_at)||'-'}</td>
+                                    <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(item.scheduled_at)||'-'}</td>
+                                    <td>
+                                        <div style="display:flex;gap:4px;">
+                                            <button class="btn btn-ghost btn-sm" onclick="copyItem(${item.id})" title="复制"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
+                                            <button class="btn btn-ghost btn-sm" onclick="deleteItem(${item.id})" title="删除"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
+                                        </div>
+                                    </td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function toggleAll(checked) { document.querySelectorAll('.item-cb').forEach(cb=>cb.checked=checked); }
+
+async function copyItem(id) {
+    const item = allItems.find(i=>i.id===id);
+    if (!item) return;
+    try { await navigator.clipboard.writeText(`${item.title}\n\n${item.body}\n\n${(item.hashtags||[]).map(h=>'#'+h).join(' ')}`); showToast('已复制'); } catch(e) { showToast('复制失败','error'); }
+}
+
+async function deleteItem(id) {
+    if (!confirm('确定删除？')) return;
+    try { await apiFetch(`/api/queue/${id}`,{method:'DELETE'}); allItems=allItems.filter(i=>i.id!==id); render(); showToast('已删除'); } catch(e) { showToast('删除失败','error'); }
+}
+
+init();
+</script>
+</body>
+</html>

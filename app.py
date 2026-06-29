@@ -14,7 +14,7 @@ import database as db
 import ai_engine
 import publisher
 from auth import (
-    create_access_token, verify_password,
+    create_access_token, verify_password, hash_password,
     get_current_user, require_role,
 )
 from models import (
@@ -38,7 +38,6 @@ async def lifespan(app: FastAPI):
     db.init_db()
     # 确保默认管理员存在
     if not db.get_user_by_username("admin"):
-        from auth import hash_password
         db.create_user("admin", hash_password("admin123"), "admin", "系统管理员")
         logger.info("已创建默认管理员: admin / admin123")
     # 从环境变量加载 API key
@@ -250,7 +249,11 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
 
 @app.put("/api/queue/{item_id}/status")
 async def update_status(item_id: int, body: dict, user=Depends(get_current_user)):
-    db.update_queue_status(item_id, body.get("status"), body.get("error_msg"))
+    scheduled_at = body.get("scheduled_at")
+    if scheduled_at is not None:
+        db.update_queue_status(item_id, body.get("status"), body.get("error_msg"), scheduled_at=scheduled_at)
+    else:
+        db.update_queue_status(item_id, body.get("status"), body.get("error_msg"))
     return {"status": "ok"}
 
 

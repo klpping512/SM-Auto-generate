@@ -3,221 +3,100 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>SA-LogiFlow - Accounts</title>
+<title>账号管理 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<script>
-tailwind.config = {
-    theme: { extend: { colors: {
-        dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
-        accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
-    }}}
-}
-</script>
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
-    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-</style>
+<link rel="stylesheet" href="/static/design-system.css"/>
 </head>
-<body class="text-gray-100 min-h-screen">
-<div class="flex h-screen overflow-hidden">
-    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
-                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
-            </div>
-            <div><span class="font-bold text-lg tracking-tight text-white">LogiFlow</span><p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p></div>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
+<script>
+const PAGE_ID = 'accounts';
+const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const platformIcons = { xiaohongshu:'ri:xiaohongshu-fill',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
+const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
+
+let accounts = [];
+let filterPlatform = '';
+
+async function init() {
+    const resp = await apiFetch('/api/accounts');
+    accounts = await resp.json();
+    render();
+}
+
+function render() {
+    const filtered = filterPlatform ? accounts.filter(a => a.platform === filterPlatform) : accounts;
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">账号管理</h1>
+            <button class="btn btn-primary btn-sm" onclick="showAddModal()"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 绑定新账号</button>
         </div>
-        <nav class="flex-1 px-3 py-4 space-y-1">
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/home.html"><iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon><span class="text-sm font-medium">Dashboard</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/accounts.html"><iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon><span class="text-sm font-medium">Accounts</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/editor.html"><iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon><span class="text-sm font-medium">Content Studio</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/queue.html"><iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon><span class="text-sm font-medium">Publish Queue</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/config.html"><iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon><span class="text-sm font-medium">Settings</span></a>
-        </nav>
-    </aside>
-
-    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header class="h-14 glass border-b border-dark-700/50 flex items-center justify-between px-6 flex-none">
-            <h1 class="text-base font-semibold text-white">Account Management</h1>
-            <button onclick="showAddModal()" class="px-4 py-2 bg-gradient-to-r from-accent-500 to-accent-600 text-white text-xs font-semibold rounded-lg hover:from-accent-600 hover:to-accent-700 transition-all shadow-lg shadow-accent-500/25 flex items-center gap-1.5">
-                <iconify-icon icon="mdi:plus" width="14"></iconify-icon> Add Account
-            </button>
-        </header>
-
-        <div class="flex-1 overflow-y-auto p-6">
-            <!-- Filters -->
-            <div class="flex gap-2 mb-5 overflow-x-auto pb-2">
-                <button onclick="filterAccounts(null)" class="filter-btn px-3 py-1.5 bg-accent-500/10 text-accent-400 border border-accent-500/20 rounded-lg text-xs font-medium" data-filter="all">All</button>
-                <button onclick="filterAccounts('xiaohongshu')" class="filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white" data-filter="xiaohongshu">XHS</button>
-                <button onclick="filterAccounts('douyin')" class="filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white" data-filter="douyin">Douyin</button>
-                <button onclick="filterAccounts('facebook')" class="filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white" data-filter="facebook">Facebook</button>
-                <button onclick="filterAccounts('twitter')" class="filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white" data-filter="twitter">Twitter</button>
-                <button onclick="filterAccounts('reddit')" class="filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white" data-filter="reddit">Reddit</button>
+        <div class="page-body">
+            <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+                <button class="btn ${!filterPlatform ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="filterPlatform='';render();">全部</button>
+                ${Object.entries(platformNames).map(([k, v]) => `<button class="btn ${filterPlatform === k ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="filterPlatform='${k}';render();">${v}</button>`).join('')}
             </div>
-
-            <!-- Accounts Table -->
-            <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                <table class="w-full text-left">
-                    <thead>
-                        <tr class="text-xs text-dark-400 uppercase tracking-wider border-b border-dark-700/30">
-                            <th class="px-5 py-3 font-medium">Platform & Account</th>
-                            <th class="px-5 py-3 font-medium">Status</th>
-                            <th class="px-5 py-3 font-medium">Config</th>
-                            <th class="px-5 py-3 font-medium">Last Sync</th>
-                            <th class="px-5 py-3 font-medium text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="accountTable" class="divide-y divide-dark-700/30">
-                        <tr><td colspan="5" class="px-5 py-8 text-center text-dark-500">Loading...</td></tr>
-                    </tbody>
-                </table>
+            <div class="card">
+                <div class="card-body" style="padding:0;">
+                    <table class="data-table">
+                        <thead><tr><th>平台 & 账号</th><th>状态</th><th>配置摘要</th><th>最后同步</th><th style="text-align:right;">操作</th></tr></thead>
+                        <tbody>
+                            ${filtered.length === 0 ? '<tr><td colspan="5" class="empty-state">暂无账号</td></tr>' :
+                            filtered.map(a => {
+                                const p = { icon: platformIcons[a.platform] || 'mdi:help', color: platformColors[a.platform] || '#6B7280', name: platformNames[a.platform] || a.platform };
+                                const active = a.status === 'active';
+                                return `<tr>
+                                    <td><div style="display:flex;align-items:center;gap:10px;">
+                                        <div style="width:32px;height:32px;border-radius:var(--radius-md);background:${p.color}15;color:${p.color};display:flex;align-items:center;justify-content:center;"><iconify-icon icon="${p.icon}" width="18"></iconify-icon></div>
+                                        <div><div style="font-weight:600;font-size:13px;">${escapeHtml(a.name)}</div><div style="font-size:11px;color:var(--text-muted);">ID: ${escapeHtml(a.account_id)}</div></div>
+                                    </div></td>
+                                    <td><span style="display:flex;align-items:center;gap:4px;font-size:12px;"><span style="width:6px;height:6px;border-radius:50%;background:${active ? '#10B981' : '#EF4444'};"></span>${active ? '已授权' : '已过期'}</span></td>
+                                    <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(a.config_summary) || '-'}</td>
+                                    <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.last_sync) || '-'}</td>
+                                    <td style="text-align:right;"><button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button></td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
             </div>
-        </div>
-    </main>
-</div>
-
-<!-- Add Modal -->
-<div id="addModal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-    <div class="glass rounded-2xl p-6 w-96 border border-dark-600">
-        <h3 class="font-semibold text-white mb-4">Add Account</h3>
-        <div class="space-y-3">
-            <div>
-                <label class="text-xs text-dark-400 mb-1 block">Platform</label>
-                <select id="newPlatform" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white focus:border-accent-500 focus:outline-none">
-                    <option value="xiaohongshu">Xiaohongshu</option>
-                    <option value="douyin">Douyin</option>
-                    <option value="facebook">Facebook</option>
-                    <option value="twitter">Twitter</option>
-                    <option value="reddit">Reddit</option>
-                </select>
-            </div>
-            <div>
-                <label class="text-xs text-dark-400 mb-1 block">Account Name</label>
-                <input id="newName" type="text" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" placeholder="e.g. SA Logistics">
-            </div>
-            <div>
-                <label class="text-xs text-dark-400 mb-1 block">Account ID</label>
-                <input id="newAccountId" type="text" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" placeholder="e.g. xhs_001">
-            </div>
-            <div>
-                <label class="text-xs text-dark-400 mb-1 block">Config Summary</label>
-                <input id="newConfig" type="text" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" placeholder="e.g. Cookie valid">
-            </div>
-        </div>
-        <div class="flex justify-end gap-3 mt-5">
-            <button onclick="closeModal()" class="px-4 py-2 border border-dark-600 rounded-lg text-sm text-dark-300 hover:text-white hover:border-dark-500 transition-all">Cancel</button>
-            <button onclick="addAccount()" class="px-4 py-2 bg-gradient-to-r from-accent-500 to-accent-600 text-white text-sm rounded-lg hover:from-accent-600 hover:to-accent-700 transition-all">Confirm</button>
         </div>
     </div>
-</div>
-
-<script>
-const API = '';
-const platformInfo = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-400', name: 'XHS' },
-    douyin: { icon: 'ri:tiktok-fill', color: 'text-white', name: 'Douyin' },
-    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-400', name: 'Facebook' },
-    twitter: { icon: 'ri:twitter-x-fill', color: 'text-white', name: 'Twitter' },
-    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-400', name: 'Reddit' },
-};
-const statusInfo = {
-    active: { dot: 'bg-emerald-400', text: 'text-emerald-400', label: 'Active' },
-    expired: { dot: 'bg-red-400', text: 'text-red-400', label: 'Expired' },
-    error: { dot: 'bg-red-400', text: 'text-red-400', label: 'Error' },
-};
-
-let allAccounts = [];
-
-async function loadAccounts(platform = null) {
-    try {
-        const url = platform ? `${API}/api/accounts?platform=${platform}` : `${API}/api/accounts`;
-        const resp = await fetch(url);
-        allAccounts = await resp.json();
-        renderAccounts(allAccounts);
-    } catch (e) { console.error('Failed to load accounts:', e); }
+    <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:400px;padding:24px;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;">绑定新账号</h3>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">平台</label>
+                    <select id="newPlatform" class="select" style="width:100%;">${Object.entries(platformNames).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号名称</label><input id="newName" class="input" placeholder="如: SA物流达人"/></div>
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号 ID</label><input id="newAccountId" class="input" placeholder="如: xhs_logi_001"/></div>
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">配置摘要</label><input id="newConfig" class="input" placeholder="如: Cookie有效期: 12天"/></div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="addAccount()">确认绑定</button>
+            </div>
+        </div>
+    </div>`;
 }
 
-function renderAccounts(accounts) {
-    const tbody = document.getElementById('accountTable');
-    if (accounts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-dark-500">No accounts. Click "Add Account" to get started.</td></tr>';
-        return;
-    }
-    tbody.innerHTML = accounts.map(a => {
-        const p = platformInfo[a.platform] || { icon: 'mdi:help', color: 'text-dark-400', name: a.platform };
-        const s = statusInfo[a.status] || statusInfo.active;
-        return `
-            <tr class="hover:bg-dark-800/30 transition-colors">
-                <td class="px-5 py-3.5">
-                    <div class="flex items-center gap-3">
-                        <div class="p-2 rounded-lg bg-dark-800/50">
-                            <iconify-icon class="${p.color}" icon="${p.icon}" width="16"></iconify-icon>
-                        </div>
-                        <div>
-                            <div class="text-sm font-medium text-white">${a.name}</div>
-                            <div class="text-[10px] text-dark-500">${a.account_id}</div>
-                        </div>
-                    </div>
-                </td>
-                <td class="px-5 py-3.5">
-                    <span class="flex items-center gap-1.5 ${s.text} text-xs">
-                        <span class="w-2 h-2 ${s.dot} rounded-full"></span> ${s.label}
-                    </span>
-                </td>
-                <td class="px-5 py-3.5 text-xs text-dark-400">${a.config_summary || '-'}</td>
-                <td class="px-5 py-3.5 text-xs text-dark-400">${a.last_sync || '-'}</td>
-                <td class="px-5 py-3.5 text-right">
-                    <button onclick="deleteAccount(${a.id})" class="p-1.5 text-dark-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
-                        <iconify-icon icon="mdi:trash-can-outline" width="14"></iconify-icon>
-                    </button>
-                </td>
-            </tr>`;
-    }).join('');
-}
-
-function filterAccounts(platform) {
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        if (btn.dataset.filter === (platform || 'all')) {
-            btn.className = 'filter-btn px-3 py-1.5 bg-accent-500/10 text-accent-400 border border-accent-500/20 rounded-lg text-xs font-medium';
-        } else {
-            btn.className = 'filter-btn px-3 py-1.5 bg-dark-800/50 text-dark-400 border border-dark-600 rounded-lg text-xs font-medium hover:border-accent-500/30 hover:text-white';
-        }
-    });
-    renderAccounts(platform ? allAccounts.filter(a => a.platform === platform) : allAccounts);
-}
-
-function showAddModal() { document.getElementById('addModal').classList.remove('hidden'); }
-function closeModal() { document.getElementById('addModal').classList.add('hidden'); }
+function showAddModal() { document.getElementById('addModal').style.display = 'flex'; }
+function closeAddModal() { document.getElementById('addModal').style.display = 'none'; }
 
 async function addAccount() {
-    const data = {
-        platform: document.getElementById('newPlatform').value,
-        name: document.getElementById('newName').value,
-        account_id: document.getElementById('newAccountId').value,
-        config_summary: document.getElementById('newConfig').value,
-    };
-    if (!data.name || !data.account_id) { alert('Please fill in name and ID'); return; }
-    try {
-        await fetch(`${API}/api/accounts`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
-        closeModal();
-        loadAccounts();
-    } catch (e) { alert('Failed: ' + e.message); }
+    const data = { platform: document.getElementById('newPlatform').value, name: document.getElementById('newName').value, account_id: document.getElementById('newAccountId').value, config_summary: document.getElementById('newConfig').value };
+    if (!data.name || !data.account_id) { showToast('请填写名称和ID', 'error'); return; }
+    try { await apiFetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); closeAddModal(); init(); showToast('绑定成功'); } catch (e) { showToast('绑定失败', 'error'); }
 }
 
-async function deleteAccount(id) {
-    if (!confirm('Delete this account?')) return;
-    try {
-        await fetch(`${API}/api/accounts/${id}`, { method: 'DELETE' });
-        loadAccounts();
-    } catch (e) { alert('Failed'); }
-}
+async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }
 
-loadAccounts();
+init();
 </script>
 </body>
 </html>

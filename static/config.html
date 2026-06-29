@@ -3,275 +3,77 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>SA-LogiFlow - Settings</title>
+<title>平台配置 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<script>
-tailwind.config = {
-    theme: { extend: { colors: {
-        dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
-        accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
-    }}}
-}
-</script>
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
-    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-</style>
+<link rel="stylesheet" href="/static/design-system.css"/>
 </head>
-<body class="text-gray-100 min-h-screen">
-<div class="flex h-screen overflow-hidden">
-    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
-                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
-            </div>
-            <div><span class="font-bold text-lg tracking-tight text-white">LogiFlow</span><p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p></div>
-        </div>
-        <nav class="flex-1 px-3 py-4 space-y-1">
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/home.html"><iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon><span class="text-sm font-medium">Dashboard</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/accounts.html"><iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon><span class="text-sm font-medium">Accounts</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/editor.html"><iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon><span class="text-sm font-medium">Content Studio</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/queue.html"><iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon><span class="text-sm font-medium">Publish Queue</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/config.html"><iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon><span class="text-sm font-medium">Settings</span></a>
-        </nav>
-    </aside>
-
-    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header class="h-14 glass border-b border-dark-700/50 flex items-center px-6 flex-none">
-            <h1 class="text-base font-semibold text-white">Settings</h1>
-        </header>
-
-        <div class="flex-1 overflow-y-auto p-6 space-y-4">
-            <!-- AI Engine -->
-            <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                <div class="p-4 border-b border-dark-700/30 flex justify-between items-center bg-gradient-to-r from-accent-500/5 to-transparent">
-                    <div class="flex items-center gap-3">
-                        <div class="p-2 rounded-lg bg-accent-500/10">
-                            <iconify-icon class="text-accent-400" icon="mdi:brain" width="18"></iconify-icon>
-                        </div>
-                        <div>
-                            <h3 class="text-sm font-semibold text-white">AI Engine (DeepSeek)</h3>
-                            <p class="text-[10px] text-dark-400">Configure AI content generation</p>
-                        </div>
-                    </div>
-                    <span id="aiStatus" class="flex items-center gap-1.5 text-xs">
-                        <span class="w-2 h-2 bg-dark-600 rounded-full"></span>
-                        <span class="text-dark-400">Not configured</span>
-                    </span>
-                </div>
-                <div class="p-4">
-                    <div class="max-w-xl">
-                        <label class="text-xs text-dark-400 mb-1.5 block">API Key</label>
-                        <div class="flex gap-2">
-                            <input id="apiKey" type="password" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" placeholder="sk-..."/>
-                            <button onclick="saveApiKey()" class="px-4 py-2 bg-accent-500/10 border border-accent-500/20 text-accent-400 text-sm rounded-lg hover:bg-accent-500/20 transition-all">Save</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Platform Configs -->
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <!-- XHS -->
-                <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                    <div class="p-4 border-b border-dark-700/30 flex justify-between items-center">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 rounded-lg bg-red-500/10">
-                                <iconify-icon class="text-red-400" icon="ri:xiaohongshu-fill" width="18"></iconify-icon>
-                            </div>
-                            <div>
-                                <h3 class="text-sm font-semibold text-white">Xiaohongshu</h3>
-                                <p class="text-[10px] text-dark-400">RPA Configuration</p>
-                            </div>
-                        </div>
-                        <span class="flex items-center gap-1.5 text-xs text-dark-400"><span class="w-2 h-2 bg-dark-600 rounded-full"></span> Pending</span>
-                    </div>
-                    <div class="p-4 space-y-3">
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Chrome Path</label>
-                            <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="text" placeholder="/Applications/Google Chrome.app/..."/>
-                        </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Interval (sec)</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none" type="number" value="300"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Daily Limit</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none" type="number" value="10"/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Douyin -->
-                <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                    <div class="p-4 border-b border-dark-700/30 flex justify-between items-center">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 rounded-lg bg-dark-700/50">
-                                <iconify-icon class="text-white" icon="ri:tiktok-fill" width="18"></iconify-icon>
-                            </div>
-                            <div>
-                                <h3 class="text-sm font-semibold text-white">Douyin</h3>
-                                <p class="text-[10px] text-dark-400">RPA Configuration</p>
-                            </div>
-                        </div>
-                        <span class="flex items-center gap-1.5 text-xs text-dark-400"><span class="w-2 h-2 bg-dark-600 rounded-full"></span> Pending</span>
-                    </div>
-                    <div class="p-4 space-y-3">
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Chrome Path</label>
-                            <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="text" placeholder="/Applications/Google Chrome.app/..."/>
-                        </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Interval (sec)</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none" type="number" value="600"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Daily Limit</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none" type="number" value="5"/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Facebook -->
-                <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                    <div class="p-4 border-b border-dark-700/30 flex justify-between items-center">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 rounded-lg bg-blue-500/10">
-                                <iconify-icon class="text-blue-400" icon="ri:facebook-box-fill" width="18"></iconify-icon>
-                            </div>
-                            <div>
-                                <h3 class="text-sm font-semibold text-white">Facebook</h3>
-                                <p class="text-[10px] text-dark-400">Graph API</p>
-                            </div>
-                        </div>
-                        <span class="flex items-center gap-1.5 text-xs text-dark-400"><span class="w-2 h-2 bg-dark-600 rounded-full"></span> Pending</span>
-                    </div>
-                    <div class="p-4 space-y-3">
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Page ID</label>
-                            <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="text" placeholder="Enter Page ID"/>
-                        </div>
-                        <div>
-                            <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Access Token</label>
-                            <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="Enter Access Token"/>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Twitter -->
-                <div class="glass rounded-xl border border-dark-700/50 overflow-hidden">
-                    <div class="p-4 border-b border-dark-700/30 flex justify-between items-center">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 rounded-lg bg-dark-700/50">
-                                <iconify-icon class="text-white" icon="ri:twitter-x-fill" width="18"></iconify-icon>
-                            </div>
-                            <div>
-                                <h3 class="text-sm font-semibold text-white">Twitter / X</h3>
-                                <p class="text-[10px] text-dark-400">API v2</p>
-                            </div>
-                        </div>
-                        <span class="flex items-center gap-1.5 text-xs text-dark-400"><span class="w-2 h-2 bg-dark-600 rounded-full"></span> Pending</span>
-                    </div>
-                    <div class="p-4 space-y-3">
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">API Key</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="API Key"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">API Secret</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="API Secret"/>
-                            </div>
-                        </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Access Token</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="Token"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Token Secret</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="Secret"/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Reddit -->
-                <div class="glass rounded-xl border border-dark-700/50 overflow-hidden lg:col-span-2">
-                    <div class="p-4 border-b border-dark-700/30 flex justify-between items-center">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 rounded-lg bg-orange-500/10">
-                                <iconify-icon class="text-orange-400" icon="ri:reddit-fill" width="18"></iconify-icon>
-                            </div>
-                            <div>
-                                <h3 class="text-sm font-semibold text-white">Reddit</h3>
-                                <p class="text-[10px] text-dark-400">PRAW / API</p>
-                            </div>
-                        </div>
-                        <span class="flex items-center gap-1.5 text-xs text-dark-400"><span class="w-2 h-2 bg-dark-600 rounded-full"></span> Pending</span>
-                    </div>
-                    <div class="p-4">
-                        <div class="grid grid-cols-3 gap-3">
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Client ID</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="text" placeholder="Client ID"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Client Secret</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="password" placeholder="Secret"/>
-                            </div>
-                            <div>
-                                <label class="text-[10px] text-dark-400 uppercase font-medium mb-1 block">Subreddits</label>
-                                <input class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-dark-500 focus:border-accent-500 focus:outline-none" type="text" placeholder="r/logistics, r/southafrica"/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Footer -->
-            <div class="glass rounded-xl p-4 border border-dark-700/50 flex justify-between items-center">
-                <div class="flex items-center gap-2 text-xs text-dark-400">
-                    <iconify-icon icon="mdi:shield-check" class="text-emerald-400" width="14"></iconify-icon>
-                    All configurations are stored locally and encrypted.
-                </div>
-                <div class="flex gap-2">
-                    <button class="px-3 py-1.5 border border-dark-600 rounded-lg text-xs text-dark-300 hover:text-white hover:border-accent-500/50 transition-all">Export</button>
-                    <button class="px-3 py-1.5 bg-accent-500/10 border border-accent-500/20 text-accent-400 text-xs rounded-lg hover:bg-accent-500/20 transition-all">Test Connections</button>
-                </div>
-            </div>
-        </div>
-    </main>
-</div>
-
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
 <script>
-const API = '';
+const PAGE_ID = 'config';
+
+function render() {
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">设置</h1>
+        </div>
+        <div class="page-body" style="max-width:640px;">
+
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:var(--bg-subcard);display:flex;align-items:center;gap:10px;">
+                    <div style="width:38px;height:38px;border-radius:var(--radius-sm);background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);">
+                        <iconify-icon icon="mdi:brain" width="20"></iconify-icon>
+                    </div>
+                    <span style="font-size:15px;font-weight:700;">AI 引擎</span>
+                </div>
+                <div class="card-body">
+                    <div style="margin-bottom:12px;">
+                        <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block;">DeepSeek API Key</label>
+                        <div style="display:flex;gap:8px;">
+                            <input id="apiKey" class="input" type="password" placeholder="sk-..." style="flex:1;"/>
+                            <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
+                        </div>
+                        <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">用于 AI 文案生成，未配置时使用模板内容</p>
+                    </div>
+                    <div id="aiStatus" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);">
+                        <span style="width:6px;height:6px;border-radius:50%;background:var(--text-muted);"></span> 未配置
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary);">
+                    <iconify-icon icon="mdi:information-outline" style="color:var(--primary);"></iconify-icon>
+                    发布功能通过慧媒 CLI 实现，请确保已安装并登录慧媒
+                </div>
+            </div>
+
+        </div>
+    </div>`;
+}
 
 async function saveApiKey() {
-    const key = document.getElementById('apiKey').value;
-    if (!key) { alert('Please enter API Key'); return; }
+    const key = document.getElementById('apiKey').value.trim();
+    if (!key) { showToast('请输入 API Key', 'error'); return; }
     try {
-        const resp = await fetch(`${API}/api/config/apikey`, {
+        const resp = await apiFetch('/api/config/apikey', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ key }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key })
         });
-        const data = await resp.json();
-        if (data.status === 'ok') {
-            document.getElementById('aiStatus').innerHTML = '<span class="w-2 h-2 bg-emerald-400 rounded-full"></span><span class="text-emerald-400">Configured</span>';
-            alert('API Key saved. AI generation enabled.');
+        if (resp.ok) {
+            showToast('API Key 已保存，AI 内容生成已启用');
+            document.getElementById('aiStatus').innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:var(--success);"></span> <span style="color:var(--success);font-weight:600;">已配置</span>';
         }
-    } catch (e) { alert('Failed: ' + e.message); }
+    } catch(e) { showToast('保存失败', 'error'); }
 }
+
+render();
 </script>
 </body>
 </html>

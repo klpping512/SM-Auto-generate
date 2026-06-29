@@ -53,10 +53,9 @@ def decode_token(token: str) -> dict:
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """从 Bearer token 解析当前用户。无 token 时返回匿名用户（兼容旧版）。"""
+    """从 Bearer token 解析当前用户。无 token 时拒绝访问。"""
     if not credentials:
-        # 兼容模式：无 token 时返回 admin（方便迁移）
-        return {"id": 0, "username": "anonymous", "role": "admin", "display_name": "匿名用户"}
+        raise HTTPException(401, "未登录，请先登录")
     payload = decode_token(credentials.credentials)
     user_id = int(payload.get("sub", 0))
     username = payload.get("username", "")

@@ -3,204 +3,118 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>SA-LogiFlow - Publish Queue</title>
+<title>发布队列 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<script>
-tailwind.config = {
-    theme: { extend: { colors: {
-        dark: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
-        accent: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' },
-    }}}
-}
-</script>
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    body { font-family: 'Inter', sans-serif; background: #0a0a0f; }
-    .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(99, 102, 241, 0.1); }
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-</style>
+<link rel="stylesheet" href="/static/design-system.css"/>
 </head>
-<body class="text-gray-100 min-h-screen">
-<div class="flex h-screen overflow-hidden">
-    <aside class="w-64 glass flex flex-col flex-none border-r border-dark-700/50">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500 to-accent-600 flex items-center justify-center">
-                <iconify-icon icon="mdi:truck-fast" width="20" class="text-white"></iconify-icon>
-            </div>
-            <div><span class="font-bold text-lg tracking-tight text-white">LogiFlow</span><p class="text-[10px] text-dark-400 -mt-0.5">Social Media Automation</p></div>
-        </div>
-        <nav class="flex-1 px-3 py-4 space-y-1">
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/home.html"><iconify-icon class="mr-3" icon="mdi:view-dashboard" width="18"></iconify-icon><span class="text-sm font-medium">Dashboard</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/accounts.html"><iconify-icon class="mr-3" icon="mdi:account-group" width="18"></iconify-icon><span class="text-sm font-medium">Accounts</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/editor.html"><iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="18"></iconify-icon><span class="text-sm font-medium">Content Studio</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl bg-accent-500/10 text-accent-400 border border-accent-500/20 transition-all" href="/queue.html"><iconify-icon class="mr-3" icon="mdi:clock-list" width="18"></iconify-icon><span class="text-sm font-medium">Publish Queue</span></a>
-            <a class="flex items-center px-4 py-3 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800/50 transition-all" href="/config.html"><iconify-icon class="mr-3" icon="mdi:cog" width="18"></iconify-icon><span class="text-sm font-medium">Settings</span></a>
-        </nav>
-    </aside>
-
-    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header class="h-14 glass border-b border-dark-700/50 flex items-center justify-between px-6 flex-none">
-            <div>
-                <h1 class="text-base font-semibold text-white">Publish Queue</h1>
-            </div>
-            <div class="flex items-center gap-3">
-                <span id="queueCount" class="text-xs text-dark-400"></span>
-                <button onclick="loadQueue()" class="p-2 rounded-lg hover:bg-dark-800/50 text-dark-400 hover:text-white transition-colors">
-                    <iconify-icon icon="mdi:refresh" width="16"></iconify-icon>
-                </button>
-            </div>
-        </header>
-
-        <div class="flex-1 overflow-y-auto p-6">
-            <!-- Filters -->
-            <div class="glass rounded-xl p-4 border border-dark-700/50 mb-5 flex flex-wrap gap-3 items-center">
-                <div class="flex items-center gap-2">
-                    <span class="text-xs text-dark-400">Platform:</span>
-                    <select id="filterPlatform" onchange="loadQueue()" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
-                        <option value="">All</option>
-                        <option value="xiaohongshu">XHS</option>
-                        <option value="douyin">Douyin</option>
-                        <option value="facebook">Facebook</option>
-                        <option value="twitter">Twitter</option>
-                        <option value="reddit">Reddit</option>
-                    </select>
-                </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-xs text-dark-400">Status:</span>
-                    <select id="filterStatus" onchange="loadQueue()" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-xs text-white focus:border-accent-500 focus:outline-none">
-                        <option value="">All</option>
-                        <option value="queued">Pending</option>
-                        <option value="reviewing">Reviewing</option>
-                        <option value="published">Published</option>
-                        <option value="failed">Failed</option>
-                    </select>
-                </div>
-                <div class="ml-auto text-xs text-dark-400" id="filterInfo"></div>
-            </div>
-
-            <!-- Queue List -->
-            <div id="queueList" class="space-y-3">
-                <div class="text-center py-16 text-dark-500">Loading...</div>
-            </div>
-        </div>
-    </main>
-</div>
-
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
 <script>
-const API = '';
-const platformInfo = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/20', name: 'XHS' },
-    douyin: { icon: 'ri:tiktok-fill', color: 'text-white', bg: 'bg-dark-700/50', border: 'border-dark-600', name: 'Douyin' },
-    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/20', name: 'Facebook' },
-    twitter: { icon: 'ri:twitter-x-fill', color: 'text-white', bg: 'bg-dark-700/50', border: 'border-dark-600', name: 'Twitter' },
-    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/20', name: 'Reddit' },
-};
-const statusInfo = {
-    queued: { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/30', label: 'Pending', accent: 'border-l-amber-500' },
-    reviewing: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/30', label: 'Reviewing', accent: 'border-l-blue-500' },
-    published: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/30', label: 'Published', accent: 'border-l-emerald-500' },
-    failed: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/30', label: 'Failed', accent: 'border-l-red-500' },
-};
+const PAGE_ID = 'queue';
+const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const platformIcons = { xiaohongshu:'ri:xiaohongshu-fill',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
+const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
+const statusMap = { draft:{label:'草稿',cls:'badge-gray',border:'#9CA3AF'}, pending_review:{label:'待审核',cls:'badge-purple',border:'#8B5CF6'}, approved:{label:'已通过',cls:'badge-blue',border:'#3B82F6'}, queued:{label:'待发布',cls:'badge-yellow',border:'#F59E0B'}, published:{label:'已发布',cls:'badge-green',border:'#10B981'}, failed:{label:'失败',cls:'badge-red',border:'#EF4444'}, rejected:{label:'已驳回',cls:'badge-red',border:'#EF4444'}, reviewing:{label:'审核中',cls:'badge-blue',border:'#3B82F6'} };
 
-async function loadQueue() {
-    const platform = document.getElementById('filterPlatform').value;
-    const status = document.getElementById('filterStatus').value;
-    let url = `${API}/api/queue?`;
-    if (platform) url += `platform=${platform}&`;
-    if (status) url += `status=${status}&`;
-    try {
-        const resp = await fetch(url);
-        const items = await resp.json();
-        renderQueue(items);
-        document.getElementById('queueCount').textContent = `${items.length} items`;
-        document.getElementById('filterInfo').textContent = items.length > 0 ? `Showing ${items.length}` : '';
-    } catch (e) { console.error('Failed to load queue:', e); }
+let items = [];
+let filterPlatform = '';
+let filterStatus = '';
+
+async function init() {
+    const resp = await apiFetch('/api/queue');
+    items = await resp.json();
+    render();
 }
 
-function renderQueue(items) {
-    const container = document.getElementById('queueList');
-    if (items.length === 0) {
-        container.innerHTML = `
-            <div class="text-center py-16">
-                <div class="w-16 h-16 rounded-2xl bg-dark-800/50 flex items-center justify-center mx-auto mb-4">
-                    <iconify-icon icon="mdi:tray-arrow-down" width="28" class="text-dark-600"></iconify-icon>
-                </div>
-                <p class="text-dark-400 font-medium">Queue is empty</p>
-                <p class="text-dark-500 text-sm mt-1">Go to <a href="/editor.html" class="text-accent-400 hover:underline">Content Studio</a> to create content</p>
-            </div>`;
-        return;
-    }
+function getFiltered() {
+    return items.filter(i => {
+        if (filterPlatform && i.platform !== filterPlatform) return false;
+        if (filterStatus && i.status !== filterStatus) return false;
+        return true;
+    });
+}
 
-    container.innerHTML = items.map(item => {
-        const p = platformInfo[item.platform] || { icon: 'mdi:help', color: 'text-dark-400', bg: 'bg-dark-700/50', border: 'border-dark-600', name: item.platform };
-        const s = statusInfo[item.status] || statusInfo.queued;
-        const hashtags = (item.hashtags || []).map(h => `#${h}`).join(' ');
-        return `
-            <div class="glass rounded-xl border-l-4 ${s.accent} border border-dark-700/50 hover:border-dark-600 transition-all">
-                <div class="p-4 flex items-center justify-between">
-                    <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 mb-2">
-                            <span class="px-2 py-0.5 ${p.bg} ${p.color} text-[10px] rounded flex items-center gap-1 font-medium border ${p.border}">
-                                <iconify-icon icon="${p.icon}" width="12"></iconify-icon> ${p.name}
-                            </span>
-                            <span class="px-2 py-0.5 ${s.bg} ${s.text} text-[10px] rounded-full font-medium border ${s.border}">${s.label}</span>
+function render() {
+    const filtered = getFiltered();
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">发布队列</h1>
+            <div style="display:flex;gap:8px;">
+                <span style="font-size:13px;color:var(--text-muted);line-height:32px;">共 ${filtered.length} 条</span>
+                <button class="btn btn-secondary btn-sm" onclick="init()"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon> 刷新</button>
+            </div>
+        </div>
+        <div class="page-body">
+            <div class="card" style="margin-bottom:16px;">
+                <div style="padding:12px 20px;display:flex;gap:12px;align-items:center;">
+                    <span style="font-size:13px;color:var(--text-muted);">平台:</span>
+                    <select class="select" style="font-size:13px;" onchange="filterPlatform=this.value;render();">
+                        <option value="">全部</option>
+                        ${Object.entries(platformNames).map(([k,v])=>`<option value="${k}" ${filterPlatform===k?'selected':''}>${v}</option>`).join('')}
+                    </select>
+                    <span style="font-size:13px;color:var(--text-muted);">状态:</span>
+                    <select class="select" style="font-size:13px;" onchange="filterStatus=this.value;render();">
+                        <option value="">全部</option>
+                        ${Object.entries(statusMap).map(([k,v])=>`<option value="${k}" ${filterStatus===k?'selected':''}>${v.label}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                ${filtered.length === 0 ? `<div class="card"><div class="empty-state"><iconify-icon icon="mdi:tray-arrow-down" width="48"></iconify-icon><p style="margin-top:8px;">队列为空，去<a href="/editor.html" style="color:var(--primary);">内容创作</a>生成内容</p></div></div>` :
+                filtered.map(item => {
+                    const p = {icon:platformIcons[item.platform]||'mdi:help',color:platformColors[item.platform]||'#6B7280',name:platformNames[item.platform]||item.platform};
+                    const s = statusMap[item.status] || statusMap.draft;
+                    const tags = (item.hashtags||[]).map(h=>`#${escapeHtml(h)}`).join(' ');
+                    const copyText = encodeURIComponent(`${item.title}\n\n${item.body}\n\n${(item.hashtags||[]).map(h=>'#'+h).join(' ')}`);
+                    return `<div class="card fade-in" style="border-left:4px solid ${s.border};overflow:hidden;">
+                        <div style="padding:16px 20px;display:flex;align-items:center;gap:16px;">
+                            <div style="flex:1;min-width:0;">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                    <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:var(--radius-full);background:${p.color}15;color:${p.color};display:flex;align-items:center;gap:4px;">
+                                        <iconify-icon icon="${p.icon}" width="12"></iconify-icon> ${escapeHtml(p.name)}
+                                    </span>
+                                    <span class="badge ${s.cls}">${s.label}</span>
+                                </div>
+                                <div style="font-size:14px;font-weight:700;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.title)}</div>
+                                <div style="font-size:13px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.body.substring(0,120))}${item.body.length>120?'...':''}</div>
+                                ${tags?`<div style="font-size:11px;color:var(--primary);margin-top:4px;">${tags}</div>`:''}
+                                ${item.error_msg?`<div style="font-size:11px;color:var(--error);margin-top:4px;">${escapeHtml(item.error_msg)}</div>`:''}
+                            </div>
+                            <div style="width:180px;flex-shrink:0;text-align:right;padding-left:16px;border-left:1px solid var(--border-light);">
+                                <div style="font-size:11px;color:var(--text-muted);">创建</div>
+                                <div style="font-size:12px;font-weight:500;margin-bottom:8px;">${escapeHtml(item.created_at)||'-'}</div>
+                                <div style="font-size:11px;color:var(--text-muted);">定时发布</div>
+                                <input type="datetime-local" value="${item.scheduled_at?escapeHtml(item.scheduled_at.replace(' ','T')):''}"
+                                    onchange="updateSchedule(${item.id},this.value)"
+                                    style="font-size:11px;border:1px solid var(--border);border-radius:var(--radius-sm);padding:2px 4px;width:100%;margin-top:2px;"/>
+                            </div>
+                            <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
+                                <button class="btn btn-ghost btn-sm" onclick="copyContent('${copyText}')" title="复制文案"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
+                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="publishItem(${item.id})" title="发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
+                                ${item.status==='failed'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'queued')" title="重试"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon></button>`:''}
+                                <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteItem(${item.id})" title="删除"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
+                            </div>
                         </div>
-                        <h3 class="font-semibold text-white text-sm mb-1 truncate">${item.title}</h3>
-                        <p class="text-xs text-dark-400 line-clamp-1">${item.body.substring(0, 120)}${item.body.length > 120 ? '...' : ''}</p>
-                        ${hashtags ? `<p class="text-[10px] text-accent-400/70 mt-1.5">${hashtags}</p>` : ''}
-                        ${item.error_msg ? `<p class="text-[10px] text-red-400 mt-1">✕ ${item.error_msg}</p>` : ''}
-                    </div>
-                    <div class="w-32 text-right px-3 border-l border-dark-700/30 flex-none">
-                        <div class="text-[10px] text-dark-500 mb-0.5">Created</div>
-                        <div class="text-xs font-medium text-dark-300">${item.created_at || '-'}</div>
-                    </div>
-                    <div class="flex gap-1 pl-3 flex-none">
-                        ${item.status === 'queued' ? `
-                            <button onclick="publishItem(${item.id})" class="p-2 text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-colors" title="Publish">
-                                <iconify-icon icon="mdi:send" width="16"></iconify-icon>
-                            </button>` : ''}
-                        ${item.status === 'failed' ? `
-                            <button onclick="updateStatus(${item.id}, 'queued')" class="p-2 text-accent-400 hover:bg-accent-500/10 rounded-lg transition-colors" title="Retry">
-                                <iconify-icon icon="mdi:refresh" width="16"></iconify-icon>
-                            </button>` : ''}
-                        <button onclick="deleteItem(${item.id})" class="p-2 text-dark-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors" title="Delete">
-                            <iconify-icon icon="mdi:close" width="16"></iconify-icon>
-                        </button>
-                    </div>
-                </div>
-            </div>`;
-    }).join('');
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>
+    </div>`;
 }
 
-async function publishItem(id) {
-    if (!confirm('Publish via Huimei?')) return;
-    try {
-        const resp = await fetch(`${API}/api/publish/${id}`, { method: 'POST' });
-        const result = await resp.json();
-        alert(result.success ? 'Published!' : 'Failed: ' + (result.error || 'Unknown error'));
-        loadQueue();
-    } catch (e) { alert('Failed: ' + e.message); }
-}
+async function copyContent(text) { try{await navigator.clipboard.writeText(decodeURIComponent(text));showToast('已复制');}catch(e){showToast('复制失败','error');}}
+async function updateSchedule(id,dt) { const s=dt?dt.replace('T',' ')+':00':null; try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'queued',scheduled_at:s})});showToast('已更新');}catch(e){showToast('更新失败','error');}}
+async function updateStatus(id,status) { try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});init();}catch(e){showToast('操作失败','error');}}
+async function publishItem(id) { if(!confirm('确定发布？'))return; try{const r=await apiFetch(`/api/publish/${id}`,{method:'POST'});const d=await r.json();showToast(d.success?'发布成功':'发布失败: '+(d.error||''),d.success?'success':'error');init();}catch(e){showToast('发布失败','error');}}
+async function deleteItem(id) { if(!confirm('确定删除？'))return; try{await apiFetch(`/api/queue/${id}`,{method:'DELETE'});init();}catch(e){showToast('删除失败','error');}}
 
-async function updateStatus(id, status) {
-    try {
-        await fetch(`${API}/api/queue/${id}/status`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ status }) });
-        loadQueue();
-    } catch (e) { alert('Failed'); }
-}
-
-async function deleteItem(id) {
-    if (!confirm('Delete this item?')) return;
-    try {
-        await fetch(`${API}/api/queue/${id}`, { method: 'DELETE' });
-        loadQueue();
-    } catch (e) { alert('Failed'); }
-}
-
-loadQueue();
+init();
 </script>
 </body>
 </html>

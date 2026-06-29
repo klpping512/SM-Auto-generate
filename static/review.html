@@ -6,201 +6,118 @@
 <title>审核中心 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<style>
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .sidebar-item-active { background-color: rgba(59, 130, 246, 0.1); border-right: 4px solid #3b82f6; color: #3b82f6; }
-    .toast { animation: slideUp 0.3s ease-out; }
-    @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-</style>
+<link rel="stylesheet" href="/static/design-system.css"/>
 </head>
-<body class="bg-gray-50 text-gray-800 flex h-screen overflow-hidden">
-<aside class="w-64 bg-white border-r border-gray-200 flex flex-col flex-none">
-    <div class="p-6 border-b border-gray-100 flex items-center gap-3">
-        <div class="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center text-white">
-            <iconify-icon icon="mdi:truck-fast" width="24"></iconify-icon>
-        </div>
-        <span class="font-bold text-lg tracking-tight text-blue-900">SA-LogiFlow</span>
-    </div>
-    <nav class="flex-1 py-6 space-y-1">
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/home.html">
-            <iconify-icon class="mr-3" icon="mdi:view-dashboard" width="20"></iconify-icon><span>分发总览</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/accounts.html">
-            <iconify-icon class="mr-3" icon="mdi:account-group" width="20"></iconify-icon><span>账号管理</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/editor.html">
-            <iconify-icon class="mr-3" icon="mdi:square-edit-outline" width="20"></iconify-icon><span>内容创作</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/queue.html">
-            <iconify-icon class="mr-3" icon="mdi:clock-list" width="20"></iconify-icon><span>发布队列</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 sidebar-item-active" href="/review.html">
-            <iconify-icon class="mr-3" icon="mdi:clipboard-check" width="20"></iconify-icon><span>审核中心</span>
-        </a>
-        <a class="flex items-center px-6 py-3 text-gray-600 hover:bg-gray-50 transition-colors" href="/config.html">
-            <iconify-icon class="mr-3" icon="mdi:cog" width="20"></iconify-icon><span>平台配置</span>
-        </a>
-    </nav>
-    <div id="userPanel" class="p-4 border-t border-gray-100"></div>
-</aside>
-
-<main class="flex-1 flex flex-col min-w-0 overflow-hidden">
-    <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 flex-none">
-        <div class="flex items-center gap-3">
-            <h1 class="text-xl font-semibold text-gray-800">审核中心</h1>
-            <span id="pendingCount" class="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full font-bold">-</span>
-        </div>
-        <button onclick="loadPending()" class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
-            <iconify-icon icon="mdi:refresh" class="mr-1"></iconify-icon>刷新
-        </button>
-    </header>
-
-    <div class="flex-1 overflow-y-auto p-8">
-        <div id="reviewList" class="space-y-4">
-            <div class="text-center py-12 text-gray-400">加载中...</div>
-        </div>
-    </div>
-</main>
-
-<!-- 审核弹窗 -->
-<div id="reviewModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
-    <div class="bg-white rounded-xl p-6 w-[500px] shadow-xl max-h-[80vh] overflow-y-auto">
-        <h3 class="font-bold text-lg mb-4" id="modalTitle">审核内容</h3>
-        <div id="modalContent" class="bg-gray-50 rounded-lg p-4 text-sm mb-4 max-h-60 overflow-y-auto"></div>
-        <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">审核备注（驳回时必填）</label>
-            <textarea id="reviewNote" class="w-full border-gray-300 rounded-lg text-sm" rows="3" placeholder="填写审核意见..."></textarea>
-        </div>
-        <div class="flex justify-end gap-3">
-            <button onclick="closeModal()" class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">取消</button>
-            <button onclick="doReview('reject')" class="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700">驳回</button>
-            <button onclick="doReview('approve')" class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">通过</button>
-        </div>
-    </div>
-</div>
-
-<div id="toast" class="fixed bottom-6 right-6 hidden z-50"></div>
-
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
 <script src="/static/common.js"></script>
 <script>
-const platformInfo = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: 'text-red-600', name: '小红书' },
-    douyin: { icon: 'ri:tiktok-fill', color: 'text-gray-900', name: '抖音' },
-    facebook: { icon: 'ri:facebook-box-fill', color: 'text-blue-700', name: 'Facebook' },
-    twitter: { icon: 'ri:twitter-x-fill', color: 'text-gray-900', name: 'Twitter' },
-    reddit: { icon: 'ri:reddit-fill', color: 'text-orange-600', name: 'Reddit' },
-};
+const PAGE_ID = 'review';
+const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const platformIcons = { xiaohongshu:'ri:xiaohongshu-fill',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
+const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
 
+let pendingItems = [];
 let currentItemId = null;
 
-function showToast(msg, type='success') {
-    const toast = document.getElementById('toast');
-    const colors = type === 'success' ? 'bg-green-600' : 'bg-red-600';
-    toast.innerHTML = `<div class="toast ${colors} text-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium">${msg}</div>`;
-    toast.classList.remove('hidden');
-    setTimeout(() => toast.classList.add('hidden'), 2500);
-}
-
-async function loadPending() {
+async function init() {
     try {
         const resp = await apiFetch('/api/review/pending');
-        if (!resp.ok) {
-            document.getElementById('reviewList').innerHTML = `
-                <div class="text-center py-16 text-gray-400">
-                    <iconify-icon icon="mdi:shield-lock" width="48" class="mb-4 text-gray-300"></iconify-icon>
-                    <p class="text-lg">需要审核员或管理员权限</p>
-                    <p class="text-sm mt-2">请使用审核员账号登录</p>
-                </div>`;
-            return;
-        }
-        const items = await resp.json();
-        document.getElementById('pendingCount').textContent = items.length;
-        renderReviewList(items);
-    } catch (e) {
-        console.error('Failed to load pending reviews:', e);
-    }
+        if (resp.ok) { pendingItems = await resp.json(); }
+        else { pendingItems = []; }
+    } catch(e) { pendingItems = []; }
+    render();
 }
 
-function renderReviewList(items) {
-    const container = document.getElementById('reviewList');
-    if (items.length === 0) {
-        container.innerHTML = `
-            <div class="text-center py-16">
-                <iconify-icon icon="mdi:check-all" width="48" class="text-green-400 mb-4"></iconify-icon>
-                <p class="text-gray-400 text-lg">没有待审核内容</p>
-                <p class="text-gray-400 text-sm mt-2">所有内容都已处理完毕</p>
-            </div>`;
-        return;
-    }
-
-    container.innerHTML = items.map(item => {
-        const p = platformInfo[item.platform] || { icon: 'mdi:help', color: 'text-gray-400', name: item.platform };
-        return `
-            <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden border-l-4 border-l-purple-400">
-                <div class="p-5">
-                    <div class="flex items-center justify-between mb-3">
-                        <div class="flex items-center gap-2">
-                            <span class="px-2 py-0.5 bg-purple-100 text-purple-700 text-[10px] rounded-full font-bold">待审核</span>
-                            <span class="flex items-center gap-1 text-xs ${p.color}">
-                                <iconify-icon icon="${p.icon}"></iconify-icon> ${p.name}
-                            </span>
-                        </div>
-                        <span class="text-xs text-gray-400">${item.created_at || ''}</span>
-                    </div>
-                    <h3 class="font-bold text-gray-900 mb-2">${item.title}</h3>
-                    <p class="text-sm text-gray-600 whitespace-pre-wrap">${item.body}</p>
-                    ${(item.hashtags||[]).length ? `<p class="text-xs text-blue-500 mt-3">${item.hashtags.map(h=>'#'+h).join(' ')}</p>` : ''}
-                    <div class="mt-4 flex justify-end gap-2">
-                        <button onclick="openReview(${item.id}, '${encodeURIComponent(item.title)}', '${encodeURIComponent(item.body)}')" class="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 flex items-center gap-1">
-                            <iconify-icon icon="mdi:eye"></iconify-icon> 审核
-                        </button>
+function render() {
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <h1 class="page-title">审核中心</h1>
+                <span class="badge badge-purple">${pendingItems.length} 待审核</span>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="init()"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon> 刷新</button>
+        </div>
+        <div class="page-body">
+            ${pendingItems.length === 0 ? `
+                <div class="card">
+                    <div class="empty-state">
+                        <iconify-icon icon="mdi:check-all" width="56" style="color:var(--success);"></iconify-icon>
+                        <p style="margin-top:12px;font-size:15px;font-weight:600;color:var(--text-primary);">没有待审核内容</p>
+                        <p style="margin-top:4px;">所有内容都已处理完毕</p>
                     </div>
                 </div>
-            </div>`;
-    }).join('');
+            ` : `<div style="display:flex;flex-direction:column;gap:12px;">
+                ${pendingItems.map(item => {
+                    const p = {icon:platformIcons[item.platform]||'mdi:help',color:platformColors[item.platform]||'#6B7280',name:platformNames[item.platform]||item.platform};
+                    return `<div class="card fade-in" style="border-left:4px solid #8B5CF6;">
+                        <div style="padding:20px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                                <span class="badge badge-purple">待审核</span>
+                                <span style="font-size:11px;font-weight:600;color:${p.color};display:flex;align-items:center;gap:4px;"><iconify-icon icon="${p.icon}" width="14"></iconify-icon> ${escapeHtml(p.name)}</span>
+                                <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${escapeHtml(item.created_at)||''}</span>
+                            </div>
+                            <h3 style="font-size:15px;font-weight:700;margin-bottom:8px;">${escapeHtml(item.title)}</h3>
+                            <p style="font-size:13px;color:var(--text-secondary);white-space:pre-wrap;line-height:1.7;">${escapeHtml(item.body)}</p>
+                            ${(item.hashtags||[]).length?`<div style="margin-top:8px;font-size:11px;color:var(--primary);">${item.hashtags.map(h=>'#'+escapeHtml(h)).join(' ')}</div>`:''}
+                            <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px;">
+                                <button class="btn btn-secondary btn-sm" onclick="openReview(${item.id})">查看</button>
+                                <button class="btn btn-success btn-sm" onclick="doReview(${item.id},'approve')">通过</button>
+                                <button class="btn btn-error btn-sm" onclick="openRejectModal(${item.id})">驳回</button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>`}
+        </div>
+    </div>
+
+    <!-- 驳回弹窗 -->
+    <div id="rejectModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:440px;padding:24px;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;">驳回内容</h3>
+            <textarea id="rejectNote" class="input" rows="4" placeholder="请填写驳回原因（必填）" style="resize:none;"></textarea>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeRejectModal()">取消</button>
+                <button class="btn btn-error btn-sm" onclick="confirmReject()">确认驳回</button>
+            </div>
+        </div>
+    </div>`;
 }
 
-function openReview(id, title, body) {
+async function doReview(id, action, note='') {
+    try {
+        const resp = await apiFetch(`/api/review/${id}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, note}) });
+        if (resp.ok) { showToast(action==='approve'?'已通过，已加入发布队列':'已驳回'); init(); }
+        else { const e=await resp.json(); showToast(e.detail||'操作失败','error'); }
+    } catch(e) { showToast('操作失败','error'); }
+}
+
+function openReview(id) { doReview(id, 'approve'); }
+
+function openRejectModal(id) {
     currentItemId = id;
-    document.getElementById('modalTitle').textContent = decodeURIComponent(title);
-    document.getElementById('modalContent').textContent = decodeURIComponent(body);
-    document.getElementById('reviewNote').value = '';
-    document.getElementById('reviewModal').classList.remove('hidden');
+    document.getElementById('rejectModal').style.display = 'flex';
+    document.getElementById('rejectNote').value = '';
+    document.getElementById('rejectNote').focus();
 }
 
-function closeModal() {
-    document.getElementById('reviewModal').classList.add('hidden');
+function closeRejectModal() {
+    document.getElementById('rejectModal').style.display = 'none';
     currentItemId = null;
 }
 
-async function doReview(action) {
-    if (!currentItemId) return;
-    const note = document.getElementById('reviewNote').value.trim();
-    if (action === 'reject' && !note) {
-        alert('驳回时必须填写审核备注');
-        return;
-    }
-
-    try {
-        const resp = await apiFetch(`/api/review/${currentItemId}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action, note}),
-        });
-        if (resp.ok) {
-            showToast(action === 'approve' ? '已通过，已加入发布队列' : '已驳回');
-            closeModal();
-            loadPending();
-        } else {
-            const err = await resp.json();
-            showToast(err.detail || '操作失败', 'error');
-        }
-    } catch (e) {
-        showToast('操作失败: ' + e.message, 'error');
-    }
+function confirmReject() {
+    const note = document.getElementById('rejectNote').value.trim();
+    if (!note) { showToast('请填写驳回原因','error'); return; }
+    doReview(currentItemId, 'reject', note);
+    closeRejectModal();
 }
 
-loadPending();
+init();
 </script>
 </body>
 </html>
