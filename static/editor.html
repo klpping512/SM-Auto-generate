@@ -8,7 +8,7 @@
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
 <link rel="stylesheet" href="/static/design-system.css"/>
 <style>
-.workspace-grid { flex: 1; display: grid; grid-template-columns: 280px minmax(0, 1fr) 360px; gap: 16px; overflow: hidden; }
+.workspace-grid { flex: 1; display: grid; grid-template-columns: 230px minmax(380px, 1fr) 300px; gap: 14px; overflow: hidden; min-height: 0; }
 .col-knowledge,
 .col-editor,
 .col-preview {
@@ -49,7 +49,7 @@
 .kb-topic:hover { background: var(--bg-secondary); color: var(--text-primary); }
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (max-width: 1180px) {
+@media (max-width: 900px) {
     .workspace-grid { grid-template-columns: 1fr; overflow: visible; }
     .col-knowledge, .col-editor, .col-preview { min-height: 360px; }
 }
@@ -62,7 +62,7 @@
 <script>
 const PAGE_ID = 'editor';
 const platformInfo = {
-    xiaohongshu: { icon: 'ri:xiaohongshu-fill', color: '#FF2442', name: '小红书' },
+    xiaohongshu: { icon: 'simple-icons:xiaohongshu', color: '#FF2442', name: '小红书' },
     douyin: { icon: 'ri:tiktok-fill', color: '#000', name: '抖音' },
     facebook: { icon: 'ri:facebook-box-fill', color: '#1877F2', name: 'Facebook' },
     twitter: { icon: 'ri:twitter-x-fill', color: '#1DA1F2', name: 'Twitter' },
@@ -99,7 +99,7 @@ async function init() {
                 </div>
                 <div id="kbList" style="flex:1;overflow-y:auto;padding:8px;"></div>
                 <div style="padding:12px;border-top:1px solid var(--border-light);">
-                    <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AI 对话</div>
+                    <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AI 指令（补充要求）</div>
                     <div style="display:flex;gap:6px;">
                         <input id="aiInput" class="input" placeholder="输入需求..." style="font-size:12px;padding:6px 10px;"/>
                         <button class="btn btn-primary btn-sm" onclick="generateContent()" id="genBtn"><iconify-icon icon="mdi:sparkles" width="14"></iconify-icon></button>
@@ -112,6 +112,7 @@ async function init() {
                     <div id="currentTopicTag" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--primary-light);color:var(--primary);border-radius:var(--radius-full);font-size:12px;font-weight:600;">
                         <iconify-icon icon="mdi:tag-outline" width="14"></iconify-icon>
                         <span id="currentTopicText">未选择主题</span>
+                        <iconify-icon id="clearTopicBtn" icon="mdi:close-circle" width="14" onclick="clearTopic()" title="清除主题" style="cursor:pointer;display:none;opacity:0.7;"></iconify-icon>
                     </div>
                     <div style="flex:1;"></div>
                     <select id="toneSelect" class="select" style="font-size:12px;min-width:100px;"><option value="professional">专业严谨</option><option value="friendly">亲切友好</option><option value="urgent">紧急通知</option></select>
@@ -133,7 +134,7 @@ async function init() {
             <!-- 右栏：预览 -->
             <div class="col-preview">
                 <div style="padding:0 12px;border-bottom:1px solid var(--border-light);display:flex;">
-                    ${Object.entries(platformInfo).map(([k,v])=>`<button class="preview-tab" data-platform="${k}" onclick="switchPreview('${k}',this)" style="padding:10px 12px;font-size:11px;font-weight:600;border:none;background:none;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;">${v.name}</button>`).join('')}
+                    ${Object.entries(platformInfo).map(([k,v])=>`<button class="preview-tab" data-platform="${k}" onclick="switchPreview('${k}')" style="padding:10px 12px;font-size:11px;font-weight:600;border:none;background:none;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;">${v.name}</button>`).join('')}
                 </div>
                 <div id="previewArea" style="flex:1;overflow-y:auto;padding:20px;">
                     <div class="empty-state" style="padding-top:80px;"><iconify-icon icon="mdi:sparkles" width="48"></iconify-icon><p style="margin-top:8px;">点击生成按钮预览内容</p></div>
@@ -224,7 +225,7 @@ function renderKnowledgeBase() {
         // 分类行
         const catDiv = document.createElement('div');
         catDiv.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:12px;font-weight:600;cursor:pointer;border-radius:6px;margin-bottom:2px;';
-        catDiv.innerHTML = `<iconify-icon icon="${cat.icon}" width="16" style="color:#3B82F6;"></iconify-icon><span style="flex:1;">${escapeHtml(cat.name_zh)}</span><span style="font-size:10px;color:#9CA3AF;">${cat.topics.length}</span><iconify-icon class="kb-arrow" icon="mdi:chevron-down" width="16" style="color:#9CA3AF;transition:transform 0.2s;"></iconify-icon>`;
+        catDiv.innerHTML = `<iconify-icon icon="${escapeHtml(cat.icon)}" width="16" style="color:#3B82F6;"></iconify-icon><span style="flex:1;">${escapeHtml(cat.name_zh)}</span><span style="font-size:10px;color:#9CA3AF;">${cat.topics.length}</span><iconify-icon class="kb-arrow" icon="mdi:chevron-down" width="16" style="color:#9CA3AF;transition:transform 0.2s;"></iconify-icon>`;
         catDiv.onmouseover = function() { this.style.background = '#F3F4F6'; };
         catDiv.onmouseout = function() { this.style.background = ''; };
 
@@ -257,6 +258,7 @@ function renderKnowledgeBase() {
                 selectedTopic = t;
                 selectedCategory = cat.id;
                 document.getElementById('currentTopicText').textContent = t;
+                document.getElementById('clearTopicBtn').style.display = 'inline-block';
                 document.getElementById('aiInput').value = '';
                 document.getElementById('aiInput').placeholder = `已选「${t}」，可补充要求或直接点 AI 生成`;
                 showToast(`已选择主题：${t}`, 'info');
@@ -277,16 +279,47 @@ function renderKnowledgeBase() {
     });
 }
 
-function toggleCategory(el) {
-    const topics = el.nextElementSibling;
-    topics.style.display = topics.style.display === 'none' ? 'block' : 'none';
+// 清除已选主题，恢复自由输入
+function clearTopic() {
+    selectedTopic = '';
+    selectedCategory = 'custom';
+    document.getElementById('currentTopicText').textContent = '未选择主题';
+    document.getElementById('clearTopicBtn').style.display = 'none';
+    document.getElementById('aiInput').placeholder = '输入需求...';
+    document.querySelectorAll('.kb-topic-item').forEach(el => {
+        el.dataset.selected = '';
+        el.style.background = '';
+        el.style.color = '#6B7280';
+        el.style.fontWeight = '400';
+    });
+    showToast('已清除主题，可自由输入需求', 'info');
 }
 
-function switchPreview(platform, btn) {
+function switchPreview(platform) {
+    if (!platform || platform === currentPreview) {
+        // 即便同平台也要确保预览最新
+        if (platform) renderPreview(platform);
+        return;
+    }
+    // 先把编辑器当前内容写回旧平台，避免切换丢失
+    syncEditorToContent();
     currentPreview = platform;
-    document.querySelectorAll('.preview-tab').forEach(b=>{b.style.color='var(--text-muted)';b.style.borderBottomColor='transparent';});
-    btn.style.color='var(--primary)'; btn.style.borderBottomColor='var(--primary)';
+    document.querySelectorAll('.preview-tab').forEach(b => {
+        const active = b.dataset.platform === platform;
+        b.style.color = active ? 'var(--primary)' : 'var(--text-muted)';
+        b.style.borderBottomColor = active ? 'var(--primary)' : 'transparent';
+    });
+    loadPlatformToEditor(platform);
     renderPreview(platform);
+}
+
+// 把指定平台内容装载进编辑器（程序赋值不触发 input，不会污染数据）
+function loadPlatformToEditor(platform) {
+    const c = generatedContents[platform] || { title:'', body:'', hashtags:[] };
+    document.getElementById('editorTitle').value = c.title || '';
+    document.getElementById('editorContent').value = c.body || '';
+    document.getElementById('editorHashtags').value = (c.hashtags || []).join(', ');
+    document.getElementById('charCount').textContent = (c.body || '').length + ' 字';
 }
 
 function renderPreview(platform) {
@@ -309,7 +342,12 @@ function renderPreview(platform) {
     </div>`;
 }
 
-function editPlatform(p) { const c=generatedContents[p]; if(c){document.getElementById('editorTitle').value=c.title;document.getElementById('editorContent').value=c.body;document.getElementById('editorHashtags').value=(c.hashtags||[]).join(', ');}}
+// 预览卡片"编辑"按钮：切到该平台并聚焦正文编辑器
+function editPlatform(p) {
+    switchPreview(p);
+    const ta = document.getElementById('editorContent');
+    if (ta) ta.focus();
+}
 async function copyPlatform(p) { const c=generatedContents[p]; if(!c)return; try{await navigator.clipboard.writeText(`${c.title}\n\n${c.body}\n\n${(c.hashtags||[]).map(h=>'#'+h).join(' ')}`);showToast('已复制');}catch(e){showToast('复制失败','error');}}
 
 async function generateContent() {
@@ -341,9 +379,16 @@ async function generateContent() {
             return;
         }
         generatedContents = {}; data.contents.forEach(c=>generatedContents[c.platform]=c);
-        const first = data.contents[0];
-        if (first) { document.getElementById('editorTitle').value=first.title; document.getElementById('editorContent').value=first.body; document.getElementById('editorHashtags').value=(first.hashtags||[]).join(', '); document.getElementById('charCount').textContent=first.body.length+' 字'; }
+        // 装载当前预览平台到编辑器（保持编辑器/Tab/预览三者一致）
+        if (!generatedContents[currentPreview]) currentPreview = data.contents[0].platform;
+        loadPlatformToEditor(currentPreview);
         renderPreview(currentPreview);
+        // 同步 Tab 高亮到 currentPreview
+        document.querySelectorAll('.preview-tab').forEach(b => {
+            const active = b.dataset.platform === currentPreview;
+            b.style.color = active ? 'var(--primary)' : 'var(--text-muted)';
+            b.style.borderBottomColor = active ? 'var(--primary)' : 'transparent';
+        });
         // 区分 AI / 模板模式
         if (data.source === 'fallback') {
             showToast('⚠️ 未配置 AI，使用模板生成。请在「设置」配置 DeepSeek API Key', 'info');
