@@ -82,6 +82,7 @@ class UserInfo(BaseModel):
 
 class GenerateRequest(BaseModel):
     topic: str = Field(..., description="物流主题，如 '德班港拥堵'")
+    instruction: str = Field(default="", description="额外的 AI 指令/需求")
     category: str = Field(default="port_rates", description="主题分类")
     platforms: list[Platform] = Field(default=[Platform.XIAOHONGSHU, Platform.FACEBOOK, Platform.TWITTER])
     tone: str = Field(default="professional", description="语气: professional/friendly/urgent")
@@ -99,6 +100,7 @@ class GenerateResponse(BaseModel):
     topic: str
     contents: list[GeneratedContent]
     generated_at: str
+    source: str = "ai"  # "ai" 或 "fallback"
 
 
 # ==================== Queue ====================

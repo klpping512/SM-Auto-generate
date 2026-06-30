@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>平台配置 - SA-LogiFlow</title>
+<title>设置 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
 <link rel="stylesheet" href="/static/design-system.css"/>
@@ -19,33 +19,80 @@ function render() {
     document.getElementById('app').innerHTML = `
     ${renderSidebar(PAGE_ID)}
     <div class="main-content">
-        <div class="page-header">
-            <h1 class="page-title">设置</h1>
-        </div>
+        <div class="page-header"><h1 class="page-title">设置</h1></div>
         <div class="page-body" style="max-width:640px;">
 
+            <!-- AI 引擎 -->
             <div class="card" style="margin-bottom:20px;">
-                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:var(--bg-subcard);display:flex;align-items:center;gap:10px;">
-                    <div style="width:38px;height:38px;border-radius:var(--radius-sm);background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);">
-                        <iconify-icon icon="mdi:brain" width="20"></iconify-icon>
-                    </div>
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#EEF2FF;display:flex;align-items:center;gap:10px;">
+                    <div style="width:36px;height:36px;border-radius:var(--radius-md);background:#6366F115;color:#6366F1;display:flex;align-items:center;justify-content:center;"><iconify-icon icon="mdi:brain" width="20"></iconify-icon></div>
                     <span style="font-size:15px;font-weight:700;">AI 引擎</span>
                 </div>
                 <div class="card-body">
-                    <div style="margin-bottom:12px;">
-                        <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block;">DeepSeek API Key</label>
-                        <div style="display:flex;gap:8px;">
-                            <input id="apiKey" class="input" type="password" placeholder="sk-..." style="flex:1;"/>
-                            <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
-                        </div>
-                        <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">用于 AI 文案生成，未配置时使用模板内容</p>
+                    <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block;">DeepSeek API Key</label>
+                    <div style="display:flex;gap:8px;">
+                        <input id="apiKey" class="input" type="password" placeholder="sk-..." style="flex:1;"/>
+                        <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
                     </div>
-                    <div id="aiStatus" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);">
-                        <span style="width:6px;height:6px;border-radius:50%;background:var(--text-muted);"></span> 未配置
+                    <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">未配置时使用模板内容生成</p>
+                </div>
+            </div>
+
+            <!-- 通知告警 -->
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#FEF3C7;display:flex;align-items:center;gap:10px;">
+                    <div style="width:36px;height:36px;border-radius:var(--radius-md);background:#F59E0B15;color:#F59E0B;display:flex;align-items:center;justify-content:center;"><iconify-icon icon="mdi:bell-outline" width="20"></iconify-icon></div>
+                    <span style="font-size:15px;font-weight:700;">通知告警</span>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">发布失败时发送邮件告警通知</p>
+                    <div style="display:flex;flex-direction:column;gap:12px;">
+                        <div>
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">SMTP 服务器</label>
+                            <input id="smtpHost" class="input" value="smtp.163.com" placeholder="smtp.163.com"/>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                            <div>
+                                <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">端口</label>
+                                <input id="smtpPort" class="input" value="465" placeholder="465"/>
+                            </div>
+                            <div>
+                                <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">发件人邮箱</label>
+                                <input id="smtpUser" class="input" type="email" placeholder="your@163.com"/>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">SMTP 密码/授权码</label>
+                            <input id="smtpPass" class="input" type="password" placeholder="邮箱授权码"/>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">告警收件人</label>
+                            <input id="alertEmail" class="input" type="email" placeholder="admin@example.com"/>
+                        </div>
+                    </div>
+                    <div style="margin-top:16px;display:flex;gap:8px;">
+                        <button class="btn btn-primary" onclick="saveNotification()">保存通知配置</button>
+                        <button class="btn btn-secondary" onclick="testNotification()">发送测试邮件</button>
                     </div>
                 </div>
             </div>
 
+            <!-- 定时发布 -->
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#ECFDF5;display:flex;align-items:center;gap:10px;">
+                    <div style="width:36px;height:36px;border-radius:var(--radius-md);background:#10B98115;color:#10B981;display:flex;align-items:center;justify-content:center;"><iconify-icon icon="mdi:clock-outline" width="20"></iconify-icon></div>
+                    <span style="font-size:15px;font-weight:700;">定时发布</span>
+                </div>
+                <div class="card-body">
+                    <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary);">
+                        <iconify-icon icon="mdi:check-circle" style="color:var(--success);"></iconify-icon>
+                        定时调度器已启用，每分钟检查到期任务自动发布
+                    </div>
+                    <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">在发布队列中设置「定时发布」时间，系统会自动在指定时间发布内容。注意：南非时区 UTC+2。</p>
+                </div>
+            </div>
+
+            <!-- 系统信息 -->
             <div class="card">
                 <div class="card-body" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary);">
                     <iconify-icon icon="mdi:information-outline" style="color:var(--primary);"></iconify-icon>
@@ -61,16 +108,30 @@ async function saveApiKey() {
     const key = document.getElementById('apiKey').value.trim();
     if (!key) { showToast('请输入 API Key', 'error'); return; }
     try {
-        const resp = await apiFetch('/api/config/apikey', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key })
-        });
-        if (resp.ok) {
-            showToast('API Key 已保存，AI 内容生成已启用');
-            document.getElementById('aiStatus').innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:var(--success);"></span> <span style="color:var(--success);font-weight:600;">已配置</span>';
-        }
-    } catch(e) { showToast('保存失败', 'error'); }
+        await apiFetch('/api/config/apikey', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key}) });
+        showToast('API Key 已保存');
+    } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+}
+
+async function saveNotification() {
+    const config = {
+        smtp_host: document.getElementById('smtpHost').value,
+        smtp_port: document.getElementById('smtpPort').value,
+        smtp_user: document.getElementById('smtpUser').value,
+        smtp_pass: document.getElementById('smtpPass').value,
+        alert_email: document.getElementById('alertEmail').value,
+    };
+    try {
+        await apiFetch('/api/config/notification', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config) });
+        showToast('通知配置已保存');
+    } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+}
+
+async function testNotification() {
+    try {
+        await apiFetch('/api/config/notification/test', { method:'POST' });
+        showToast('测试邮件已发送');
+    } catch(e) { showToast('发送失败: ' + e.message, 'error'); }
 }
 
 render();

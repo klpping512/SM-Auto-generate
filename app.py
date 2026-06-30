@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import database as db
 import ai_engine
 import publisher
+import scheduler as sched
 from auth import (
     create_access_token, verify_password, hash_password,
     get_current_user, require_role,
@@ -45,8 +46,11 @@ async def lifespan(app: FastAPI):
     if key:
         ai_engine.set_api_key(key)
         logger.info("DeepSeek API key 已加载")
+    # 启动定时调度器
+    sched.start_scheduler()
     logger.info("SA-LogiFlow v2.0 启动完成 | 数据库: %s", db.DB_PATH)
     yield
+    sched.stop_scheduler()
     logger.info("SA-LogiFlow v2.0 关闭")
 
 
@@ -179,14 +183,14 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     if not ai_engine.DEEPSEEK_API_KEY:
         logger.warning("DeepSeek API key 未配置，使用 fallback 模板")
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
-        return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat())
+        return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat(), source="fallback")
 
     contents = await ai_engine.generate_content(
         topic=req.topic, category=req.category, platforms=req.platforms,
-        tone=req.tone, length=req.length,
+        tone=req.tone, length=req.length, instruction=req.instruction,
     )
     db.add_audit_log(user["id"], user["username"], "generate_content", target=req.topic)
-    return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat())
+    return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat(), source="ai")
 
 
 @app.post("/api/config/apikey")
@@ -197,6 +201,40 @@ async def set_api_key_endpoint(body: dict, user=Depends(require_role(UserRole.AD
         db.add_audit_log(user["id"], user["username"], "set_api_key")
         return {"status": "ok", "message": "API key set"}
     raise HTTPException(400, "Missing key")
+
+
+@app.post("/api/config/notification")
+async def save_notification_config(body: dict, user=Depends(require_role(UserRole.ADMIN))):
+    """保存通知告警配置（写入环境变量，运行时生效）。"""
+    import scheduler as sched
+    if body.get("smtp_host"):
+        os.environ["SMTP_HOST"] = body["smtp_host"]
+    if body.get("smtp_port"):
+        os.environ["SMTP_PORT"] = body["smtp_port"]
+    if body.get("smtp_user"):
+        os.environ["SMTP_USER"] = body["smtp_user"]
+    if body.get("smtp_pass"):
+        os.environ["SMTP_PASS"] = body["smtp_pass"]
+    if body.get("alert_email"):
+        os.environ["ALERT_EMAIL"] = body["alert_email"]
+    # 同步到 scheduler 模块
+    sched.SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.163.com")
+    sched.SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+    sched.SMTP_USER = os.environ.get("SMTP_USER", "")
+    sched.SMTP_PASS = os.environ.get("SMTP_PASS", "")
+    sched.ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "")
+    db.add_audit_log(user["id"], user["username"], "save_notification_config")
+    return {"status": "ok"}
+
+
+@app.post("/api/config/notification/test")
+async def test_notification(user=Depends(require_role(UserRole.ADMIN))):
+    """发送测试告警邮件。"""
+    import scheduler as sched
+    test_item = {"platform": "test", "title": "测试告警", "body": "这是一封测试告警邮件"}
+    await sched.send_alert(test_item, "测试错误 - 请忽略")
+    db.add_audit_log(user["id"], user["username"], "test_notification")
+    return {"status": "ok", "message": "测试邮件已发送"}
 
 
 # ==================== API: Accounts ====================

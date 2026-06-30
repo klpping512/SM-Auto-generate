@@ -24,6 +24,7 @@ async def generate_content(
     platforms: list[Platform],
     tone: str = "professional",
     length: str = "medium",
+    instruction: str = "",
 ) -> list[GeneratedContent]:
     """Generate platform-specific content for a given topic."""
     results = []
@@ -37,13 +38,14 @@ async def generate_content(
         }
         tone_desc = tone_map.get(tone, tone_map["professional"])
 
+        extra = f"\n额外要求：{instruction}\n" if instruction else ""
         user_prompt = f"""请为以下物流主题生成{platform.value}平台的内容：
 
 主题：{topic}
 分类：{category}
 语气：{tone_desc}
 长度：{length}
-
+{extra}
 {prompt_config['format']}
 
 请严格按照以下JSON格式返回，不要有任何其他文字：

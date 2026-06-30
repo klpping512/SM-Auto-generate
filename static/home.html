@@ -99,12 +99,8 @@ async function init() {
                 </div>
             </div>
 
-            <!-- 平台状态 + 图表 -->
-            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-bottom:24px;">
-                <div class="card">
-                    <div class="card-header"><span class="card-title">发布趋势（7天）</span></div>
-                    <div class="card-body"><div id="trendChart" style="height:280px;"></div></div>
-                </div>
+            <!-- 平台分布 -->
+            <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:16px;margin-bottom:24px;">
                 <div class="card">
                     <div class="card-header"><span class="card-title">平台分布</span></div>
                     <div class="card-body"><div id="distChart" style="height:280px;"></div></div>
@@ -156,19 +152,6 @@ async function init() {
         </div>
     </div>`;
 
-    // 趋势图
-    const trendChart = echarts.init(document.getElementById('trendChart'));
-    trendChart.setOption({
-        tooltip: { trigger: 'axis' },
-        grid: { left: 40, right: 20, top: 20, bottom: 30 },
-        xAxis: { type: 'category', data: ['周一','周二','周三','周四','周五','周六','周日'], axisLine: { lineStyle: { color: '#E5E7EB' } }, axisLabel: { color: '#9CA3AF', fontSize: 11 } },
-        yAxis: { type: 'value', splitLine: { lineStyle: { type: 'dashed', color: '#F3F4F6' } }, axisLabel: { color: '#9CA3AF', fontSize: 11 } },
-        series: [
-            { name: '小红书', type: 'line', smooth: true, data: [3,5,2,6,4,1,0], lineStyle: { color: '#FF2442' }, itemStyle: { color: '#FF2442' }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(255,36,66,0.15)' }, { offset: 1, color: 'rgba(255,36,66,0)' }] } } },
-            { name: 'Facebook', type: 'line', smooth: true, data: [2,3,4,2,5,3,1], lineStyle: { color: '#1877F2' }, itemStyle: { color: '#1877F2' }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(24,119,242,0.15)' }, { offset: 1, color: 'rgba(24,119,242,0)' }] } } },
-        ]
-    });
-
     // 分布图
     const distChart = echarts.init(document.getElementById('distChart'));
     const distData = Object.entries(data.platform_stats).map(([k,v]) => ({ value: v.total, name: platformNames[k]||k, itemStyle: { color: platformColors[k]||'#6B7280' } }));
@@ -177,7 +160,7 @@ async function init() {
         series: [{ type: 'pie', radius: ['45%','75%'], avoidLabelOverlap: false, itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 3 }, label: { show: false }, data: distData.length ? distData : [{ value: 0, name: '暂无数据' }] }]
     });
 
-    window.addEventListener('resize', () => { trendChart.resize(); distChart.resize(); });
+    window.addEventListener('resize', () => { distChart.resize(); });
 }
 
 init();
