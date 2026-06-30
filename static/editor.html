@@ -95,7 +95,7 @@ async function init() {
                     <div style="font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
                         <iconify-icon icon="mdi:book-open-outline" style="color:var(--primary);"></iconify-icon> 知识库
                     </div>
-                    <input class="input" placeholder="搜索知识库..." style="font-size:12px;padding:6px 10px;"/>
+                    <input id="kbSearch" class="input" placeholder="搜索知识库..." style="font-size:12px;padding:6px 10px;"/>
                 </div>
                 <div id="kbList" style="flex:1;overflow-y:auto;padding:8px;"></div>
                 <div style="padding:12px;border-top:1px solid var(--border-light);">
@@ -119,8 +119,6 @@ async function init() {
                     <button class="btn btn-primary btn-sm" onclick="generateContent()" id="genBtnMain"><iconify-icon icon="mdi:sparkles" width="14"></iconify-icon> AI 生成</button>
                 </div>
                 <div class="toolbar">
-                    <button title="加粗"><iconify-icon icon="mdi:format-bold"></iconify-icon></button>
-                    <button title="列表"><iconify-icon icon="mdi:format-list-bulleted"></iconify-icon></button>
                     <div style="flex:1;"></div>
                     <span id="charCount" style="font-size:11px;color:var(--text-muted);padding:6px 0;">0 字</span>
                 </div>
@@ -146,10 +144,76 @@ async function init() {
 
     const firstTab = document.querySelector('.preview-tab');
     if (firstTab) { firstTab.style.color='var(--primary)'; firstTab.style.borderBottomColor='var(--primary)'; }
-    document.getElementById('editorContent').addEventListener('input', e => { document.getElementById('charCount').textContent = e.target.value.length + ' 字'; });
+
+    // 编辑器任意字段变化 → 同步写回当前平台内容 + 刷新预览
+    ['editorTitle','editorContent','editorHashtags'].forEach(id => {
+        document.getElementById(id).addEventListener('input', syncEditorToContent);
+    });
+
+    // 知识库搜索框 → 过滤分类/主题
+    document.getElementById('kbSearch').addEventListener('input', e => filterKnowledgeBase(e.target.value));
 
     // 渲染知识库（DOM 操作，避免模板拼接问题）
     renderKnowledgeBase();
+
+    // 加载本地草稿
+    loadDraft();
+}
+
+// 把编辑器内容同步回 generatedContents[currentPreview]，并刷新右侧预览
+function syncEditorToContent() {
+    const title = document.getElementById('editorTitle').value;
+    const body = document.getElementById('editorContent').value;
+    const hashtags = document.getElementById('editorHashtags').value
+        .split(',').map(s => s.trim()).filter(Boolean);
+    document.getElementById('charCount').textContent = body.length + ' 字';
+    const existing = generatedContents[currentPreview] || {};
+    generatedContents[currentPreview] = { ...existing, platform: currentPreview, title, body, hashtags };
+    renderPreview(currentPreview);
+}
+
+// 知识库过滤：按关键词显示/隐藏分类与主题
+function filterKnowledgeBase(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    const container = document.getElementById('kbList');
+    if (!container) return;
+    // kbList 子节点是 [分类行, 主题容器] 交替排列
+    const children = Array.from(container.children);
+    for (let i = 0; i < children.length; i += 2) {
+        const catDiv = children[i];
+        const topicsDiv = children[i + 1];
+        if (!topicsDiv) continue;
+        const catName = (catDiv.textContent || '').toLowerCase();
+        let anyTopicMatch = false;
+        topicsDiv.querySelectorAll('.kb-topic-item').forEach(item => {
+            const match = !kw || item.textContent.toLowerCase().includes(kw);
+            item.style.display = match ? '' : 'none';
+            if (match) anyTopicMatch = true;
+        });
+        const catMatch = !kw || catName.includes(kw) || anyTopicMatch;
+        catDiv.style.display = catMatch ? '' : 'none';
+        // 有关键词且命中主题时自动展开
+        if (kw && anyTopicMatch) {
+            topicsDiv.style.display = 'block';
+        } else if (!kw) {
+            topicsDiv.style.display = 'none';
+        }
+    }
+}
+
+// 加载本地草稿到编辑器
+function loadDraft() {
+    let draft;
+    try { draft = JSON.parse(localStorage.getItem('draft')); } catch(e) { draft = null; }
+    if (!draft) return;
+    if (draft.title) document.getElementById('editorTitle').value = draft.title;
+    if (draft.body) {
+        document.getElementById('editorContent').value = draft.body;
+        document.getElementById('charCount').textContent = draft.body.length + ' 字';
+    }
+    if (draft.hashtags) document.getElementById('editorHashtags').value = draft.hashtags;
+    // 同步进当前平台内容，便于预览与提交
+    if (draft.title || draft.body) syncEditorToContent();
 }
 
 function renderKnowledgeBase() {
@@ -254,7 +318,7 @@ async function generateContent() {
     const topic = selectedTopic || aiReq;
     if (!topic) { showToast('请先在左侧选择主题，或在 AI 对话框输入需求','error'); return; }
 
-    const platforms = ['xiaohongshu','facebook','twitter','reddit'];
+    const platforms = ['xiaohongshu','douyin','facebook','twitter','reddit'];
     const btns = [document.getElementById('genBtn'), document.getElementById('genBtnMain')];
     btns.forEach(b => { if(b) b.disabled = true; });
     const mainBtn = document.getElementById('genBtnMain');
@@ -271,6 +335,11 @@ async function generateContent() {
                 length: document.getElementById('lengthSelect').value
             }) });
         const data = await resp.json();
+        // P0-3: 防御后端异常响应
+        if (!data || !Array.isArray(data.contents) || data.contents.length === 0) {
+            showToast('生成失败：服务未返回有效内容', 'error');
+            return;
+        }
         generatedContents = {}; data.contents.forEach(c=>generatedContents[c.platform]=c);
         const first = data.contents[0];
         if (first) { document.getElementById('editorTitle').value=first.title; document.getElementById('editorContent').value=first.body; document.getElementById('editorHashtags').value=(first.hashtags||[]).join(', '); document.getElementById('charCount').textContent=first.body.length+' 字'; }
@@ -289,15 +358,31 @@ async function generateContent() {
 }
 
 async function submitToQueue() {
-    const title=document.getElementById('editorTitle').value, body=document.getElementById('editorContent').value;
-    if (!title||!body) { showToast('请先生成或输入内容','error'); return; }
-    const platforms=Object.keys(generatedContents);
-    if (!platforms.length) { showToast('请先生成内容','error'); return; }
-    let added=0;
-    for (const [platform,c] of Object.entries(generatedContents)) {
-        try { await apiFetch('/api/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:c.title,body:c.body,platforms:[platform],hashtags:c.hashtags||[],status:'pending_review'})}); added++; } catch(e){}
+    // 提交前先把编辑器最新内容写回当前平台
+    syncEditorToContent();
+    const entries = Object.entries(generatedContents).filter(([, c]) => c && c.title && c.body);
+    if (!entries.length) { showToast('请先生成或输入内容', 'error'); return; }
+
+    let added = 0;
+    const failed = [];
+    for (const [platform, c] of entries) {
+        try {
+            await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review' }) });
+            added++;
+        } catch(e) {
+            failed.push(platformInfo[platform]?.name || platform);
+        }
     }
-    showToast(`已提交 ${added} 个平台到审核队列`);
+
+    // P0-2: 显示真实提交结果
+    if (failed.length === 0) {
+        showToast(`已提交 ${added} 个平台到审核队列`);
+    } else if (added === 0) {
+        showToast(`提交失败：${failed.join('、')}`, 'error');
+    } else {
+        showToast(`已提交 ${added} 个，失败 ${failed.length} 个（${failed.join('、')}）`, 'error');
+    }
 }
 
 function saveDraft() { localStorage.setItem('draft',JSON.stringify({title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value})); showToast('草稿已保存'); }
