@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Prompt 模板 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css"/>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
+<script>
+const PAGE_ID = 'templates';
+
+let templates = [];
+let editing = null;
+
+async function init() {
+    const resp = await apiFetch('/api/prompt-templates');
+    templates = await resp.json();
+    render();
+}
+
+function render() {
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">Prompt 模板</h1>
+            <button class="btn btn-primary btn-sm" onclick="showModal()"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 新增模板</button>
+        </div>
+        <div class="page-body">
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">沉淀部门常用 Prompt（港口资讯 / 客户案例 / 行业热点等），在 AI 工作区一键套用，保证内容风格统一。</p>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
+                ${templates.length === 0 ? '<div class="empty-state">暂无模板</div>' :
+                templates.map(t => `
+                    <div class="card" style="padding:18px;display:flex;flex-direction:column;gap:10px;">
+                        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+                                <div style="width:32px;height:32px;border-radius:var(--radius-md);background:var(--primary)15;color:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><iconify-icon icon="mdi:text-box-outline" width="18"></iconify-icon></div>
+                                <div style="min-width:0;">
+                                    <div style="font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.name)}</div>
+                                    ${t.category ? `<span class="badge badge-gray" style="margin-top:2px;">${escapeHtml(t.category)}</span>` : ''}
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:2px;flex-shrink:0;">
+                                <button class="btn btn-ghost btn-sm" onclick="editTpl(${t.id})"><iconify-icon icon="mdi:pencil-outline" width="15"></iconify-icon></button>
+                                <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteTpl(${t.id})"><iconify-icon icon="mdi:delete-outline" width="15"></iconify-icon></button>
+                            </div>
+                        </div>
+                        <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(t.content)}</div>
+                    </div>`).join('')}
+            </div>
+        </div>
+    </div>
+
+    <div id="tplModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:540px;max-width:92vw;padding:24px;max-height:88vh;overflow:auto;">
+            <h3 id="tplModalTitle" style="font-size:16px;font-weight:700;margin-bottom:16px;">新增模板</h3>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">模板名称</label><input id="tplName" class="input" placeholder="如：港口资讯"/></div>
+                    <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">分类标签（可选）</label><input id="tplCategory" class="input" placeholder="如：资讯"/></div>
+                </div>
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">Prompt 内容</label>
+                    <textarea id="tplContent" class="input" rows="8" placeholder="描述这个模板要 AI 怎么写，会作为补充要求注入生成。" style="resize:vertical;font-family:inherit;line-height:1.6;"></textarea></div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="saveTpl()">保存</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+function showModal() {
+    editing = null;
+    document.getElementById('tplModalTitle').textContent = '新增模板';
+    document.getElementById('tplName').value = '';
+    document.getElementById('tplCategory').value = '';
+    document.getElementById('tplContent').value = '';
+    document.getElementById('tplModal').style.display = 'flex';
+}
+function closeModal() { document.getElementById('tplModal').style.display = 'none'; }
+
+function editTpl(id) {
+    const t = templates.find(t => t.id === id);
+    if (!t) return;
+    editing = t;
+    document.getElementById('tplModalTitle').textContent = '编辑模板';
+    document.getElementById('tplName').value = t.name;
+    document.getElementById('tplCategory').value = t.category || '';
+    document.getElementById('tplContent').value = t.content;
+    document.getElementById('tplModal').style.display = 'flex';
+}
+
+async function saveTpl() {
+    const name = document.getElementById('tplName').value.trim();
+    const category = document.getElementById('tplCategory').value.trim();
+    const content = document.getElementById('tplContent').value.trim();
+    if (!name || !content) { showToast('名称和内容不能为空', 'error'); return; }
+    try {
+        if (editing) {
+            await apiFetch(`/api/prompt-templates/${editing.id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, category, content }) });
+            showToast('已更新');
+        } else {
+            await apiFetch('/api/prompt-templates', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, category, content }) });
+            showToast('已保存');
+        }
+        closeModal(); init();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteTpl(id) {
+    if (!confirm('确定删除该模板？')) return;
+    try { await apiFetch(`/api/prompt-templates/${id}`, { method:'DELETE' }); showToast('已删除'); init(); }
+    catch(e) { showToast(e.message, 'error'); }
+}
+
+init();
+</script>
+</body>
+</html>

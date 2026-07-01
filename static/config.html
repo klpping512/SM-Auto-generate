@@ -20,23 +20,9 @@ function render() {
     ${renderSidebar(PAGE_ID)}
     <div class="main-content">
         <div class="page-header"><h1 class="page-title">设置</h1></div>
-        <div class="page-body" style="max-width:640px;">
-
-            <!-- AI 引擎 -->
-            <div class="card" style="margin-bottom:20px;">
-                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#EEF2FF;display:flex;align-items:center;gap:10px;">
-                    <div style="width:36px;height:36px;border-radius:var(--radius-md);background:#6366F115;color:#6366F1;display:flex;align-items:center;justify-content:center;"><iconify-icon icon="mdi:brain" width="20"></iconify-icon></div>
-                    <span style="font-size:15px;font-weight:700;">AI 引擎</span>
-                </div>
-                <div class="card-body">
-                    <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block;">DeepSeek API Key</label>
-                    <div style="display:flex;gap:8px;">
-                        <input id="apiKey" class="input" type="password" placeholder="sk-..." style="flex:1;"/>
-                        <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
-                    </div>
-                    <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">未配置时使用模板内容生成</p>
-                </div>
-            </div>
+        <div class="page-body" style="padding-right:4px;">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px;align-items:start;">
+            <div>
 
             <!-- 通知告警 -->
             <div class="card" style="margin-bottom:20px;">
@@ -72,8 +58,41 @@ function render() {
                     </div>
                     <div style="margin-top:16px;display:flex;gap:8px;">
                         <button class="btn btn-primary" onclick="saveNotification()">保存通知配置</button>
-                        <button class="btn btn-secondary" onclick="testNotification()">发送测试邮件</button>
+                        <button class="btn btn-secondary" onclick="testNotification('email')">发送测试邮件</button>
                     </div>
+                </div>
+            </div>
+            </div>
+            <div>
+
+            <!-- IM 机器人通知 -->
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#E0F2FE;display:flex;align-items:center;gap:10px;">
+                    <div style="width:36px;height:36px;border-radius:var(--radius-md);background:#0EA5E915;color:#0EA5E9;display:flex;align-items:center;justify-content:center;"><iconify-icon icon="mdi:robot-outline" width="20"></iconify-icon></div>
+                    <span style="font-size:15px;font-weight:700;">IM 机器人通知</span>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">发布成功/失败时，主动推送到飞书或企业微信群机器人</p>
+                    <div style="display:flex;flex-direction:column;gap:12px;">
+                        <div>
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:flex;align-items:center;gap:6px;"><iconify-icon icon="simple-icons:feishu" style="color:#3370FF;"></iconify-icon> 飞书 Webhook</label>
+                            <div style="display:flex;gap:8px;">
+                                <input id="feishuWebhook" class="input" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." style="flex:1;"/>
+                                <button class="btn btn-secondary" onclick="testNotification('feishu')">测试</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:flex;align-items:center;gap:6px;"><iconify-icon icon="mdi:wechat" style="color:#07C160;"></iconify-icon> 企业微信 Webhook</label>
+                            <div style="display:flex;gap:8px;">
+                                <input id="wecomWebhook" class="input" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." style="flex:1;"/>
+                                <button class="btn btn-secondary" onclick="testNotification('wecom')">测试</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="saveNotification()">保存通知配置</button>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-muted);margin-top:10px;">在群里添加「自定义机器人」即可获取 Webhook 地址。两者可同时配置，也可只配一个。</p>
                 </div>
             </div>
 
@@ -100,17 +119,10 @@ function render() {
                 </div>
             </div>
 
+            </div>
+          </div>
         </div>
     </div>`;
-}
-
-async function saveApiKey() {
-    const key = document.getElementById('apiKey').value.trim();
-    if (!key) { showToast('请输入 API Key', 'error'); return; }
-    try {
-        await apiFetch('/api/config/apikey', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key}) });
-        showToast('API Key 已保存');
-    } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
 }
 
 async function saveNotification() {
@@ -120,6 +132,8 @@ async function saveNotification() {
         smtp_user: document.getElementById('smtpUser').value,
         smtp_pass: document.getElementById('smtpPass').value,
         alert_email: document.getElementById('alertEmail').value,
+        feishu_webhook: document.getElementById('feishuWebhook').value.trim(),
+        wecom_webhook: document.getElementById('wecomWebhook').value.trim(),
     };
     try {
         await apiFetch('/api/config/notification', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config) });
@@ -127,10 +141,11 @@ async function saveNotification() {
     } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
 }
 
-async function testNotification() {
+async function testNotification(channel = 'all') {
+    const names = { email: '邮件', feishu: '飞书', wecom: '企业微信', all: '全部渠道' };
     try {
-        await apiFetch('/api/config/notification/test', { method:'POST' });
-        showToast('测试邮件已发送');
+        await apiFetch('/api/config/notification/test', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channel}) });
+        showToast(`${names[channel] || ''}测试通知已发送`);
     } catch(e) { showToast('发送失败: ' + e.message, 'error'); }
 }
 

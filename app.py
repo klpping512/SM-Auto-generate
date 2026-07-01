@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -180,6 +180,9 @@ async def get_topic(category_id: str):
 
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate_content(req: GenerateRequest, user=Depends(get_current_user)):
+    # 引用企业知识库：按分类取文档全文，注入 prompt
+    kb_context = db.get_kb_context(req.kb_category_ids) if req.kb_category_ids else ""
+
     if not ai_engine.DEEPSEEK_API_KEY:
         logger.warning("DeepSeek API key 未配置，使用 fallback 模板")
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
@@ -188,6 +191,7 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     contents = await ai_engine.generate_content(
         topic=req.topic, category=req.category, platforms=req.platforms,
         tone=req.tone, length=req.length, instruction=req.instruction,
+        kb_context=kb_context,
     )
     db.add_audit_log(user["id"], user["username"], "generate_content", target=req.topic)
     return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat(), source="ai")
@@ -217,24 +221,39 @@ async def save_notification_config(body: dict, user=Depends(require_role(UserRol
         os.environ["SMTP_PASS"] = body["smtp_pass"]
     if body.get("alert_email"):
         os.environ["ALERT_EMAIL"] = body["alert_email"]
+    # IM 机器人 webhook（允许置空以清除）
+    if "feishu_webhook" in body:
+        os.environ["FEISHU_WEBHOOK"] = body["feishu_webhook"]
+    if "wecom_webhook" in body:
+        os.environ["WECOM_WEBHOOK"] = body["wecom_webhook"]
     # 同步到 scheduler 模块
     sched.SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.163.com")
     sched.SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
     sched.SMTP_USER = os.environ.get("SMTP_USER", "")
     sched.SMTP_PASS = os.environ.get("SMTP_PASS", "")
     sched.ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "")
+    sched.FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
+    sched.WECOM_WEBHOOK = os.environ.get("WECOM_WEBHOOK", "")
     db.add_audit_log(user["id"], user["username"], "save_notification_config")
     return {"status": "ok"}
 
 
 @app.post("/api/config/notification/test")
-async def test_notification(user=Depends(require_role(UserRole.ADMIN))):
-    """发送测试告警邮件。"""
-    import scheduler as sched
-    test_item = {"platform": "test", "title": "测试告警", "body": "这是一封测试告警邮件"}
-    await sched.send_alert(test_item, "测试错误 - 请忽略")
-    db.add_audit_log(user["id"], user["username"], "test_notification")
-    return {"status": "ok", "message": "测试邮件已发送"}
+async def test_notification(body: dict = None, user=Depends(require_role(UserRole.ADMIN))):
+    """发送测试通知。body.channel: all/email/feishu/wecom（默认 all）。"""
+    channel = (body or {}).get("channel", "all")
+    subject = "[SA-LogiFlow] 测试通知"
+    text = "🔔 这是一条测试通知，收到说明该渠道配置成功。\n时间：" + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if channel == "email":
+        await sched.send_email(subject, text)
+    elif channel == "feishu":
+        await sched.send_feishu(text)
+    elif channel == "wecom":
+        await sched.send_wecom(text)
+    else:
+        await sched.notify_all(subject, text)
+    db.add_audit_log(user["id"], user["username"], "test_notification", target=channel)
+    return {"status": "ok", "message": f"测试通知已发送（{channel}）"}
 
 
 # ==================== API: Accounts ====================
@@ -423,6 +442,137 @@ async def get_audit_logs(limit: int = 100, user=Depends(require_role(UserRole.AD
 @app.get("/api/publish/logs")
 async def get_publish_logs(limit: int = 50, user=Depends(get_current_user)):
     return db.get_publish_logs(limit)
+
+
+# ==================== API: Knowledge Base ====================
+
+@app.get("/api/kb/categories")
+async def kb_list_categories(user=Depends(get_current_user)):
+    return db.get_kb_categories()
+
+
+@app.post("/api/kb/categories")
+async def kb_create_category(body: dict, user=Depends(get_current_user)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "分类名称不能为空")
+    try:
+        cat_id = db.create_kb_category(name, body.get("description", ""))
+    except Exception:
+        raise HTTPException(400, "分类已存在")
+    db.add_audit_log(user["id"], user["username"], "kb_create_category", target=name)
+    return {"status": "ok", "id": cat_id}
+
+
+@app.delete("/api/kb/categories/{cat_id}")
+async def kb_delete_category(cat_id: int, user=Depends(require_role(UserRole.ADMIN, UserRole.EDITOR))):
+    db.delete_kb_category(cat_id)
+    db.add_audit_log(user["id"], user["username"], "kb_delete_category", target=str(cat_id))
+    return {"status": "ok"}
+
+
+@app.get("/api/kb/documents")
+async def kb_list_documents(category_id: int = None, user=Depends(get_current_user)):
+    return db.get_kb_documents(category_id)
+
+
+@app.get("/api/kb/documents/{doc_id}")
+async def kb_get_document(doc_id: int, user=Depends(get_current_user)):
+    doc = db.get_kb_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "文档不存在")
+    return doc
+
+
+@app.post("/api/kb/documents")
+async def kb_create_document(body: dict, user=Depends(get_current_user)):
+    title = (body.get("title") or "").strip()
+    content = (body.get("content") or "").strip()
+    category_id = body.get("category_id")
+    if not title or not content:
+        raise HTTPException(400, "标题和内容不能为空")
+    doc_id = db.create_kb_document(category_id, title, content, body.get("source_type", "text"), user["id"])
+    db.add_audit_log(user["id"], user["username"], "kb_create_document", target=title)
+    return {"status": "ok", "id": doc_id}
+
+
+@app.put("/api/kb/documents/{doc_id}")
+async def kb_update_document(doc_id: int, body: dict, user=Depends(get_current_user)):
+    if not db.get_kb_document(doc_id):
+        raise HTTPException(404, "文档不存在")
+    title = (body.get("title") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not title or not content:
+        raise HTTPException(400, "标题和内容不能为空")
+    db.update_kb_document(doc_id, title, content, body.get("category_id"))
+    db.add_audit_log(user["id"], user["username"], "kb_update_document", target=title)
+    return {"status": "ok"}
+
+
+@app.delete("/api/kb/documents/{doc_id}")
+async def kb_delete_document(doc_id: int, user=Depends(get_current_user)):
+    db.delete_kb_document(doc_id)
+    db.add_audit_log(user["id"], user["username"], "kb_delete_document", target=str(doc_id))
+    return {"status": "ok"}
+
+
+@app.post("/api/kb/upload")
+async def kb_upload(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """上传 TXT/MD 文件，解析为纯文本返回（前端再决定存哪个分类）。"""
+    name = file.filename or "未命名"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ("txt", "md", "markdown"):
+        raise HTTPException(400, "仅支持 TXT / Markdown 文件")
+    raw = await file.read()
+    if len(raw) > 1024 * 1024:  # 1MB 上限
+        raise HTTPException(400, "文件过大（上限 1MB）")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gbk")
+        except UnicodeDecodeError:
+            raise HTTPException(400, "无法识别文件编码，请用 UTF-8")
+    title = name.rsplit(".", 1)[0]
+    return {"status": "ok", "title": title, "content": text, "source_type": ext}
+
+
+# ==================== API: Prompt Templates ====================
+
+@app.get("/api/prompt-templates")
+async def list_prompt_templates(user=Depends(get_current_user)):
+    return db.get_prompt_templates()
+
+
+@app.post("/api/prompt-templates")
+async def create_prompt_template(body: dict, user=Depends(get_current_user)):
+    name = (body.get("name") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not name or not content:
+        raise HTTPException(400, "名称和内容不能为空")
+    tpl_id = db.create_prompt_template(name, body.get("category", ""), content, user["id"])
+    db.add_audit_log(user["id"], user["username"], "create_prompt_template", target=name)
+    return {"status": "ok", "id": tpl_id}
+
+
+@app.put("/api/prompt-templates/{tpl_id}")
+async def update_prompt_template(tpl_id: int, body: dict, user=Depends(get_current_user)):
+    if not db.get_prompt_template(tpl_id):
+        raise HTTPException(404, "模板不存在")
+    name = (body.get("name") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not name or not content:
+        raise HTTPException(400, "名称和内容不能为空")
+    db.update_prompt_template(tpl_id, name, body.get("category", ""), content)
+    db.add_audit_log(user["id"], user["username"], "update_prompt_template", target=name)
+    return {"status": "ok"}
+
+
+@app.delete("/api/prompt-templates/{tpl_id}")
+async def delete_prompt_template(tpl_id: int, user=Depends(get_current_user)):
+    db.delete_prompt_template(tpl_id)
+    db.add_audit_log(user["id"], user["username"], "delete_prompt_template", target=str(tpl_id))
+    return {"status": "ok"}
 
 
 # ==================== Static Assets ====================

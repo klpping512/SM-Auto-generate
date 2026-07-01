@@ -25,6 +25,7 @@ async def generate_content(
     tone: str = "professional",
     length: str = "medium",
     instruction: str = "",
+    kb_context: str = "",
 ) -> list[GeneratedContent]:
     """Generate platform-specific content for a given topic."""
     results = []
@@ -39,13 +40,18 @@ async def generate_content(
         tone_desc = tone_map.get(tone, tone_map["professional"])
 
         extra = f"\n额外要求：{instruction}\n" if instruction else ""
+        kb_block = (
+            f"\n以下是公司内部知识库资料，请优先依据这些真实信息生成内容，"
+            f"不要编造与之矛盾的事实：\n----\n{kb_context}\n----\n"
+            if kb_context else ""
+        )
         user_prompt = f"""请为以下物流主题生成{platform.value}平台的内容：
 
 主题：{topic}
 分类：{category}
 语气：{tone_desc}
 长度：{length}
-{extra}
+{extra}{kb_block}
 {prompt_config['format']}
 
 请严格按照以下JSON格式返回，不要有任何其他文字：

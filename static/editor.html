@@ -74,9 +74,14 @@ let currentPreview = 'xiaohongshu';
 let categories = [];
 let selectedTopic = '';
 let selectedCategory = 'custom';
+let kbCategories = [];           // 企业知识库分类
+let selectedKbCats = new Set();  // 已勾选引用的知识库分类 id
+let promptTemplates = [];        // Prompt 模板
 
 async function init() {
     try { const r = await apiFetch('/api/topics'); categories = await r.json(); } catch(e) { categories = []; }
+    try { const r = await apiFetch('/api/kb/categories'); kbCategories = await r.json(); } catch(e) { kbCategories = []; }
+    try { const r = await apiFetch('/api/prompt-templates'); promptTemplates = await r.json(); } catch(e) { promptTemplates = []; }
 
     document.getElementById('app').innerHTML = `
     ${renderSidebar(PAGE_ID)}
@@ -98,6 +103,12 @@ async function init() {
                     <input id="kbSearch" class="input" placeholder="搜索知识库..." style="font-size:12px;padding:6px 10px;"/>
                 </div>
                 <div id="kbList" style="flex:1;overflow-y:auto;padding:8px;"></div>
+                <div style="padding:10px 12px;border-top:1px solid var(--border-light);">
+                    <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;display:flex;align-items:center;gap:4px;">
+                        <iconify-icon icon="mdi:bookshelf" width="12"></iconify-icon> 引用企业知识库
+                    </div>
+                    <div id="kbRefChips" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+                </div>
                 <div style="padding:12px;border-top:1px solid var(--border-light);">
                     <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AI 指令（补充要求）</div>
                     <div style="display:flex;gap:6px;">
@@ -115,6 +126,9 @@ async function init() {
                         <iconify-icon id="clearTopicBtn" icon="mdi:close-circle" width="14" onclick="clearTopic()" title="清除主题" style="cursor:pointer;display:none;opacity:0.7;"></iconify-icon>
                     </div>
                     <div style="flex:1;"></div>
+                    <select id="tplSelect" class="select" style="font-size:12px;min-width:120px;" onchange="applyTemplate(this.value)" title="套用 Prompt 模板">
+                        <option value="">Prompt 模板…</option>
+                    </select>
                     <select id="toneSelect" class="select" style="font-size:12px;min-width:100px;"><option value="professional">专业严谨</option><option value="friendly">亲切友好</option><option value="urgent">紧急通知</option></select>
                     <select id="lengthSelect" class="select" style="font-size:12px;min-width:80px;"><option value="short">短文案</option><option value="medium" selected>中文案</option><option value="long">长文案</option></select>
                     <button class="btn btn-primary btn-sm" onclick="generateContent()" id="genBtnMain"><iconify-icon icon="mdi:sparkles" width="14"></iconify-icon> AI 生成</button>
@@ -157,8 +171,55 @@ async function init() {
     // 渲染知识库（DOM 操作，避免模板拼接问题）
     renderKnowledgeBase();
 
+    // 渲染企业知识库引用 chips + Prompt 模板下拉
+    renderKbRefs();
+    renderTemplateOptions();
+
     // 加载本地草稿
     loadDraft();
+}
+
+// 渲染"引用企业知识库"勾选 chips
+function renderKbRefs() {
+    const box = document.getElementById('kbRefChips');
+    if (!box) return;
+    if (!kbCategories.length) {
+        box.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">暂无知识库，去「企业知识库」添加</span>';
+        return;
+    }
+    box.innerHTML = '';
+    kbCategories.forEach(c => {
+        const on = selectedKbCats.has(c.id);
+        const chip = document.createElement('span');
+        chip.textContent = `${c.name}${c.doc_count ? ' ' + c.doc_count : ''}`;
+        chip.title = c.description || c.name;
+        chip.style.cssText = `font-size:11px;padding:3px 9px;border-radius:999px;cursor:pointer;user-select:none;border:1px solid ${on ? 'var(--primary)' : 'var(--border)'};background:${on ? 'var(--primary)' : 'transparent'};color:${on ? '#fff' : 'var(--text-secondary)'};`;
+        chip.onclick = () => {
+            if (selectedKbCats.has(c.id)) selectedKbCats.delete(c.id);
+            else selectedKbCats.add(c.id);
+            renderKbRefs();
+        };
+        box.appendChild(chip);
+    });
+}
+
+// 填充 Prompt 模板下拉
+function renderTemplateOptions() {
+    const sel = document.getElementById('tplSelect');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Prompt 模板…</option>' +
+        promptTemplates.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+}
+
+// 套用模板：把模板内容填入 AI 指令框
+function applyTemplate(id) {
+    if (!id) return;
+    const t = promptTemplates.find(t => String(t.id) === String(id));
+    if (!t) return;
+    const input = document.getElementById('aiInput');
+    input.value = t.content;
+    showToast(`已套用模板「${t.name}」，可直接点 AI 生成`, 'info');
+    document.getElementById('tplSelect').value = '';
 }
 
 // 把编辑器内容同步回 generatedContents[currentPreview]，并刷新右侧预览
@@ -370,7 +431,8 @@ async function generateContent() {
                 category: selectedCategory || 'custom',
                 platforms,
                 tone: document.getElementById('toneSelect').value,
-                length: document.getElementById('lengthSelect').value
+                length: document.getElementById('lengthSelect').value,
+                kb_category_ids: Array.from(selectedKbCats)   // 引用的企业知识库分类
             }) });
         const data = await resp.json();
         // P0-3: 防御后端异常响应

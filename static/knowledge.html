@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>企业知识库 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css"/>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js"></script>
+<script>
+const PAGE_ID = 'knowledge';
+
+let categories = [];
+let documents = [];
+let activeCat = null;      // 当前选中分类 id（null = 全部）
+let editingDoc = null;     // 正在编辑的文档对象（null = 新建）
+
+async function init() {
+    await loadCategories();
+    await loadDocuments();
+    render();
+}
+
+async function loadCategories() {
+    const resp = await apiFetch('/api/kb/categories');
+    categories = await resp.json();
+}
+
+async function loadDocuments() {
+    const url = activeCat ? `/api/kb/documents?category_id=${activeCat}` : '/api/kb/documents';
+    const resp = await apiFetch(url);
+    documents = await resp.json();
+}
+
+function catName(id) {
+    const c = categories.find(c => c.id === id);
+    return c ? c.name : '未分类';
+}
+
+function render() {
+    const totalDocs = categories.reduce((s, c) => s + (c.doc_count || 0), 0);
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">企业知识库</h1>
+            <button class="btn btn-primary btn-sm" onclick="showDocModal()"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 新增资料</button>
+        </div>
+        <div class="page-body">
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">维护公司介绍、清关知识、成功案例等内部资料。AI 生成内容时可指定引用，让产出更贴合公司真实业务。</p>
+            <div style="display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;align-items:start;">
+
+                <!-- 左：分类 -->
+                <div class="card">
+                    <div style="padding:14px 16px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;justify-content:space-between;">
+                        <span style="font-size:13px;font-weight:700;">知识分类</span>
+                        <button class="btn btn-ghost btn-sm" title="新增分类" onclick="showCatModal()"><iconify-icon icon="mdi:folder-plus-outline" width="16"></iconify-icon></button>
+                    </div>
+                    <div style="padding:8px;">
+                        <div class="kb-cat-item ${!activeCat ? 'active' : ''}" onclick="selectCat(null)" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;">
+                            <span><iconify-icon icon="mdi:view-grid-outline" width="16" style="vertical-align:-3px;margin-right:6px;"></iconify-icon>全部资料</span>
+                            <span style="font-size:11px;color:var(--text-muted);">${totalDocs}</span>
+                        </div>
+                        ${categories.map(c => `
+                            <div class="kb-cat-item ${activeCat === c.id ? 'active' : ''}" onclick="selectCat(${c.id})" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;">
+                                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><iconify-icon icon="mdi:folder-outline" width="16" style="vertical-align:-3px;margin-right:6px;"></iconify-icon>${escapeHtml(c.name)}</span>
+                                <span style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                                    <span style="font-size:11px;color:var(--text-muted);">${c.doc_count || 0}</span>
+                                    <iconify-icon icon="mdi:close" width="13" style="color:var(--text-muted);" title="删除分类" onclick="event.stopPropagation();deleteCat(${c.id},'${escapeHtml(c.name)}')"></iconify-icon>
+                                </span>
+                            </div>`).join('')}
+                    </div>
+                </div>
+
+                <!-- 右：文档列表 -->
+                <div class="card">
+                    <div class="card-body" style="padding:0;">
+                        <table class="data-table">
+                            <thead><tr><th>标题</th><th>分类</th><th>来源</th><th>字数</th><th>更新时间</th><th style="text-align:right;">操作</th></tr></thead>
+                            <tbody>
+                                ${documents.length === 0 ? '<tr><td colspan="6" class="empty-state">该分类暂无资料，点击右上角「新增资料」添加</td></tr>' :
+                                documents.map(d => `
+                                    <tr>
+                                        <td><div style="font-weight:600;font-size:13px;">${escapeHtml(d.title)}</div><div style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px;">${escapeHtml(d.preview || '')}…</div></td>
+                                        <td><span class="badge badge-gray">${escapeHtml(catName(d.category_id))}</span></td>
+                                        <td style="font-size:12px;color:var(--text-muted);text-transform:uppercase;">${escapeHtml(d.source_type || 'text')}</td>
+                                        <td style="font-size:12px;color:var(--text-secondary);">${d.length || 0}</td>
+                                        <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(d.updated_at || '')}</td>
+                                        <td style="text-align:right;white-space:nowrap;">
+                                            <button class="btn btn-ghost btn-sm" onclick="editDoc(${d.id})"><iconify-icon icon="mdi:pencil-outline" width="16"></iconify-icon></button>
+                                            <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteDoc(${d.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
+                                        </td>
+                                    </tr>`).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文档新增/编辑弹窗 -->
+    <div id="docModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:560px;max-width:92vw;padding:24px;max-height:88vh;overflow:auto;">
+            <h3 id="docModalTitle" style="font-size:16px;font-weight:700;margin-bottom:16px;">新增资料</h3>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">标题</label><input id="docTitle" class="input" placeholder="如：公司简介 2026"/></div>
+                    <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">所属分类</label>
+                        <select id="docCategory" class="select" style="width:100%;">${categories.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></div>
+                </div>
+                <div>
+                    <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;">
+                        <span>内容</span>
+                        <span style="font-weight:400;color:var(--text-muted);cursor:pointer;" onclick="document.getElementById('docFile').click()"><iconify-icon icon="mdi:upload" width="14" style="vertical-align:-2px;"></iconify-icon> 上传 TXT/MD 自动填充</span>
+                    </label>
+                    <input type="file" id="docFile" accept=".txt,.md,.markdown" style="display:none;" onchange="uploadFile(event)"/>
+                    <textarea id="docContent" class="input" rows="10" placeholder="直接粘贴文本，或上传 TXT/Markdown 文件" style="resize:vertical;font-family:inherit;line-height:1.6;"></textarea>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeDocModal()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="saveDoc()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 分类新增弹窗 -->
+    <div id="catModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:380px;padding:24px;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;">新增分类</h3>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">分类名称</label><input id="catName" class="input" placeholder="如：报关流程"/></div>
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">描述（可选）</label><input id="catDesc" class="input" placeholder="一句话说明这个分类放什么"/></div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeCatModal()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="saveCat()">创建</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+async function selectCat(id) { activeCat = id; await loadDocuments(); render(); }
+
+// ---------- 分类 ----------
+function showCatModal() { document.getElementById('catModal').style.display = 'flex'; document.getElementById('catName').value = ''; document.getElementById('catDesc').value = ''; }
+function closeCatModal() { document.getElementById('catModal').style.display = 'none'; }
+async function saveCat() {
+    const name = document.getElementById('catName').value.trim();
+    if (!name) { showToast('请输入分类名称', 'error'); return; }
+    try {
+        await apiFetch('/api/kb/categories', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, description: document.getElementById('catDesc').value.trim() }) });
+        closeCatModal(); showToast('分类已创建'); await init();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+async function deleteCat(id, name) {
+    if (!confirm(`删除分类「${name}」？该分类下的资料会一并删除。`)) return;
+    try {
+        await apiFetch(`/api/kb/categories/${id}`, { method:'DELETE' });
+        if (activeCat === id) activeCat = null;
+        showToast('已删除'); await init();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ---------- 文档 ----------
+function showDocModal() {
+    if (categories.length === 0) { showToast('请先创建一个分类', 'error'); return; }
+    editingDoc = null;
+    document.getElementById('docModalTitle').textContent = '新增资料';
+    document.getElementById('docTitle').value = '';
+    document.getElementById('docContent').value = '';
+    document.getElementById('docCategory').value = activeCat || categories[0].id;
+    document.getElementById('docModal').style.display = 'flex';
+}
+function closeDocModal() { document.getElementById('docModal').style.display = 'none'; }
+
+async function editDoc(id) {
+    try {
+        const resp = await apiFetch(`/api/kb/documents/${id}`);
+        const doc = await resp.json();
+        editingDoc = doc;
+        document.getElementById('docModalTitle').textContent = '编辑资料';
+        document.getElementById('docTitle').value = doc.title;
+        document.getElementById('docContent').value = doc.content;
+        document.getElementById('docCategory').value = doc.category_id;
+        document.getElementById('docModal').style.display = 'flex';
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveDoc() {
+    const title = document.getElementById('docTitle').value.trim();
+    const content = document.getElementById('docContent').value.trim();
+    const category_id = parseInt(document.getElementById('docCategory').value);
+    if (!title || !content) { showToast('标题和内容不能为空', 'error'); return; }
+    try {
+        if (editingDoc) {
+            await apiFetch(`/api/kb/documents/${editingDoc.id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ title, content, category_id }) });
+            showToast('已更新');
+        } else {
+            await apiFetch('/api/kb/documents', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ title, content, category_id, source_type:'text' }) });
+            showToast('已保存');
+        }
+        closeDocModal(); await init();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteDoc(id) {
+    if (!confirm('确定删除这条资料？')) return;
+    try { await apiFetch(`/api/kb/documents/${id}`, { method:'DELETE' }); showToast('已删除'); await init(); }
+    catch(e) { showToast(e.message, 'error'); }
+}
+
+async function uploadFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+        const resp = await apiFetch('/api/kb/upload', { method:'POST', body: fd });
+        const data = await resp.json();
+        document.getElementById('docContent').value = data.content;
+        if (!document.getElementById('docTitle').value.trim()) document.getElementById('docTitle').value = data.title;
+        showToast('文件已读取，可继续编辑后保存');
+    } catch(e) { showToast(e.message, 'error'); }
+    event.target.value = '';
+}
+
+init();
+</script>
+<style>
+.kb-cat-item:hover { background: var(--bg-secondary); }
+.kb-cat-item.active { background: var(--primary); color: #fff; }
+.kb-cat-item.active .iconify, .kb-cat-item.active span { color: #fff !important; }
+</style>
+</body>
+</html>

@@ -87,6 +87,7 @@ class GenerateRequest(BaseModel):
     platforms: list[Platform] = Field(default=[Platform.XIAOHONGSHU, Platform.FACEBOOK, Platform.TWITTER])
     tone: str = Field(default="professional", description="语气: professional/friendly/urgent")
     length: str = Field(default="medium", description="长度: short/medium/long")
+    kb_category_ids: list[int] = Field(default=[], description="引用的企业知识库分类 id")
 
 
 class GeneratedContent(BaseModel):
