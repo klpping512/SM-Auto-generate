@@ -231,6 +231,20 @@ def delete_account(account_id):
         conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
 
+def update_account_status(account_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE accounts SET status=? WHERE id=?", (status, account_id))
+
+
+def update_account_credentials(account_id: str, credentials: str):
+    """按业务 account_id（非自增主键）更新凭据 JSON，并刷新 last_sync。"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE accounts SET credentials=?, last_sync=? WHERE account_id=?",
+            (credentials, datetime.now().strftime("%Y-%m-%d %H:%M"), account_id),
+        )
+
+
 # ==================== Queue ====================
 
 def get_queue(status: str = None, platform: str = None):
@@ -343,6 +357,27 @@ def get_publish_logs(limit: int = 50):
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM publish_log ORDER BY published_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def count_published_today(platform: str) -> int:
+    """今日（UTC 自然日）某平台成功发布条数。"""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM publish_log "
+            "WHERE platform=? AND status='published' AND date(published_at)=date('now')",
+            (platform,),
+        ).fetchone()[0]
+
+
+def minutes_since_last_publish(platform: str) -> float | None:
+    """距该平台上次成功发布的分钟数；从未发布返回 None。库内 UTC 计算。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT (julianday('now') - julianday(MAX(published_at))) * 1440 AS mins "
+            "FROM publish_log WHERE platform=? AND status='published'",
+            (platform,),
+        ).fetchone()
+    return row["mins"] if row and row["mins"] is not None else None
 
 
 # ==================== Audit Logs ====================
