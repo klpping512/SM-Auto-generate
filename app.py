@@ -419,11 +419,10 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
 
 @app.get("/api/publish/status")
 async def publish_status():
-    status = await publisher.check_huimei_status()
+    from adapters import ADAPTERS
     return {
-        "huimei": status,
-        "supported_platforms": list(publisher.PLATFORM_MAP.keys()),
-        "external_platforms": list(publisher.EXTERNAL_PLATFORMS),
+        "adapters": {p: type(a).__name__ for p, a in ADAPTERS.items()},
+        "supported_platforms": list(ADAPTERS.keys()),
     }
 
 
