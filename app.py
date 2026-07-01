@@ -359,7 +359,7 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
     if not item:
         raise HTTPException(404, "Queue item not found")
 
-    result = await publisher.publish_via_huimei(
+    result = await publisher.dispatch(
         platform=item["platform"], title=item["title"],
         content=item["body"], tags=item.get("hashtags", []),
     )
@@ -394,7 +394,7 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
             results.append({"item_id": item_id, "success": False, "error": "Not found"})
             continue
 
-        result = await publisher.publish_via_huimei(
+        result = await publisher.dispatch(
             platform=item["platform"], title=item["title"],
             content=item["body"], tags=item.get("hashtags", []),
         )

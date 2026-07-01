@@ -90,7 +90,7 @@ async def check_scheduled_publish():
         platform = item["platform"]
         logger.info("定时发布: id=%d, platform=%s, title=%s", item_id, platform, item["title"])
 
-        result = await publisher.publish_via_huimei(
+        result = await publisher.dispatch(
             platform=platform,
             title=item["title"],
             content=item["body"],

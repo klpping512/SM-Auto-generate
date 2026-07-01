@@ -116,3 +116,20 @@ async def list_huimei_accounts() -> dict:
         return {"success": True, "output": stdout.decode().strip()}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+async def dispatch(
+    platform: str, title: str, content: str,
+    tags: list[str] = None, images: list[str] = None,
+    video: str = None, account: dict = None,
+) -> dict:
+    """统一发布入口：查适配器注册表并分发。返回与旧接口兼容的 dict。"""
+    from adapters import get_adapter  # 延迟导入避免循环
+    adapter = get_adapter(platform)
+    if adapter is None:
+        return {"success": False, "platform": platform, "error": f"无适配器: '{platform}'"}
+    result = await adapter.publish(
+        platform=platform, title=title, content=content,
+        tags=tags, images=images, video=video, account=account,
+    )
+    return result.to_dict()
