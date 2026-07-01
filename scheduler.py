@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import database as db
 import publisher
+import ratelimit
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,13 @@ async def check_scheduled_publish():
         platform = item["platform"]
         logger.info("定时发布: id=%d, platform=%s, title=%s", item_id, platform, item["title"])
 
+        ok, reason = ratelimit.can_publish_now(platform)
+        if not ok:
+            next_at = ratelimit.next_run_time(datetime.now())
+            db.update_queue_status(item_id, "queued", f"频控顺延: {reason}", scheduled_at=next_at)
+            logger.info("频控顺延: id=%d, %s -> %s", item_id, reason, next_at)
+            continue
+
         result = await publisher.dispatch(
             platform=platform,
             title=item["title"],
@@ -114,6 +122,7 @@ async def check_scheduled_publish():
                 db.add_publish_log(item_id, platform, item["title"], "failed", result.get("error"))
                 logger.error("定时发布最终失败: id=%d", item_id)
                 # 发送告警
+                _maybe_mark_expired(platform, result.get("error", ""))
                 await send_alert(item, result.get("error", "未知错误"))
 
 
@@ -127,6 +136,15 @@ def _suggest_for_error(error: str) -> str:
     if "timeout" in e or "超时" in error:
         return "网络或接口超时，请稍后重试"
     return "请登录系统查看并处理"
+
+
+def _maybe_mark_expired(platform: str, error: str):
+    """登录/cookie/token 类错误：把该平台账号置 expired，供前端提示重新登录。"""
+    e = (error or "").lower()
+    if "cookie" in e or "登录" in error or "login" in e or "token" in e:
+        for acc in db.get_accounts(platform):
+            db.update_account_status(acc["id"], "expired")
+            logger.warning("账号置为 expired: platform=%s, id=%d", platform, acc["id"])
 
 
 async def send_alert(item: dict, error: str):
