@@ -117,14 +117,14 @@ function render() {
                 <div id="platformHint" style="font-size:11px;color:var(--text-muted);padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);">
                     选择小红书或抖音后，将通过扫码方式连接账号
                 </div>
-                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号名称</label><input id="newName" class="input" placeholder="如: SA物流达人"/></div>
-                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号 ID</label><input id="newAccountId" class="input" placeholder="如: xhs_logi_001"/></div>
+                <div id="nameField"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号名称</label><input id="newName" class="input" placeholder="如: SA物流达人"/></div>
+                <div id="idField"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号 ID</label><input id="newAccountId" class="input" placeholder="自动生成"/></div>
             </div>
             <div id="addStep2Content" style="display:none;"></div>
             <div id="addStep3Content" style="display:none;text-align:center;padding:20px 0;"></div>
             <div id="addStep1Btns" style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
                 <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
-                <button class="btn btn-primary btn-sm" onclick="addStep1Next()">下一步</button>
+                <button class="btn btn-primary btn-sm" id="addStep1NextBtn" onclick="addStep1Next()">扫码连接</button>
             </div>
             <div id="addStep2Btns" style="display:none;justify-content:flex-end;gap:8px;margin-top:20px;">
                 <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
@@ -295,17 +295,25 @@ function setAddStep(n) {
 function onPlatformChange() {
     const pf = document.getElementById('newPlatform').value;
     const isRpa = ['xiaohongshu', 'douyin'].includes(pf);
-    const hint = document.getElementById('platformHint');
-    hint.innerHTML = isRpa
-        ? `<iconify-icon icon="mdi:qrcode-scan" width="14" style="vertical-align:middle;"></iconify-icon> ${platformNames[pf]} 需要扫码连接 — 下一步将弹出浏览器让你扫码登录`
-        : `<iconify-icon icon="mdi:key-outline" width="14" style="vertical-align:middle;"></iconify-icon> ${platformNames[pf]} 需要填写 API Token — 下一步将进入凭据填写`;
+    const btn = document.getElementById('addStep1NextBtn');
+    // RPA: 简化表单 + 红色扫码按钮
+    document.getElementById('idField').style.display = isRpa ? 'none' : '';
+    document.getElementById('nameField').querySelector('label').textContent = isRpa ? '扫码登录 ' + platformNames[pf] : '账号名称';
+    document.getElementById('newName').placeholder = isRpa ? '给这个账号起个名字...' : '如: SA物流达人';
+    if (isRpa) {
+        btn.textContent = '开始扫码连接';
+        btn.style.background = pf === 'xiaohongshu' ? '#FF2442' : '#000';
+    } else {
+        btn.textContent = '下一步 → 填写 API 凭据';
+        btn.style.background = '';
+    }
 }
 
 async function addStep1Next() {
     const platform = document.getElementById('newPlatform').value;
-    const name = document.getElementById('newName').value.trim();
-    const accountId = document.getElementById('newAccountId').value.trim();
-    if (!name || !accountId) { showToast('请填写名称和账号 ID', 'error'); return; }
+    const name = document.getElementById('newName').value.trim() || (platformNames[platform] + '账号');
+    const accountId = (platform + '_' + Date.now().toString(36)).slice(0, 20);
+    if (!name) { showToast('请填写账号名称', 'error'); return; }
     const isRpa = ['xiaohongshu', 'douyin'].includes(platform);
     // 创建账号
     try {
@@ -315,7 +323,6 @@ async function addStep1Next() {
             body: JSON.stringify({ platform, name, account_id: accountId, config_summary: '' }),
         });
     } catch (e) { showToast('创建账号失败: ' + e.message, 'error'); return; }
-    // 刷新列表拿到新账号
     const resp = await apiFetch('/api/accounts');
     accounts = await resp.json();
     const newAcc = accounts.find(a => a.account_id === accountId && a.platform === platform);
@@ -324,17 +331,16 @@ async function addStep1Next() {
     setAddStep(2);
     const step2 = document.getElementById('addStep2Content');
     if (isRpa) {
-        step2.innerHTML = `<div style="text-align:center;padding:12px;">
-            <div class="spin" style="width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--primary);border-radius:50%;margin:0 auto 12px;"></div>
-            <p style="font-size:13px;color:var(--text-secondary);">正在打开 ${platformNames[platform]} 登录页面…</p>
-            <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">请在弹出的浏览器中完成扫码登录</p>
+        step2.innerHTML = `<div style="text-align:center;padding:20px 0;">
+            <div class="spin" style="width:40px;height:40px;border:3px solid var(--border-light);border-top-color:#FF2442;border-radius:50%;margin:0 auto 16px;"></div>
+            <p style="font-size:15px;font-weight:700;color:var(--text-primary);">正在打开 ${platformNames[platform]} 登录页</p>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">浏览器将弹出一个新窗口，<br/>请使用 ${platformNames[platform]} APP 扫码完成登录</p>
         </div>`;
-        // 启动扫码
         try {
             await apiFetch(`/api/accounts/${newAcc.id}/scan-login`, { method: 'POST' });
             pollAddReady(newAcc.id, 0, platform);
         } catch (e) {
-            step2.innerHTML = `<p style="color:#EF4444;text-align:center;">启动失败：${escapeHtml(e.message)}</p>`;
+            step2.innerHTML = `<p style="color:#EF4444;text-align:center;padding:20px;">扫码启动失败：${escapeHtml(e.message)}<br/><button class="btn btn-secondary btn-sm" style="margin-top:12px;" onclick="closeAddModal()">关闭</button></p>`;
         }
     } else {
         // API 平台：展示凭据表单
