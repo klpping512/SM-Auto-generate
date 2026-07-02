@@ -82,6 +82,7 @@ let selectedCategory = 'custom';
 let kbCategories = [];           // 企业知识库分类
 let selectedKbCats = new Set();  // 已勾选引用的知识库分类 id
 let promptTemplates = [];        // Prompt 模板
+let attachments = [];            // 上传的图片/视频附件
 
 async function init() {
     try { const r = await apiFetch('/api/topics'); categories = await r.json(); } catch(e) { categories = []; }
@@ -148,6 +149,22 @@ async function init() {
                 </div>
                 <div style="padding:8px 16px;border-top:1px solid var(--border-light);">
                     <input id="editorHashtags" class="input" placeholder="标签（逗号分隔）" style="font-size:12px;padding:6px 10px;"/>
+                </div>
+                <div style="padding:12px 16px;border-top:1px solid var(--border-light);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                        <span style="font-size:12px;font-weight:600;color:var(--text-secondary);display:flex;align-items:center;gap:4px;"><iconify-icon icon="mdi:paperclip" width="14"></iconify-icon> 附件</span>
+                        <label class="btn btn-secondary btn-sm" style="font-size:11px;cursor:pointer;margin:0;">
+                            <iconify-icon icon="mdi:plus" width="14"></iconify-icon> 添加文件
+                            <input type="file" id="fileInput" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple style="display:none;" onchange="handleFileUpload(this.files)"/>
+                        </label>
+                    </div>
+                    <div id="attachmentList" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+                    <div id="uploadZone" style="border:2px dashed var(--border);border-radius:8px;padding:16px;text-align:center;color:var(--text-muted);font-size:12px;cursor:pointer;margin-top:8px;"
+                        ondragover="event.preventDefault();this.style.borderColor='var(--primary)';"
+                        ondragleave="this.style.borderColor='var(--border)';"
+                        ondrop="event.preventDefault();this.style.borderColor='var(--border)';if(event.dataTransfer.files.length)handleFileUpload(event.dataTransfer.files);">
+                        拖拽图片/视频到此处上传（图片≤10MB，视频≤50MB）
+                    </div>
                 </div>
             </div>
             <!-- 右栏：预览 -->
@@ -469,6 +486,47 @@ async function generateContent() {
     }
 }
 
+async function handleFileUpload(files) {
+    for (const file of files) {
+        if (attachments.length >= 9) { showToast('最多上传 9 个附件', 'error'); break; }
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+            const resp = await apiFetch('/api/upload', { method: 'POST', body: formData });
+            const data = await resp.json();
+            attachments.push(data);
+            renderAttachments();
+            showToast(`已上传：${file.name}`);
+        } catch (e) { showToast(`上传失败：${e.message}`, 'error'); }
+    }
+    // 清空 file input 以便重复上传同名文件
+    document.getElementById('fileInput').value = '';
+}
+
+function renderAttachments() {
+    const list = document.getElementById('attachmentList');
+    if (!list) return;
+    list.innerHTML = attachments.map((a, i) => {
+        if (a.type === 'image') {
+            return `<div style="position:relative;width:80px;height:80px;">
+                <img src="${escapeHtml(a.url)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;" onerror="this.style.background='#eee'"/>
+                <button onclick="removeAttachment(${i})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:#EF4444;color:white;border:none;font-size:12px;cursor:pointer;line-height:1;">×</button>
+            </div>`;
+        } else {
+            return `<div style="position:relative;padding:8px;background:var(--bg-secondary);border-radius:8px;font-size:11px;min-width:80px;">
+                <iconify-icon icon="mdi:video" width="24" style="color:var(--primary);"></iconify-icon>
+                <div style="max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(a.filename)}</div>
+                <button onclick="removeAttachment(${i})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:#EF4444;color:white;border:none;font-size:12px;cursor:pointer;line-height:1;">×</button>
+            </div>`;
+        }
+    }).join('');
+}
+
+function removeAttachment(index) {
+    attachments.splice(index, 1);
+    renderAttachments();
+}
+
 async function submitToQueue() {
     // 提交前先把编辑器最新内容写回当前平台
     syncEditorToContent();
@@ -480,7 +538,7 @@ async function submitToQueue() {
     for (const [platform, c] of entries) {
         try {
             await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review' }) });
+                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review', attachments: attachments }) });
             added++;
         } catch(e) {
             failed.push(platformInfo[platform]?.name || platform);
@@ -490,6 +548,7 @@ async function submitToQueue() {
     // P0-2: 显示真实提交结果
     if (failed.length === 0) {
         showToast(`已提交 ${added} 个平台到审核队列`);
+        attachments = []; renderAttachments();
     } else if (added === 0) {
         showToast(`提交失败：${failed.join('、')}`, 'error');
     } else {
