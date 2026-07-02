@@ -102,18 +102,35 @@ function render() {
         </div>
     </div>
     <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
-        <div class="card" style="width:400px;padding:24px;">
-            <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;">绑定新账号</h3>
-            <div style="display:flex;flex-direction:column;gap:12px;">
-                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">平台</label>
-                    <select id="newPlatform" class="select" style="width:100%;">${Object.entries(platformNames).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+        <div class="card" style="width:440px;padding:24px;max-height:85vh;overflow:auto;">
+            <h3 id="addModalTitle" style="font-size:16px;font-weight:700;margin-bottom:16px;">连接新账号</h3>
+            <div id="addStepInfo" style="display:flex;gap:6px;margin-bottom:16px;">
+                <div id="addStep1Tag" style="padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:var(--primary);color:white;">1 基本信息</div>
+                <div id="addStep2Tag" style="padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:var(--bg-secondary);color:var(--text-muted);">2 连接</div>
+                <div id="addStep3Tag" style="padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:var(--bg-secondary);color:var(--text-muted);">3 完成</div>
+            </div>
+            <div id="addStep1Content" style="display:flex;flex-direction:column;gap:12px;">
+                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">选择平台</label>
+                    <select id="newPlatform" class="select" style="width:100%;" onchange="onPlatformChange()">
+                        ${Object.entries(platformNames).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+                    </select></div>
+                <div id="platformHint" style="font-size:11px;color:var(--text-muted);padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);">
+                    选择小红书或抖音后，将通过扫码方式连接账号
+                </div>
                 <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号名称</label><input id="newName" class="input" placeholder="如: SA物流达人"/></div>
                 <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号 ID</label><input id="newAccountId" class="input" placeholder="如: xhs_logi_001"/></div>
-                <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">配置摘要</label><input id="newConfig" class="input" placeholder="如: Cookie有效期: 12天"/></div>
             </div>
-            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+            <div id="addStep2Content" style="display:none;"></div>
+            <div id="addStep3Content" style="display:none;text-align:center;padding:20px 0;"></div>
+            <div id="addStep1Btns" style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
                 <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
-                <button class="btn btn-primary btn-sm" onclick="addAccount()">确认绑定</button>
+                <button class="btn btn-primary btn-sm" onclick="addStep1Next()">下一步</button>
+            </div>
+            <div id="addStep2Btns" style="display:none;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
+            </div>
+            <div id="addStep3Btns" style="display:none;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-primary btn-sm" onclick="closeAddModal();init();">完成</button>
             </div>
         </div>
     </div>
@@ -251,31 +268,127 @@ async function pollWizardReady(tries) {
     }, 2000);
 }
 
-function showAddModal() { document.getElementById('addModal').style.display = 'flex'; }
+function showAddModal() {
+    // 重置到步骤 1
+    setAddStep(1);
+    document.getElementById('newName').value = '';
+    document.getElementById('newAccountId').value = '';
+    onPlatformChange();
+    document.getElementById('addModal').style.display = 'flex';
+}
 function closeAddModal() { document.getElementById('addModal').style.display = 'none'; }
 
-async function addAccount() {
+function setAddStep(n) {
+    document.getElementById('addStep1Content').style.display = n === 1 ? 'flex' : 'none';
+    document.getElementById('addStep2Content').style.display = n === 2 ? 'block' : 'none';
+    document.getElementById('addStep3Content').style.display = n === 3 ? 'block' : 'none';
+    document.getElementById('addStep1Btns').style.display = n === 1 ? 'flex' : 'none';
+    document.getElementById('addStep2Btns').style.display = n === 2 ? 'flex' : 'none';
+    document.getElementById('addStep3Btns').style.display = n === 3 ? 'flex' : 'none';
+    for (let i = 1; i <= 3; i++) {
+        const tag = document.getElementById(`addStep${i}Tag`);
+        tag.style.background = i === n ? 'var(--primary)' : (i < n ? '#10B981' : 'var(--bg-secondary)');
+        tag.style.color = i === n ? 'white' : (i < n ? 'white' : 'var(--text-muted)');
+    }
+}
+
+function onPlatformChange() {
+    const pf = document.getElementById('newPlatform').value;
+    const isRpa = ['xiaohongshu', 'douyin'].includes(pf);
+    const hint = document.getElementById('platformHint');
+    hint.innerHTML = isRpa
+        ? `<iconify-icon icon="mdi:qrcode-scan" width="14" style="vertical-align:middle;"></iconify-icon> ${platformNames[pf]} 需要扫码连接 — 下一步将弹出浏览器让你扫码登录`
+        : `<iconify-icon icon="mdi:key-outline" width="14" style="vertical-align:middle;"></iconify-icon> ${platformNames[pf]} 需要填写 API Token — 下一步将进入凭据填写`;
+}
+
+async function addStep1Next() {
     const platform = document.getElementById('newPlatform').value;
-    const data = { platform: platform, name: document.getElementById('newName').value, account_id: document.getElementById('newAccountId').value, config_summary: document.getElementById('newConfig').value };
-    if (!data.name || !data.account_id) { showToast('请填写名称和ID', 'error'); return; }
+    const name = document.getElementById('newName').value.trim();
+    const accountId = document.getElementById('newAccountId').value.trim();
+    if (!name || !accountId) { showToast('请填写名称和账号 ID', 'error'); return; }
+    const isRpa = ['xiaohongshu', 'douyin'].includes(platform);
+    // 创建账号
     try {
-        await apiFetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-        closeAddModal();
-        // 刷新账号列表，拿到新账号 ID
-        const resp = await apiFetch('/api/accounts');
-        accounts = await resp.json();
-        const newAcc = accounts.find(a => a.account_id === data.account_id && a.platform === platform);
-        render();
-        showToast('绑定成功');
-        // 自动进入下一步：RPA 平台弹扫码向导，API 平台弹凭据填写
-        if (newAcc) {
-            if (newAcc.credential_kind === 'cookie') {
-                openWizard(newAcc.id, platform);
-            } else if (newAcc.credential_kind === 'token') {
-                openCredModal(newAcc.id, platform);
-            }
+        await apiFetch('/api/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform, name, account_id: accountId, config_summary: '' }),
+        });
+    } catch (e) { showToast('创建账号失败: ' + e.message, 'error'); return; }
+    // 刷新列表拿到新账号
+    const resp = await apiFetch('/api/accounts');
+    accounts = await resp.json();
+    const newAcc = accounts.find(a => a.account_id === accountId && a.platform === platform);
+    if (!newAcc) { showToast('创建成功但未找到账号', 'error'); return; }
+    // 进入步骤 2
+    setAddStep(2);
+    const step2 = document.getElementById('addStep2Content');
+    if (isRpa) {
+        step2.innerHTML = `<div style="text-align:center;padding:12px;">
+            <div class="spin" style="width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--primary);border-radius:50%;margin:0 auto 12px;"></div>
+            <p style="font-size:13px;color:var(--text-secondary);">正在打开 ${platformNames[platform]} 登录页面…</p>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">请在弹出的浏览器中完成扫码登录</p>
+        </div>`;
+        // 启动扫码
+        try {
+            await apiFetch(`/api/accounts/${newAcc.id}/scan-login`, { method: 'POST' });
+            pollAddReady(newAcc.id, 0, platform);
+        } catch (e) {
+            step2.innerHTML = `<p style="color:#EF4444;text-align:center;">启动失败：${escapeHtml(e.message)}</p>`;
         }
-    } catch (e) { showToast('绑定失败', 'error'); }
+    } else {
+        // API 平台：展示凭据表单
+        const fields = requiredFields[platform] || [];
+        step2.innerHTML = `<div style="display:flex;flex-direction:column;gap:12px;">
+            <p style="font-size:12px;color:var(--text-muted);">请填写 ${platformNames[platform]} 的 API 凭据：</p>
+            ${fields.map(([k, label]) => `<div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">${escapeHtml(label)}</label>
+                <input id="addCred_${k}" class="input" placeholder="${escapeHtml(k)}" autocomplete="off"/></div>`).join('')}
+        </div>`;
+        document.getElementById('addStep2Btns').innerHTML = `
+            <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
+            <button class="btn btn-primary btn-sm" onclick="saveAddCredentials(${newAcc.id}, '${platform}')">保存凭据</button>`;
+    }
+}
+
+async function saveAddCredentials(accId, platform) {
+    const fields = requiredFields[platform] || [];
+    const credentials = {};
+    for (const [k] of fields) {
+        const v = document.getElementById(`addCred_${k}`).value.trim();
+        if (!v) { showToast('请填写全部字段', 'error'); return; }
+        credentials[k] = v;
+    }
+    try {
+        await apiFetch(`/api/accounts/${accId}/credentials`,
+            { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentials }) });
+        showAddComplete(accId, platform, true);
+    } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
+}
+
+async function pollAddReady(accId, tries, platform) {
+    if (tries > 90) {
+        document.getElementById('addStep2Content').innerHTML = `<p style="text-align:center;color:#F59E0B;">扫码超时，请关闭后重试</p>`;
+        return;
+    }
+    setTimeout(async () => {
+        try {
+            const resp = await apiFetch('/api/accounts');
+            accounts = await resp.json();
+            const acc = accounts.find(a => a.id === accId);
+            if (acc && acc.ready) { showAddComplete(accId, platform, true); return; }
+        } catch (e) { /* 继续轮询 */ }
+        pollAddReady(accId, tries + 1, platform);
+    }, 2000);
+}
+
+function showAddComplete(accId, platform, success) {
+    setAddStep(3);
+    document.getElementById('addStep3Content').innerHTML = success
+        ? `<iconify-icon icon="mdi:check-circle" width="48" style="color:#10B981;"></iconify-icon>
+           <p style="font-size:14px;font-weight:600;color:#10B981;margin-top:8px;">连接成功！</p>
+           <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">${platformNames[platform]} 账号已就绪</p>`
+        : `<iconify-icon icon="mdi:alert-circle" width="48" style="color:#EF4444;"></iconify-icon>
+           <p style="font-size:14px;font-weight:600;color:#EF4444;margin-top:8px;">连接失败</p>`;
 }
 
 async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }

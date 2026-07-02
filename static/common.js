@@ -107,7 +107,12 @@ function renderSidebar(activeId) {
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="sidebar-logo">
-                <iconify-icon icon="mdi:truck-fast" width="20"></iconify-icon>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M18 18.5C18.83 18.5 19.5 17.83 19.5 17C19.5 16.17 18.83 15.5 18 15.5C17.17 15.5 16.5 16.17 16.5 17C16.5 17.83 17.17 18.5 18 18.5Z" fill="white"/>
+                    <path d="M18.5 11H17V8L15 4H7C5.9 4 5 4.9 5 6V15H3V18.5C3 19.33 3.67 20 4.5 20S6 19.33 6 18.5 5.33 17 4.5 17H5V11.5C5 10.67 5.67 10 6.5 10H15.5C16.33 10 17 10.67 17 11.5V15H17.07C17.05 15.34 17 15.67 17 16C17 16.34 17.05 16.67 17.07 17H15V18.5C15 19.33 15.67 20 16.5 20S18 19.33 18 18.5 17.33 17 16.5 17H17V12H18.5C19.33 12 20 12.67 20 13.5V15.07C20.33 15.05 20.67 15 21 15C21.33 15 21.67 15.05 22 15.07V13.5C22 11.57 20.43 11 18.5 11Z" fill="white"/>
+                    <path d="M6.5 18.5C7.33 18.5 8 17.83 8 17C8 16.17 7.33 15.5 6.5 15.5C5.67 15.5 5 16.17 5 17C5 17.83 5.67 18.5 6.5 18.5Z" fill="white"/>
+                    <path d="M15 15H9V11H15V15Z" fill="white"/>
+                </svg>
             </div>
             <span class="sidebar-brand">SA-LogiFlow</span>
         </div>
