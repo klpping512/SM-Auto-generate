@@ -1,5 +1,6 @@
 """定时发布调度 + 通知告警 - SA-LogiFlow v2.0."""
 import asyncio
+import json as _json
 import logging
 import smtplib
 import os
@@ -98,11 +99,15 @@ async def check_scheduled_publish():
             logger.info("频控顺延: id=%d, %s -> %s", item_id, reason, next_at)
             continue
 
+        attachments = _json.loads(item.get('attachments') or '[]')
+        images = [a['path'] for a in attachments if a.get('type') == 'image']
+        video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
         result = await publisher.dispatch(
             platform=platform,
             title=item["title"],
             content=item["body"],
             tags=item.get("hashtags", []),
+            images=images if images else None, video=video,
         )
 
         if result["success"]:

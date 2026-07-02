@@ -13,6 +13,7 @@ REQUIRED = ["client_id", "client_secret", "refresh_token", "user_agent", "subred
 
 class RedditAdapter(ApiAdapter):
     name = "reddit"
+    REQUIRED_CREDENTIALS = ["client_id", "client_secret", "refresh_token", "user_agent", "subreddit"]
 
     async def _get_access_token(self, creds: dict) -> str | None:
         import base64

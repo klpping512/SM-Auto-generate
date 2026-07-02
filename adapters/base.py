@@ -23,6 +23,10 @@ class PublishAdapter(ABC):
     """一个平台（或一组平台）的发布实现。"""
 
     name: str = ""
+    # 该适配器发布所需的凭据字段（供前端表单 + 就绪度判定，单一来源）
+    REQUIRED_CREDENTIALS: list[str] = []
+    # "token"=手填字段；"cookie"=靠扫码登录写入 cookies
+    CREDENTIAL_KIND: str = "token"
 
     @abstractmethod
     async def publish(

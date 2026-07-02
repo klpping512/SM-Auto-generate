@@ -12,6 +12,7 @@ MAX_LEN = 280
 
 class TwitterAdapter(ApiAdapter):
     name = "twitter"
+    REQUIRED_CREDENTIALS = ["access_token"]
 
     async def publish(
         self, *, platform, title, content,

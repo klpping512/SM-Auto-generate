@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class DouyinAdapter(RpaAdapter):
     name = "douyin"
+    CREDENTIAL_KIND = "cookie"
     login_url = "https://creator.douyin.com/"
     publish_url = "https://creator.douyin.com/creator-micro/content/upload"
 

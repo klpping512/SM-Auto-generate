@@ -144,6 +144,7 @@ def init_db():
         _ensure_column(conn, "queue", "reviewed_at", "TEXT")
         _ensure_column(conn, "queue", "retry_count", "INTEGER DEFAULT 0")
         _ensure_column(conn, "accounts", "credentials", "TEXT DEFAULT '{}'")
+        _ensure_column(conn, "queue", "attachments", "TEXT DEFAULT '[]'")
         _seed_defaults(conn)
     logger.info("数据库初始化完成: %s", DB_PATH)
 
@@ -268,11 +269,11 @@ def get_queue_item_by_id(item_id: int) -> dict | None:
         return _parse_queue_row(row) if row else None
 
 
-def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None):
+def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None, attachments=None):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by) VALUES (?,?,?,?,?,?,?)",
-            (title, body, platform, json.dumps(hashtags or []), status, scheduled_at, created_by),
+            "INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by, attachments) VALUES (?,?,?,?,?,?,?,?)",
+            (title, body, platform, json.dumps(hashtags or []), status, scheduled_at, created_by, json.dumps(attachments or [], ensure_ascii=False)),
         )
 
 

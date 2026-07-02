@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class XiaohongshuAdapter(RpaAdapter):
     name = "xiaohongshu"
+    CREDENTIAL_KIND = "cookie"
     login_url = "https://creator.xiaohongshu.com/login"
     publish_url = "https://creator.xiaohongshu.com/publish/publish?target=image"
 

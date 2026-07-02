@@ -11,6 +11,7 @@ GRAPH_VERSION = "v21.0"
 
 class FacebookAdapter(ApiAdapter):
     name = "facebook"
+    REQUIRED_CREDENTIALS = ["page_id", "page_access_token"]
 
     async def publish(
         self, *, platform, title, content,
