@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png"/>
+<link rel="manifest" href="/static/manifest.json"/>
+<meta name="theme-color" content="#6366f1"/>
 <title>账号管理 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
@@ -17,13 +22,22 @@ const PAGE_ID = 'accounts';
 const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
 const platformIcons = { xiaohongshu:'simple-icons:xiaohongshu',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
 const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
+const requiredFields = {
+    facebook: [['page_id','主页 ID'],['page_access_token','主页访问令牌 (Page Access Token)']],
+    twitter:  [['access_token','用户访问令牌 (OAuth2 access_token)']],
+    reddit:   [['client_id','App Client ID'],['client_secret','App Client Secret'],
+               ['refresh_token','Refresh Token'],['user_agent','User-Agent'],['subreddit','目标 Subreddit']],
+    xiaohongshu: [], douyin: [],
+};
 
 let accounts = [];
 let filterPlatform = '';
+let pubStatus = { adapters: {}, supported_platforms: [] };
 
 async function init() {
-    const resp = await apiFetch('/api/accounts');
-    accounts = await resp.json();
+    const [ra, rs] = await Promise.all([apiFetch('/api/accounts'), apiFetch('/api/publish/status')]);
+    accounts = await ra.json();
+    pubStatus = await rs.json();
     render();
 }
 
@@ -37,6 +51,16 @@ function render() {
             <button class="btn btn-primary btn-sm" onclick="showAddModal()"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 绑定新账号</button>
         </div>
         <div class="page-body">
+            <div class="card" style="margin-bottom:16px;"><div class="card-body" style="display:flex;gap:16px;flex-wrap:wrap;">
+                ${Object.keys(platformNames).map(pf => {
+                    const hasAdapter = (pf in (pubStatus.adapters||{}));
+                    const readyCount = accounts.filter(a => a.platform===pf && a.ready).length;
+                    const total = accounts.filter(a => a.platform===pf).length;
+                    return `<div style="min-width:120px;"><div style="font-size:12px;color:var(--text-muted);">${platformNames[pf]}</div>
+                        <div style="font-size:13px;font-weight:600;color:${hasAdapter ? (readyCount>0?'#10B981':'#F59E0B') : '#EF4444'};">
+                        ${hasAdapter ? `就绪 ${readyCount}/${total}` : '无适配器'}</div></div>`;
+                }).join('')}
+            </div></div>
             <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
                 <button class="btn ${!filterPlatform ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="filterPlatform='';render();">全部</button>
                 ${Object.entries(platformNames).map(([k, v]) => `<button class="btn ${filterPlatform === k ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="filterPlatform='${k}';render();">${v}</button>`).join('')}
@@ -49,16 +73,26 @@ function render() {
                             ${filtered.length === 0 ? '<tr><td colspan="5" class="empty-state">暂无账号</td></tr>' :
                             filtered.map(a => {
                                 const p = { icon: platformIcons[a.platform] || 'mdi:help', color: platformColors[a.platform] || '#6B7280', name: platformNames[a.platform] || a.platform };
-                                const active = a.status === 'active';
                                 return `<tr>
                                     <td><div style="display:flex;align-items:center;gap:10px;">
                                         <div style="width:32px;height:32px;border-radius:var(--radius-md);background:${p.color}15;color:${p.color};display:flex;align-items:center;justify-content:center;"><iconify-icon icon="${p.icon}" width="18"></iconify-icon></div>
                                         <div><div style="font-weight:600;font-size:13px;">${escapeHtml(a.name)}</div><div style="font-size:11px;color:var(--text-muted);">ID: ${escapeHtml(a.account_id)}</div></div>
                                     </div></td>
-                                    <td><span style="display:flex;align-items:center;gap:4px;font-size:12px;"><span style="width:6px;height:6px;border-radius:50%;background:${active ? '#10B981' : '#EF4444'};"></span>${active ? '已授权' : '已过期'}</span></td>
+                                    <td>
+                                        <span style="display:flex;align-items:center;gap:4px;font-size:12px;">
+                                          <span style="width:6px;height:6px;border-radius:50%;background:${a.status==='expired' ? '#EF4444' : (a.ready ? '#10B981' : '#F59E0B')};"></span>
+                                          ${a.status==='expired' ? '已过期' : (a.ready ? '就绪' : '缺凭据')}
+                                        </span>
+                                        ${a.ready ? '' : `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">缺: ${escapeHtml((a.missing||[]).join(', '))}</div>`}
+                                    </td>
                                     <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(a.config_summary) || '-'}</td>
                                     <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.last_sync) || '-'}</td>
-                                    <td style="text-align:right;"><button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button></td>
+                                    <td style="text-align:right;">
+                                        ${a.credential_kind==='token' ? `<button class="btn btn-ghost btn-sm" title="填写凭据" onclick="openCredModal(${a.id},'${a.platform}')"><iconify-icon icon="mdi:key-outline" width="16"></iconify-icon></button>` : ''}
+                                        ${a.credential_kind==='cookie' && a.status!=='expired' ? `<button class="btn btn-ghost btn-sm" title="扫码登录" onclick="scanLogin(${a.id})"><iconify-icon icon="mdi:qrcode-scan" width="16"></iconify-icon></button>` : ''}
+                                        ${a.status==='expired' && a.credential_kind==='cookie' ? `<button class="btn btn-ghost btn-sm" style="color:var(--error);" title="重新登录" onclick="scanLogin(${a.id})"><iconify-icon icon="mdi:login-variant" width="16"></iconify-icon></button>` : ''}
+                                        <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
+                                    </td>
                                 </tr>`;
                             }).join('')}
                         </tbody>
@@ -82,6 +116,17 @@ function render() {
                 <button class="btn btn-primary btn-sm" onclick="addAccount()">确认绑定</button>
             </div>
         </div>
+    </div>
+    <div id="credModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:440px;padding:24px;max-height:80vh;overflow:auto;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:4px;">填写凭据</h3>
+            <p id="credHint" style="font-size:12px;color:var(--text-muted);margin-bottom:16px;"></p>
+            <div id="credFields" style="display:flex;flex-direction:column;gap:12px;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeCredModal()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="saveCredentials()">保存</button>
+            </div>
+        </div>
     </div>`;
 }
 
@@ -95,6 +140,64 @@ async function addAccount() {
 }
 
 async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }
+
+// ==================== 凭据 Modal ====================
+let credAccountId = null;
+
+function openCredModal(id, platform) {
+    const fields = requiredFields[platform] || [];
+    credAccountId = id;
+    document.getElementById('credHint').textContent =
+        `平台：${platformNames[platform] || platform}。凭据仅用于发布，保存后不再回显。`;
+    document.getElementById('credFields').innerHTML = fields.map(([k, label]) => `
+        <div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">${escapeHtml(label)}</label>
+        <input id="cred_${k}" class="input" placeholder="${escapeHtml(k)}" autocomplete="off"/></div>`).join('');
+    document.getElementById('credModal').style.display = 'flex';
+}
+
+function closeCredModal() { document.getElementById('credModal').style.display = 'none'; credAccountId = null; }
+
+async function saveCredentials() {
+    const acc = accounts.find(a => a.id === credAccountId);
+    const fields = requiredFields[acc.platform] || [];
+    const credentials = {};
+    for (const [k] of fields) {
+        const v = document.getElementById(`cred_${k}`).value.trim();
+        if (!v) { showToast('请填写全部字段', 'error'); return; }
+        credentials[k] = v;
+    }
+    try {
+        const r = await apiFetch(`/api/accounts/${credAccountId}/credentials`,
+            { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentials }) });
+        const d = await r.json();
+        closeCredModal();
+        showToast(d.ready ? '凭据已保存，账号就绪' : '已保存，但仍缺字段');
+        init();
+    } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
+}
+
+// ==================== RPA 扫码登录 ====================
+async function scanLogin(id) {
+    try {
+        await apiFetch(`/api/accounts/${id}/scan-login`, { method: 'POST' });
+        showToast('已启动，请在弹出的浏览器完成扫码', 'info');
+        pollAccountReady(id, 0);
+    } catch (e) { showToast('扫码启动失败: ' + e.message, 'error'); }
+}
+
+function pollAccountReady(id, tries) {
+    if (tries > 90) { showToast('扫码超时，请重试', 'error'); return; }
+    setTimeout(async () => {
+        try {
+            const resp = await apiFetch('/api/accounts');
+            accounts = await resp.json();
+            render();
+            const acc = accounts.find(a => a.id === id);
+            if (acc && acc.ready) { showToast('扫码登录成功，账号就绪'); return; }
+        } catch (e) { /* 忽略单次失败，继续轮询 */ }
+        pollAccountReady(id, tries + 1);
+    }, 2000);
+}
 
 init();
 </script>
