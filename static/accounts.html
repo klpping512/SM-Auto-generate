@@ -89,8 +89,8 @@ function render() {
                                     <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.last_sync) || '-'}</td>
                                     <td style="text-align:right;">
                                         ${a.credential_kind==='token' ? `<button class="btn btn-ghost btn-sm" title="填写凭据" onclick="openCredModal(${a.id},'${a.platform}')"><iconify-icon icon="mdi:key-outline" width="16"></iconify-icon></button>` : ''}
-                                        ${a.credential_kind==='cookie' && a.status!=='expired' ? `<button class="btn btn-ghost btn-sm" title="扫码登录" onclick="scanLogin(${a.id})"><iconify-icon icon="mdi:qrcode-scan" width="16"></iconify-icon></button>` : ''}
-                                        ${a.status==='expired' && a.credential_kind==='cookie' ? `<button class="btn btn-ghost btn-sm" style="color:var(--error);" title="重新登录" onclick="scanLogin(${a.id})"><iconify-icon icon="mdi:login-variant" width="16"></iconify-icon></button>` : ''}
+                                        ${a.credential_kind==='cookie' && a.status!=='expired' ? `<button class="btn btn-ghost btn-sm" title="连接账号" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:qrcode-scan" width="16"></iconify-icon></button>` : ''}
+                                        ${a.status==='expired' && a.credential_kind==='cookie' ? `<button class="btn btn-ghost btn-sm" style="color:var(--error);" title="重新连接" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:login-variant" width="16"></iconify-icon></button>` : ''}
                                         <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
                                     </td>
                                 </tr>`;
@@ -127,7 +127,128 @@ function render() {
                 <button class="btn btn-primary btn-sm" onclick="saveCredentials()">保存</button>
             </div>
         </div>
+    </div>
+    <div id="wizardModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:480px;padding:24px;">
+            <h3 id="wizardTitle" style="font-size:16px;font-weight:700;margin-bottom:20px;">连接账号</h3>
+            <div id="wizardSteps" style="display:flex;gap:4px;margin-bottom:20px;"></div>
+            <div id="wizardBody" style="min-height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+                <button class="btn btn-secondary btn-sm" id="wizardCancel" onclick="closeWizard()">取消</button>
+                <button class="btn btn-primary btn-sm" id="wizardNext" style="display:none;" onclick="wizardNextStep()">下一步</button>
+            </div>
+        </div>
     </div>`;
+}
+
+const connectFlows = {
+    xiaohongshu: {
+        title: '连接小红书',
+        steps: [
+            { icon: 'mdi:cellphone', title: '准备', desc: '请确保手机已安装小红书 APP，并准备好扫码' },
+            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '浏览器将弹出小红书登录页，请用 APP 扫描二维码' },
+            { icon: 'mdi:check-circle', title: '完成', desc: '登录成功，Cookie 已保存' },
+        ],
+    },
+    douyin: {
+        title: '连接抖音',
+        steps: [
+            { icon: 'mdi:cellphone', title: '准备', desc: '请确保手机已安装抖音 APP，并准备好扫码' },
+            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '浏览器将弹出抖音登录页，请用 APP 扫描二维码' },
+            { icon: 'mdi:check-circle', title: '完成', desc: '登录成功，Cookie 已保存' },
+        ],
+    },
+};
+
+let wizardAccountId = null;
+let wizardStep = 0;
+let wizardPlatform = '';
+
+function openWizard(id, platform) {
+    const flow = connectFlows[platform];
+    if (!flow) { scanLogin(id); return; }
+    wizardAccountId = id; wizardStep = 0; wizardPlatform = platform;
+    document.getElementById('wizardTitle').textContent = flow.title;
+    // 渲染步骤条
+    document.getElementById('wizardSteps').innerHTML = flow.steps.map((s, i) => `
+        <div style="flex:1;text-align:center;padding:8px 4px;border-radius:8px;background:${i===0?'var(--primary-light)':'transparent'};">
+            <iconify-icon icon="${s.icon}" width="20" style="color:${i===0?'var(--primary)':'var(--text-muted)'};"></iconify-icon>
+            <div style="font-size:10px;color:${i===0?'var(--primary)':'var(--text-muted)'};margin-top:4px;">${s.title}</div>
+        </div>
+    `).join('');
+    renderWizardStep();
+    document.getElementById('wizardModal').style.display = 'flex';
+}
+
+function renderWizardStep() {
+    const flow = connectFlows[wizardPlatform];
+    const step = flow.steps[wizardStep];
+    const body = document.getElementById('wizardBody');
+    const nextBtn = document.getElementById('wizardNext');
+    // 高亮当前步骤
+    document.getElementById('wizardSteps').children[wizardStep]?.querySelectorAll('*').forEach(el => {
+        el.style.color = 'var(--primary)';
+    });
+    if (wizardStep === 0) {
+        body.innerHTML = `<iconify-icon icon="${step.icon}" width="40" style="color:var(--primary);"></iconify-icon>
+            <p style="font-size:13px;color:var(--text-secondary);text-align:center;">${step.desc}</p>`;
+        nextBtn.textContent = '开始扫码';
+        nextBtn.style.display = '';
+    } else if (wizardStep === 1) {
+        body.innerHTML = `<div class="spin" style="width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--primary);border-radius:50%;"></div>
+            <p style="font-size:13px;color:var(--text-secondary);text-align:center;">${step.desc}<br/><span style="font-size:11px;color:var(--text-muted);">（浏览器已弹出，请完成扫码）</span></p>`;
+        nextBtn.style.display = 'none';
+        // 启动扫码
+        scanLoginFromWizard();
+    } else {
+        body.innerHTML = `<iconify-icon icon="${step.icon}" width="48" style="color:#10B981;"></iconify-icon>
+            <p style="font-size:14px;font-weight:600;color:#10B981;">${step.desc}</p>`;
+        nextBtn.textContent = '完成';
+        nextBtn.style.display = '';
+        nextBtn.onclick = () => { closeWizard(); init(); };
+    }
+}
+
+function wizardNextStep() {
+    wizardStep++;
+    renderWizardStep();
+}
+
+function closeWizard() {
+    document.getElementById('wizardModal').style.display = 'none';
+    wizardAccountId = null;
+}
+
+async function scanLoginFromWizard() {
+    try {
+        await apiFetch(`/api/accounts/${wizardAccountId}/scan-login`, { method: 'POST' });
+        pollWizardReady(0);
+    } catch (e) {
+        document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:alert-circle" width="40" style="color:#EF4444;"></iconify-icon>
+            <p style="font-size:13px;color:#EF4444;">启动失败：${escapeHtml(e.message)}</p>`;
+        document.getElementById('wizardCancel').textContent = '关闭';
+    }
+}
+
+async function pollWizardReady(tries) {
+    if (tries > 90) {
+        document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:clock-alert" width="40" style="color:#F59E0B;"></iconify-icon>
+            <p style="font-size:13px;color:#F59E0B;">扫码超时，请关闭后重试</p>`;
+        return;
+    }
+    setTimeout(async () => {
+        try {
+            const resp = await apiFetch('/api/accounts');
+            accounts = await resp.json();
+            const acc = accounts.find(a => a.id === wizardAccountId);
+            if (acc && acc.ready) {
+                wizardStep = 2;
+                renderWizardStep();
+                return;
+            }
+        } catch (e) { /* 继续轮询 */ }
+        pollWizardReady(tries + 1);
+    }, 2000);
 }
 
 function showAddModal() { document.getElementById('addModal').style.display = 'flex'; }
