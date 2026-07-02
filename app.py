@@ -121,7 +121,7 @@ async def update_user_status(user_id: int, body: dict, user=Depends(require_role
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return FileResponse(STATIC_DIR / "home.html")
+    return FileResponse(STATIC_DIR / "home.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/{page_name}.html", response_class=HTMLResponse)
@@ -129,7 +129,7 @@ async def page(page_name: str):
     file_path = STATIC_DIR / f"{page_name}.html"
     if not file_path.exists():
         raise HTTPException(404, f"Page '{page_name}' not found")
-    return FileResponse(file_path)
+    return FileResponse(file_path, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 # ==================== API: Dashboard ====================
