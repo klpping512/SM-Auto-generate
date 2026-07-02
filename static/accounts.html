@@ -255,9 +255,27 @@ function showAddModal() { document.getElementById('addModal').style.display = 'f
 function closeAddModal() { document.getElementById('addModal').style.display = 'none'; }
 
 async function addAccount() {
-    const data = { platform: document.getElementById('newPlatform').value, name: document.getElementById('newName').value, account_id: document.getElementById('newAccountId').value, config_summary: document.getElementById('newConfig').value };
+    const platform = document.getElementById('newPlatform').value;
+    const data = { platform: platform, name: document.getElementById('newName').value, account_id: document.getElementById('newAccountId').value, config_summary: document.getElementById('newConfig').value };
     if (!data.name || !data.account_id) { showToast('请填写名称和ID', 'error'); return; }
-    try { await apiFetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); closeAddModal(); init(); showToast('绑定成功'); } catch (e) { showToast('绑定失败', 'error'); }
+    try {
+        await apiFetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        closeAddModal();
+        // 刷新账号列表，拿到新账号 ID
+        const resp = await apiFetch('/api/accounts');
+        accounts = await resp.json();
+        const newAcc = accounts.find(a => a.account_id === data.account_id && a.platform === platform);
+        render();
+        showToast('绑定成功');
+        // 自动进入下一步：RPA 平台弹扫码向导，API 平台弹凭据填写
+        if (newAcc) {
+            if (newAcc.credential_kind === 'cookie') {
+                openWizard(newAcc.id, platform);
+            } else if (newAcc.credential_kind === 'token') {
+                openCredModal(newAcc.id, platform);
+            }
+        }
+    } catch (e) { showToast('绑定失败', 'error'); }
 }
 
 async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }
