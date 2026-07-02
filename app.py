@@ -1,8 +1,11 @@
 """SA-LogiFlow v2.0 - FastAPI Backend."""
+import asyncio
+import json as _json
 import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4 as _uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File
@@ -20,10 +23,11 @@ from auth import (
 )
 from models import (
     GenerateRequest, GenerateResponse,
-    QueueCreateRequest, AccountCreateRequest, ReviewRequest,
+    QueueCreateRequest, AccountCreateRequest, AccountCredentialsRequest, ReviewRequest, ChatRequest,
     LoginRequest, RegisterRequest, TokenResponse,
     UserRole,
 )
+import publish_readiness
 from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
 
 # ==================== Logging ====================
@@ -260,7 +264,15 @@ async def test_notification(body: dict = None, user=Depends(require_role(UserRol
 
 @app.get("/api/accounts")
 async def list_accounts(platform: str = None, user=Depends(get_current_user)):
-    return db.get_accounts(platform)
+    result = []
+    for a in db.get_accounts(platform):
+        r = publish_readiness.readiness(a["platform"], a.get("credentials"))
+        a.pop("credentials", None)  # 脱敏：不把凭据明文返回前端
+        a["ready"] = r["ready"]
+        a["missing"] = r["missing"]
+        a["credential_kind"] = r["kind"]
+        result.append(a)
+    return result
 
 
 @app.post("/api/accounts")
@@ -278,6 +290,71 @@ async def delete_account(account_id: int, user=Depends(require_role(UserRole.ADM
     db.delete_account(account_id)
     db.add_audit_log(user["id"], user["username"], "delete_account", target=str(account_id))
     return {"status": "ok"}
+
+
+@app.put("/api/accounts/{account_id}/credentials")
+async def set_account_credentials(
+    account_id: int, req: AccountCredentialsRequest,
+    user=Depends(require_role(UserRole.ADMIN)),
+):
+    accounts = [a for a in db.get_accounts() if a["id"] == account_id]
+    if not accounts:
+        raise HTTPException(404, "Account not found")
+    acc = accounts[0]
+    db.update_account_credentials(acc["account_id"], _json.dumps(req.credentials, ensure_ascii=False))
+    db.update_account_status(account_id, "active")  # 填了凭据即恢复可用
+    db.add_audit_log(user["id"], user["username"], "set_credentials", target=f"{acc['platform']}:{acc['account_id']}")
+    r = publish_readiness.readiness(acc["platform"], _json.dumps(req.credentials))
+    return {"ok": True, "ready": r["ready"], "missing": r["missing"]}
+
+
+async def _run_scan_login(account: dict):
+    """后台：有头浏览器让用户扫码，轮询登录态 → 存 cookie → 置 active。本地单机场景。"""
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter, build_credentials
+    adapter = get_adapter(account["platform"])
+    if not isinstance(adapter, RpaAdapter):
+        return
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto(adapter.login_url, timeout=60000)
+            logged_in = False
+            for _ in range(90):  # 最多 180s
+                if await page.query_selector(adapter._logged_in_selector()):
+                    logged_in = True
+                    break
+                await page.wait_for_timeout(2000)
+            if logged_in:
+                cookies = await context.cookies()
+                db.update_account_credentials(account["account_id"], build_credentials(cookies))
+                db.update_account_status(account["id"], "active")
+                logger.info("扫码登录成功: %s", account["account_id"])
+            else:
+                db.update_account_status(account["id"], "expired")
+                logger.warning("扫码登录超时: %s", account["account_id"])
+            await browser.close()
+    except Exception:
+        logger.exception("扫码登录异常: %s", account["account_id"])
+
+
+@app.post("/api/accounts/{account_id}/scan-login")
+async def scan_login(account_id: int, user=Depends(require_role(UserRole.ADMIN))):
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter
+    accounts = [a for a in db.get_accounts() if a["id"] == account_id]
+    if not accounts:
+        raise HTTPException(404, "Account not found")
+    acc = accounts[0]
+    adapter = get_adapter(acc["platform"])
+    if not isinstance(adapter, RpaAdapter):
+        raise HTTPException(400, "该平台不使用扫码登录，请填写凭据")
+    asyncio.create_task(_run_scan_login(acc))
+    db.add_audit_log(user["id"], user["username"], "scan_login", target=f"{acc['platform']}:{acc['account_id']}")
+    return {"started": True, "message": "已启动扫码登录，请在弹出的浏览器完成扫码"}
 
 
 # ==================== API: Queue ====================
@@ -299,6 +376,7 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
             title=req.title, body=req.body, platform=platform.value,
             hashtags=req.hashtags, scheduled_at=req.scheduled_at,
             status=initial_status, created_by=user["id"],
+            attachments=req.attachments,
         )
     db.add_audit_log(user["id"], user["username"], "add_to_queue", target=req.title, detail=f"{len(req.platforms)} platforms")
     return {"status": "ok", "added": len(req.platforms)}
@@ -359,9 +437,13 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
     if not item:
         raise HTTPException(404, "Queue item not found")
 
+    attachments = _json.loads(item.get('attachments') or '[]')
+    images = [a['path'] for a in attachments if a.get('type') == 'image']
+    video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
     result = await publisher.dispatch(
         platform=item["platform"], title=item["title"],
         content=item["body"], tags=item.get("hashtags", []),
+        images=images if images else None, video=video,
     )
 
     if result["success"]:
@@ -394,9 +476,13 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
             results.append({"item_id": item_id, "success": False, "error": "Not found"})
             continue
 
+        attachments = _json.loads(item.get('attachments') or '[]')
+        images = [a['path'] for a in attachments if a.get('type') == 'image']
+        video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
         result = await publisher.dispatch(
             platform=item["platform"], title=item["title"],
             content=item["body"], tags=item.get("hashtags", []),
+            images=images if images else None, video=video,
         )
 
         if result["success"]:
@@ -536,6 +622,39 @@ async def kb_upload(file: UploadFile = File(...), user=Depends(get_current_user)
     return {"status": "ok", "title": title, "content": text, "source_type": ext}
 
 
+# ==================== API: File Upload ====================
+
+ALLOWED_IMAGE = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
+ALLOWED_VIDEO = {'video/mp4', 'video/quicktime', 'video/webm'}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 10MB
+MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
+
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
+    if file.content_type not in ALLOWED_IMAGE | ALLOWED_VIDEO:
+        raise HTTPException(400, "不支持的文件类型，仅接受图片(JPEG/PNG/GIF/WebP)和视频(MP4/MOV/WebM)")
+    content = await file.read()
+    max_size = MAX_VIDEO_SIZE if file.content_type.startswith('video') else MAX_IMAGE_SIZE
+    if len(content) > max_size:
+        raise HTTPException(400, f"文件过大（最大 {max_size // (1024*1024)}MB）")
+    file_type = 'image' if file.content_type.startswith('image') else 'video'
+    ext = (file.filename or 'file').rsplit('.', 1)[-1] if '.' in (file.filename or '') else 'bin'
+    filename = f"{_uuid4().hex}.{ext}"
+    filepath = f"uploads/{file_type}/{filename}"
+    save_dir = STATIC_DIR / filepath
+    save_dir.parent.mkdir(parents=True, exist_ok=True)
+    with open(save_dir, 'wb') as f:
+        f.write(content)
+    return {
+        'url': f'/static/{filepath}',
+        'path': filepath,
+        'type': file_type,
+        'filename': file.filename,
+        'size': len(content),
+    }
+
+
 # ==================== API: Prompt Templates ====================
 
 @app.get("/api/prompt-templates")
@@ -572,6 +691,20 @@ async def delete_prompt_template(tpl_id: int, user=Depends(get_current_user)):
     db.delete_prompt_template(tpl_id)
     db.add_audit_log(user["id"], user["username"], "delete_prompt_template", target=str(tpl_id))
     return {"status": "ok"}
+
+
+# ==================== AI Chat ====================
+
+@app.post("/api/ai/chat")
+async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
+    """多轮 AI 对话 + 快捷指令。"""
+    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    result = await ai_engine.chat(
+        messages=messages,
+        context=req.context or "",
+        command=req.command,
+    )
+    return {"content": result}
 
 
 # ==================== Static Assets ====================

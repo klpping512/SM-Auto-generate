@@ -113,6 +113,7 @@ class QueueCreateRequest(BaseModel):
     hashtags: list[str] = []
     scheduled_at: Optional[str] = None
     status: ContentStatus = ContentStatus.DRAFT
+    attachments: list[dict] = []
 
 
 class ReviewRequest(BaseModel):
@@ -127,6 +128,22 @@ class AccountCreateRequest(BaseModel):
     name: str
     account_id: str
     config_summary: str = ""
+
+
+# ==================== AI Chat ====================
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = []
+    context: str = ""       # 编辑器当前内容
+    command: str | None = None  # 快捷指令（如 /optimize）
+
+
+class AccountCredentialsRequest(BaseModel):
+    credentials: dict
 
 
 # ==================== Topics ====================

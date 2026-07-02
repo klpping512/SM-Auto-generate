@@ -167,3 +167,59 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
         hashtags=["南非物流", "跨境货运"],
     )
     return templates.get(platform, generic)
+
+
+# ==================== AI 多轮对话 ====================
+
+SYSTEM_PROMPT_CHAT = (
+    "你是 SA-LogiFlow AI 内容助手，专注于南非跨境物流行业。"
+    "用户可能请你生成、优化、扩写、缩写、翻译社媒内容。"
+    "回复简洁、专业，直接给出可用文案，不要多余的解释开头。"
+    "如果用户使用快捷指令，请按指令要求处理下方提供的编辑器内容。"
+)
+
+COMMANDS = {
+    '/optimize':  '请优化以下内容，使其更专业、更有说服力，保持原意：\n{}',
+    '/shorten':   '请将以下内容精简到50%以内，保留核心信息：\n{}',
+    '/expand':    '请将以下内容扩展到200%，增加细节和数据支撑：\n{}',
+    '/translate': '请将以下内容翻译成英文，保持专业语气：\n{}',
+    '/hashtags':  '请为以下内容生成5个相关的话题标签，用逗号分隔：\n{}',
+}
+
+
+async def chat(messages: list[dict], context: str = "", command: str = None) -> str:
+    """多轮对话 / 快捷指令。返回纯文本回复。"""
+    if command and command in COMMANDS:
+        if not context.strip():
+            return "请先在编辑器输入内容，再使用快捷指令。"
+        messages = [{"role": "user", "content": COMMANDS[command].format(context)}]
+    elif context.strip() and messages and messages[-1]["role"] == "user":
+        # 把编辑器内容作为隐含上下文注入最后一条 user 消息
+        messages = messages.copy()
+        messages[-1] = {
+            "role": "user",
+            "content": f"[编辑器当前内容]\n{context}\n\n[用户消息]\n{messages[-1]['content']}",
+        }
+
+    api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT}] + messages
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": api_messages,
+                    "temperature": 0.7,
+                    "max_tokens": 2000,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error("AI 对话失败: %s", e)
+        return f"AI 暂时无法响应（{e}）。请检查 API Key 是否已设置。"
