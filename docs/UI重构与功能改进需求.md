@@ -1,60 +1,42 @@
-# SA-LogiFlow UI 重构与功能改进需求文档
+# SA-LogiFlow UI 重构与功能改进需求文档 v2
 
 > 供 Claude Code 直接执行
-> 目标：更有科技感、更简洁的 AI 工作流工具
+> 核心改动：AI 工作区拆分为「AI 对话」+「编辑器」两个页面
 
 ---
 
-## 一、核心改动
+## 一、页面架构调整
 
-### 1.1 Logo 替换为 Buffalo
-
-**需求**：左上角的卡车 logo 换成 buffalo（水牛）形象
-
-**实现**：
-1. 修改 `static/common.js` 中 `renderSidebar` 函数
-2. 替换 SVG 路径为 buffalo 图标
-
-```javascript
-// common.js - renderSidebar 函数中的 sidebar-logo 部分
-// 替换为 buffalo SVG（可用 iconify 的 mdi:bull 或自定义）
-<svg width="27" height="27" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-    <!-- Buffalo icon path -->
-    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/>
-</svg>
+### 当前结构
+```
+editor.html（AI 工作区）← 所有功能堆在一起
+├── 知识库选题
+├── AI 对话输入
+├── 内容编辑
+├── 多平台预览
+└── 提交发布
 ```
 
-**替代方案**：直接用 iconify 图标
-```html
-<iconify-icon icon="mdi:bull" width="27" style="color: white;"></iconify-icon>
+### 新结构
+```
+chat.html（AI 对话）← 新首页，轻量对话式
+├── 知识库快速选题
+├── 多轮 AI 对话
+├── 快捷指令（/优化 /缩写 /扩写）
+└── 生成结果 → 发送到编辑器
+
+editor.html（内容编辑器）← 专注编辑发布
+├── 内容编辑（标题/正文/标签）
+├── 附件管理（图片/视频）
+├── 多平台预览
+└── 提交发布队列
 ```
 
----
-
-### 1.2 导航结构调整：AI 工作区作为主页
-
-**当前结构**：
-```
-工作台
-├── 经营驾驶舱 (home.html) ← 当前主页
-├── AI 工作区 (editor.html)
-├── 内容资产 (assets.html)
-├── 发布日历 (calendar.html)
-资源库
-├── 企业知识库 (knowledge.html)
-├── Prompt 模板 (templates.html)
-运营
-├── 发布队列 (queue.html)
-├── 审核中心 (review.html)
-├── 账号管理 (accounts.html)
-系统
-├── 平台配置 (config.html)
-```
-
-**新结构**：
+### 导航结构
 ```
 核心
-├── AI 工作区 (editor.html) ← 新主页！
+├── AI 对话 (chat.html) ← 新主页！
+├── 内容编辑器 (editor.html)
 ├── 发布队列 (queue.html)
 分析
 ├── 经营驾驶舱 (home.html)
@@ -63,7 +45,6 @@
 资源
 ├── 企业知识库 (knowledge.html)
 ├── Prompt 模板 (templates.html)
-├── 素材中心 (assets.html)
 运营
 ├── 审核中心 (review.html)
 ├── 账号管理 (accounts.html)
@@ -71,175 +52,314 @@
 ├── 平台配置 (config.html)
 ```
 
-**实现**：
-
-1. **修改 `static/common.js` 的 NAV_ITEMS**
-```javascript
-const NAV_ITEMS = [
-    { section: '核心' },
-    { id: 'editor', label: 'AI 工作区', href: '/editor.html' },
-    { id: 'queue', label: '发布队列', href: '/queue.html' },
-    { section: '分析' },
-    { id: 'home', label: '经营驾驶舱', href: '/home.html' },
-    { id: 'assets', label: '内容资产', href: '/assets.html' },
-    { id: 'calendar', label: '发布日历', href: '/calendar.html' },
-    { section: '资源' },
-    { id: 'knowledge', label: '企业知识库', href: '/knowledge.html' },
-    { id: 'templates', label: 'Prompt 模板', href: '/templates.html' },
-    { section: '运营' },
-    { id: 'review', label: '审核中心', href: '/review.html' },
-    { id: 'accounts', label: '账号管理', href: '/accounts.html' },
-    { section: '设置' },
-    { id: 'config', label: '平台配置', href: '/config.html' },
-];
-```
-
-2. **修改根路由**（`app.py`）
-```python
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return FileResponse(STATIC_DIR / "editor.html")  # 改为 editor.html
-```
-
-3. **添加 NAV_ICONS**
-```javascript
-const NAV_ICONS = {
-    'AI 工作区': '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
-    '发布队列': '<path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/>',
-    '经营驾驶舱': '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
-    // ... 其他图标
-};
-```
-
 ---
 
-### 1.3 AI 工作区重构：更清晰的布局
+## 二、AI 对话页（chat.html）- 新首页
 
-**当前问题**：
-- 三栏堆叠太复杂
-- 知识库、编辑器、预览、AI 对话全堆在一起
-- 移动端体验差
-
-**新布局设计**：
+### 页面布局
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  顶部操作栏：主题选择 | 语气 | 长度 | 平台勾选 | AI 生成 按钮  │
+│  Logo: Buffalo    SA-LogiFlow                          用户  │
 ├──────────────────────────────────────────────────────────────┤
-│                    │                                         │
-│   知识库侧边栏     │          主编辑区                        │
-│   (可折叠)         │   ┌─────────────────────────────────┐   │
-│                    │   │  标题输入                         │   │
-│   搜索框           │   ├─────────────────────────────────┤   │
-│                    │   │                                  │   │
-│   分类列表         │   │  正文编辑区                       │   │
-│   └─ 话题列表     │   │                                  │   │
-│                    │   │                                  │   │
-│                    │   ├─────────────────────────────────┤   │
-│                    │   │  标签输入                         │   │
-│                    │   └─────────────────────────────────┘   │
-│                    │                                         │
-│                    │   ┌─────────────────────────────────┐   │
-│   AI 助手面板      │   │  预览区（Tab 切换平台）            │   │
-│   (底部可展开)     │   │  小红书 | 抖音 | FB | Twitter    │   │
-│                    │   └─────────────────────────────────┘   │
-│                    │                                         │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │                                                      │   │
+│   │                   对话消息区域                        │   │
+│   │                                                      │   │
+│   │   AI: 你好！我是 LogiFlow AI 助手...                  │   │
+│   │                                                      │   │
+│   │   用户: 生成一篇关于德班港的小红书文案                  │   │
+│   │                                                      │   │
+│   │   AI: 好的，这是为小红书生成的文案...                   │   │
+│   │       ┌────────────────────────────────┐             │   │
+│   │       │ 预览卡片                        │             │   │
+│   │       │ 标题：德班港拥堵预警...         │             │   │
+│   │       │ 正文：...                      │             │   │
+│   │       │ [发送到编辑器] [复制]           │             │   │
+│   │       └────────────────────────────────┘             │   │
+│   │                                                      │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  快捷入口：                                           │   │
+│   │  [📦 德班港] [🛃 清关] [🚚 配送] [📊 市场] [自由输入]  │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  [语气: 专业严谨 ▾] [长度: 中 ▾] [平台: 全选 ▾]       │   │
+│   ├──────────────────────────────────────────────────────┤   │
+│   │  │ 输入需求或选择主题...                    │  发送  │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  快捷指令：                                           │   │
+│   │  [/optimize 优化] [/shorten 缩写] [/expand 扩写]       │   │
+│   │  [/translate 翻译] [/hashtags 标签]                    │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**关键改进**：
+### 核心功能
 
-1. **顶部操作栏**：主题/语气/长度/平台/生成按钮放在顶部，不占用编辑空间
-2. **知识库可折叠**：左栏默认折叠，点击展开
-3. **AI 助手独立面板**：底部可展开的对话区，不挤在角落
-4. **预览区 Tab 化**：清晰的平台切换
+1. **多轮对话**
+   - 上下文记忆
+   - 支持追问和修改
 
-**实现要点**：
+2. **知识库快捷选题**
+   - 6 个分类的快捷卡片
+   - 点击直接生成
+
+3. **生成结果卡片**
+   - 预览生成的内容
+   - 「发送到编辑器」按钮 → 跳转 editor.html 并填充内容
+   - 「复制」按钮
+
+4. **底部参数栏**
+   - 语气选择
+   - 长度选择
+   - 平台选择
+
+5. **快捷指令**
+   - `/optimize` - 优化当前内容
+   - `/shorten` - 精简内容
+   - `/expand` - 扩展内容
+   - `/translate` - 翻译
+   - `/hashtags` - 生成标签
+
+### 技术实现
 
 ```html
-<!-- 顶部操作栏 -->
-<div class="editor-toolbar">
-    <div class="toolbar-left">
-        <select id="topicCategory">...</select>
-        <select id="topicSelect">...</select>
+<!-- chat.html 核心结构 -->
+<div class="chat-page">
+    <!-- 对话区域 -->
+    <div class="chat-messages" id="chatMessages">
+        <!-- 消息列表 -->
     </div>
-    <div class="toolbar-center">
+    
+    <!-- 快捷选题 -->
+    <div class="quick-topics">
+        <button onclick="quickTopic('德班港拥堵')">📦 德班港</button>
+        <button onclick="quickTopic('南非清关')">🛃 清关</button>
+        <!-- ... -->
+    </div>
+    
+    <!-- 参数栏 -->
+    <div class="params-bar">
         <select id="toneSelect">...</select>
         <select id="lengthSelect">...</select>
-        <div class="platform-checkboxes">
-            <label><input type="checkbox" value="xiaohongshu" checked> 小红书</label>
-            <!-- ... -->
-        </div>
+        <div class="platform-select">...</div>
     </div>
-    <div class="toolbar-right">
-        <button class="btn-primary" onclick="generateContent()">✨ AI 生成</button>
-    </div>
-</div>
-
-<!-- 主体区域 -->
-<div class="editor-body">
-    <!-- 知识库侧边栏（可折叠） -->
-    <aside class="knowledge-sidebar collapsed" id="knowledgeSidebar">
-        <button class="toggle-btn" onclick="toggleKnowledge()">📚</button>
-        <div class="knowledge-content">
-            <input placeholder="搜索知识库..."/>
-            <div class="category-list">...</div>
-        </div>
-    </aside>
     
-    <!-- 编辑区 -->
-    <main class="editor-main">
-        <input id="editorTitle" placeholder="标题" class="title-input"/>
-        <textarea id="editorContent" placeholder="输入或生成文案..." class="content-input"></textarea>
-        <input id="editorHashtags" placeholder="标签（逗号分隔）" class="tags-input"/>
-    </main>
+    <!-- 输入框 -->
+    <div class="chat-input">
+        <textarea id="chatInput" placeholder="输入需求或选择主题..."></textarea>
+        <button onclick="sendMessage()">发送</button>
+    </div>
     
-    <!-- 预览区 -->
-    <aside class="preview-panel">
-        <div class="preview-tabs">
-            <button class="active">小红书</button>
-            <button>抖音</button>
-            <button>Facebook</button>
-            <button>Twitter</button>
-        </div>
-        <div class="preview-content" id="previewArea">...</div>
-    </aside>
+    <!-- 快捷指令 -->
+    <div class="quick-commands">
+        <button onclick="sendCommand('/optimize')">/optimize 优化</button>
+        <!-- ... -->
+    </div>
 </div>
+```
 
-<!-- AI 助手面板（底部可展开） -->
-<div class="ai-assistant-panel" id="aiPanel">
-    <div class="ai-panel-header" onclick="toggleAiPanel()">
-        <span>🤖 AI 助手</span>
-        <iconify-icon icon="mdi:chevron-up"></iconify-icon>
-    </div>
-    <div class="ai-panel-body">
-        <div class="chat-messages" id="chatMessages">...</div>
-        <div class="quick-commands">
-            <button onclick="sendCommand('/optimize')">✨ 优化</button>
-            <button onclick="sendCommand('/shorten')">📝 缩写</button>
-            <button onclick="sendCommand('/expand')">📖 扩写</button>
-        </div>
-        <div class="chat-input">
-            <textarea id="aiChatInput" placeholder="输入需求..."></textarea>
-            <button onclick="sendMessage()">发送</button>
-        </div>
-    </div>
-</div>
+```javascript
+// 核心逻辑
+async function sendMessage() {
+    const input = document.getElementById('chatInput');
+    const msg = input.value.trim();
+    if (!msg) return;
+    
+    // 添加用户消息
+    appendMessage('user', msg);
+    input.value = '';
+    
+    // 调用 AI
+    const resp = await apiFetch('/api/ai/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+            messages: chatHistory,
+            tone: document.getElementById('toneSelect').value,
+            length: document.getElementById('lengthSelect').value,
+            platforms: getSelectedPlatforms()
+        })
+    });
+    const data = await resp.json();
+    
+    // 显示 AI 回复（带预览卡片）
+    appendMessageWithCard('assistant', data);
+    
+    // 保存到历史
+    chatHistory.push({role: 'user', content: msg});
+    chatHistory.push({role: 'assistant', content: data.content});
+}
+
+// 发送到编辑器
+function sendToEditor(content) {
+    // 存到 localStorage
+    localStorage.setItem('draft', JSON.stringify({
+        title: content.title,
+        body: content.body,
+        hashtags: content.hashtags
+    }));
+    
+    // 跳转到编辑器
+    window.location.href = '/editor.html';
+}
 ```
 
 ---
 
-## 二、UI 科技感增强
+## 三、内容编辑器（editor.html）- 精细化编辑
 
-### 2.1 悬浮动画效果
+### 页面布局
 
-**需求**：鼠标悬浮时有浮动、发光、渐变等动画
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Logo: Buffalo    SA-LogiFlow                          用户  │
+├──────────────────────────────────────────────────────────────┤
+│  [保存草稿]  [提交发布]                                       │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  当前主题：德班港拥堵预警                    [✕ 清除]  │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  标题                                                │   │
+│   │  ┌────────────────────────────────────────────────┐  │   │
+│   │  │ 德班港拥堵预警！卖家利润正在被吞噬⚡            │  │   │
+│   │  └────────────────────────────────────────────────┘  │   │
+│   ├──────────────────────────────────────────────────────┤   │
+│   │  正文                                                │   │
+│   │  ┌────────────────────────────────────────────────┐  │   │
+│   │  │                                                │  │   │
+│   │  │  各位跨境物流人注意，德班港拥堵指数已飙升至...  │  │   │
+│   │  │                                                │  │   │
+│   │  │                                                │  │   │
+│   │  └────────────────────────────────────────────────┘  │   │
+│   ├──────────────────────────────────────────────────────┤   │
+│   │  标签                                                │   │
+│   │  ┌────────────────────────────────────────────────┐  │   │
+│   │  │ #南非物流, #德班港, #跨境货运                   │  │   │
+│   │  └────────────────────────────────────────────────┘  │   │
+│   ├──────────────────────────────────────────────────────┤   │
+│   │  附件                                                │   │
+│   │  [📎 添加图片/视频]                                   │   │
+│   │  ┌────┐ ┌────┐ ┌────┐                               │   │
+│   │  │ 图 │ │ 图 │ │ 视 │                               │   │
+│   │  └────┘ └────┘ └────┘                               │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│   ┌──────────────────────────────────────────────────────┐   │
+│   │  预览                                                │   │
+│   │  [小红书] [抖音] [Facebook] [Twitter] [Reddit]        │   │
+│   ├──────────────────────────────────────────────────────┤   │
+│   │  ┌────────────────────────────────────────────────┐  │   │
+│   │  │                                                │  │   │
+│   │  │            小红书预览卡片                       │  │   │
+│   │  │                                                │  │   │
+│   │  └────────────────────────────────────────────────┘  │   │
+│   └──────────────────────────────────────────────────────┘   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
 
-**实现**：
+### 核心功能
 
-1. **卡片悬浮提升效果**
+1. **内容编辑**
+   - 标题输入
+   - 正文编辑
+   - 标签输入
+
+2. **附件管理**
+   - 图片/视频上传
+   - 预览缩略图
+   - 删除附件
+
+3. **多平台预览**
+   - Tab 切换
+   - 各平台样式适配
+
+4. **提交发布**
+   - 保存草稿
+   - 提交审核队列
+
+### 从 AI 对话页接收数据
+
+```javascript
+// editor.html 初始化时
+function init() {
+    // 检查是否有从 chat.html 传来的草稿
+    const draft = localStorage.getItem('draft');
+    if (draft) {
+        const data = JSON.parse(draft);
+        document.getElementById('editorTitle').value = data.title || '';
+        document.getElementById('editorContent').value = data.body || '';
+        document.getElementById('editorHashtags').value = (data.hashtags || []).join(', ');
+        
+        // 清除草稿（已使用）
+        localStorage.removeItem('draft');
+        
+        showToast('已从 AI 对话导入内容');
+    }
+}
+```
+
+---
+
+## 四、后端 API 调整
+
+### 1. AI 对话 API
+
+```python
+@app.post("/api/ai/chat")
+async def ai_chat(req: ChatRequest):
+    """
+    req.messages: 对话历史
+    req.tone: 语气
+    req.length: 长度
+    req.platforms: 目标平台
+    req.topic: 主题（可选）
+    """
+    # 构建 prompt
+    system_prompt = build_system_prompt(req.tone, req.length, req.platforms)
+    
+    messages = [{"role": "system", "content": system_prompt}] + req.messages
+    
+    # 调用 DeepSeek
+    response = await call_deepseek(messages)
+    
+    # 解析返回内容
+    content = parse_ai_response(response)
+    
+    return {
+        "content": content,
+        "title": content.get("title"),
+        "body": content.get("body"),
+        "hashtags": content.get("hashtags", [])
+    }
+```
+
+### 2. 根路由修改
+
+```python
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return FileResponse(STATIC_DIR / "chat.html")  # 新首页
+```
+
+---
+
+## 五、UI 科技感增强
+
+### 5.1 悬浮动画
+
 ```css
-/* design-system.css */
+/* 卡片悬浮提升 */
 .card-hover {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -248,10 +368,36 @@ const NAV_ICONS = {
     transform: translateY(-4px);
     box-shadow: 0 12px 40px rgba(99, 102, 241, 0.15);
 }
-```
 
-2. **按钮发光效果**
-```css
+/* 导航项滑入 */
+.nav-item {
+    position: relative;
+    transition: all 0.2s ease;
+}
+
+.nav-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--primary);
+    transform: scaleY(0);
+    transition: transform 0.2s ease;
+}
+
+.nav-item:hover {
+    background: var(--primary-light);
+    transform: translateX(4px);
+}
+
+.nav-item:hover::before,
+.nav-item.active::before {
+    transform: scaleY(1);
+}
+
+/* 按钮发光 */
 .btn-glow {
     position: relative;
     overflow: hidden;
@@ -278,178 +424,6 @@ const NAV_ICONS = {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
 }
-```
-
-3. **导航项悬浮动画**
-```css
-.nav-item {
-    position: relative;
-    transition: all 0.2s ease;
-}
-
-.nav-item::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 3px;
-    height: 100%;
-    background: var(--primary);
-    transform: scaleY(0);
-    transition: transform 0.2s ease;
-}
-
-.nav-item:hover {
-    background: var(--primary-light);
-    transform: translateX(4px);
-}
-
-.nav-item:hover::before {
-    transform: scaleY(1);
-}
-
-.nav-item.active {
-    background: var(--primary-light);
-}
-
-.nav-item.active::before {
-    transform: scaleY(1);
-}
-```
-
-4. **数据卡片数字跳动效果**
-```css
-.stat-number {
-    transition: all 0.3s ease;
-}
-
-.stat-card:hover .stat-number {
-    transform: scale(1.05);
-    color: var(--primary);
-}
-```
-
-5. **平台图标悬浮缩放**
-```css
-.platform-icon {
-    transition: all 0.2s ease;
-}
-
-.platform-icon:hover {
-    transform: scale(1.2) rotate(5deg);
-}
-```
-
----
-
-### 2.2 科技感配色方案
-
-```css
-:root {
-    /* 主色调 - 科技蓝紫 */
-    --primary: #6366f1;
-    --primary-light: rgba(99, 102, 241, 0.1);
-    --primary-glow: rgba(99, 102, 241, 0.4);
-    
-    /* 背景 - 深色科技 */
-    --bg-primary: #0a0a0f;
-    --bg-secondary: #111827;
-    --bg-card: rgba(17, 24, 39, 0.8);
-    
-    /* 玻璃拟态 */
-    --glass-bg: rgba(17, 24, 39, 0.6);
-    --glass-border: rgba(99, 102, 241, 0.1);
-    --glass-blur: blur(12px);
-    
-    /* 霓虹色 */
-    --neon-blue: #00d4ff;
-    --neon-purple: #a855f7;
-    --neon-green: #22c55e;
-    
-    /* 渐变 */
-    --gradient-primary: linear-gradient(135deg, #6366f1, #a855f7);
-    --gradient-glow: linear-gradient(135deg, rgba(99,102,241,0.3), rgba(168,85,247,0.3));
-}
-```
-
----
-
-### 2.3 动态背景效果
-
-```css
-/* 科技感网格背景 */
-body {
-    background: var(--bg-primary);
-    background-image: 
-        linear-gradient(rgba(99, 102, 241, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(99, 102, 241, 0.03) 1px, transparent 1px);
-    background-size: 40px 40px;
-}
-
-/* 渐变光晕背景 */
-.hero-glow {
-    position: relative;
-}
-
-.hero-glow::before {
-    content: '';
-    position: absolute;
-    top: -200px;
-    left: -200px;
-    width: 600px;
-    height: 600px;
-    background: radial-gradient(circle, var(--primary-glow) 0%, transparent 70%);
-    opacity: 0.3;
-    pointer-events: none;
-}
-```
-
----
-
-### 2.4 交互动画
-
-```css
-/* 页面切换动画 */
-.page-enter {
-    animation: fadeInUp 0.3s ease-out;
-}
-
-@keyframes fadeInUp {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-/* 按钮点击涟漪效果 */
-.btn-ripple {
-    position: relative;
-    overflow: hidden;
-}
-
-.btn-ripple::after {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 0;
-    height: 0;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.3);
-    transform: translate(-50%, -50%);
-    transition: width 0.6s, height 0.6s, opacity 0.6s;
-    opacity: 0;
-}
-
-.btn-ripple:active::after {
-    width: 300px;
-    height: 300px;
-    opacity: 0;
-}
 
 /* 输入框聚焦发光 */
 .input-glow:focus {
@@ -458,146 +432,46 @@ body {
 }
 ```
 
----
+### 5.2 配色方案
 
-## 三、知识库侧边栏折叠
-
-**需求**：知识库默认折叠，给编辑区更多空间
-
-**实现**：
-
-```javascript
-function toggleKnowledge() {
-    const sidebar = document.getElementById('knowledgeSidebar');
-    sidebar.classList.toggle('collapsed');
+```css
+:root {
+    --primary: #6366f1;
+    --primary-light: rgba(99, 102, 241, 0.1);
+    --primary-glow: rgba(99, 102, 241, 0.4);
     
-    // 保存状态到 localStorage
-    localStorage.setItem('knowledgeCollapsed', sidebar.classList.contains('collapsed'));
-}
-
-// 初始化时恢复状态
-function initKnowledgeState() {
-    const collapsed = localStorage.getItem('knowledgeCollapsed') === 'true';
-    if (collapsed) {
-        document.getElementById('knowledgeSidebar').classList.add('collapsed');
-    }
-}
-```
-
-```css
-.knowledge-sidebar {
-    width: 280px;
-    transition: width 0.3s ease;
-    overflow: hidden;
-}
-
-.knowledge-sidebar.collapsed {
-    width: 48px;
-}
-
-.knowledge-sidebar.collapsed .knowledge-content {
-    opacity: 0;
-    pointer-events: none;
-}
-
-.knowledge-sidebar .toggle-btn {
-    width: 48px;
-    height: 48px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: none;
-    cursor: pointer;
-    color: var(--text-secondary);
-    transition: all 0.2s;
-}
-
-.knowledge-sidebar .toggle-btn:hover {
-    background: var(--primary-light);
-    color: var(--primary);
+    --bg-primary: #0a0a0f;
+    --bg-secondary: #111827;
+    --bg-card: rgba(17, 24, 39, 0.8);
+    
+    --glass-bg: rgba(17, 24, 39, 0.6);
+    --glass-border: rgba(99, 102, 241, 0.1);
 }
 ```
 
 ---
 
-## 四、AI 助手面板
+## 六、执行清单
 
-**需求**：AI 对话不挤在角落，底部可展开的独立面板
+### P0（立即做）
+- [ ] 创建 `chat.html`（AI 对话页）
+- [ ] 修改 `common.js` NAV_ITEMS（chat 置顶）
+- [ ] 修改 `app.py` 根路由指向 chat.html
+- [ ] 实现「发送到编辑器」功能（localStorage 传递）
 
-**实现**：
-
-```css
-.ai-assistant-panel {
-    position: fixed;
-    bottom: 0;
-    right: 20px;
-    width: 380px;
-    max-height: 500px;
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px 16px 0 0;
-    transform: translateY(calc(100% - 48px));
-    transition: transform 0.3s ease;
-    z-index: 100;
-}
-
-.ai-assistant-panel.expanded {
-    transform: translateY(0);
-}
-
-.ai-panel-header {
-    padding: 12px 16px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--glass-border);
-}
-
-.ai-panel-header:hover {
-    background: var(--primary-light);
-}
-
-.ai-panel-body {
-    padding: 16px;
-    max-height: 400px;
-    overflow-y: auto;
-}
-```
-
-```javascript
-function toggleAiPanel() {
-    const panel = document.getElementById('aiPanel');
-    panel.classList.toggle('expanded');
-}
-```
-
----
-
-## 五、执行清单
-
-### 优先级 P0（立即做）
-- [ ] 替换 Logo 为 Buffalo
-- [ ] 修改 NAV_ITEMS 顺序（AI 工作区置顶）
-- [ ] 修改根路由指向 editor.html
-- [ ] AI 工作区布局重构（顶部操作栏 + 可折叠知识库）
-
-### 优先级 P1（本周做）
+### P1（本周做）
+- [ ] 简化 `editor.html`（删除 AI 对话部分）
 - [ ] 添加悬浮动画 CSS
-- [ ] 添加科技感配色变量
-- [ ] 实现 AI 助手面板
-- [ ] 实现知识库折叠功能
+- [ ] 实现科技感配色
+- [ ] 添加快捷选题卡片
 
-### 优先级 P2（下周做）
-- [ ] 添加动态背景效果
+### P2（下周做）
+- [ ] 优化对话 UI（Markdown 渲染、代码高亮）
+- [ ] 添加对话历史保存
 - [ ] 添加页面切换动画
-- [ ] 添加按钮涟漪效果
-- [ ] 优化移动端响应式
 
 ---
 
-*文档版本：v1*
+*文档版本：v2*
 *更新时间：2026-07-01*
-*供 Claude Code 直接执行*
+*核心改动：AI 工作区拆分为「AI 对话」+「编辑器」*
