@@ -12,6 +12,7 @@
     --primary-hover: #986B34;
     --primary-light: rgba(185, 138, 76, 0.14);
     --primary-soft: rgba(185, 138, 76, 0.08);
+    --primary-glow: rgba(185, 138, 76, 0.32);
     --main-gradient: linear-gradient(135deg, #C59A61 0%, #A87538 100%);
     --success: #238A57;
     --warning: #C47A26;
@@ -113,10 +114,32 @@ a {
     width: 100%;
     min-height: 88px;
     padding: 18px 20px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    display: block;
     border-bottom: 1px solid var(--border-light);
+}
+
+.sidebar-logo-lockup {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+}
+
+.sidebar-logo-image {
+    display: block;
+    width: 100%;
+    max-width: 194px;
+    height: auto;
+    object-fit: contain;
+    object-position: left center;
+}
+
+.sidebar-product-name {
+    display: block;
+    margin-top: 9px;
+    color: var(--text-muted);
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 1.35px;
 }
 
 .sidebar-logo {
@@ -190,6 +213,18 @@ a {
     cursor: pointer;
 }
 
+.nav-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--primary);
+    transform: scaleY(0);
+    transition: transform 0.2s ease;
+}
+
 .nav-item span {
     position: static;
     transform: none;
@@ -211,7 +246,12 @@ a {
 .nav-item:hover {
     background: var(--primary-soft);
     color: var(--primary);
-    transform: none;
+    transform: translateX(3px);
+}
+
+.nav-item:hover::before,
+.nav-item.active::before {
+    transform: scaleY(1);
 }
 
 .nav-item.active {
@@ -219,6 +259,8 @@ a {
     color: white;
     box-shadow: none;
 }
+
+.nav-item.active::before { background: #fff; }
 
 .nav-item iconify-icon {
     font-size: 21px;
@@ -337,6 +379,16 @@ a {
 
 .card {
     overflow: hidden;
+}
+
+.card-hover {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.card-hover:hover {
+    transform: translateY(-4px);
+    border-color: rgba(185, 138, 76, 0.45);
+    box-shadow: 0 12px 40px rgba(48, 40, 28, 0.13);
 }
 
 .card-header {
@@ -555,6 +607,24 @@ a {
     opacity: 0.55;
     cursor: not-allowed;
     transform: none;
+}
+
+.btn-glow { position: relative; overflow: hidden; }
+.btn-glow::before {
+    content: '';
+    position: absolute;
+    inset: -60%;
+    background: radial-gradient(circle, rgba(255,255,255,0.3) 0%, transparent 58%);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+}
+.btn-glow:hover::before { opacity: 1; animation: glow-rotate 2s linear infinite; }
+@keyframes glow-rotate { to { transform: rotate(360deg); } }
+
+.input-glow:focus {
+    box-shadow: 0 0 0 3px var(--primary-light), 0 0 20px var(--primary-glow);
+    border-color: var(--primary);
 }
 
 /* ==================== Tags / Badges ==================== */

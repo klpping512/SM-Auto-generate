@@ -174,6 +174,8 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
 SYSTEM_PROMPT_CHAT = (
     "你是 SA-LogiFlow AI 内容助手，专注于南非跨境物流行业。"
     "用户可能请你生成、优化、扩写、缩写、翻译社媒内容。"
+    "你必须结合当前会话的全部历史消息理解上下文、承接上一版内容，并正确处理‘继续’、‘改短一点’、‘沿用刚才语气’等省略和指代；"
+    "如果新要求与旧要求冲突，以用户最新一条消息为准。"
     "回复简洁、专业，直接给出可用文案，不要多余的解释开头。"
     "如果用户使用快捷指令，请按指令要求处理下方提供的编辑器内容。"
 )
@@ -187,7 +189,11 @@ COMMANDS = {
 }
 
 
-async def chat(messages: list[dict], context: str = "", command: str = None) -> str:
+async def chat(
+    messages: list[dict], context: str = "", command: str = None,
+    tone: str = "professional", length: str = "medium",
+    platforms: list[str] | None = None, topic: str = "",
+) -> str:
     """多轮对话 / 快捷指令。返回纯文本回复。"""
     if command and command in COMMANDS:
         if not context.strip():
@@ -201,7 +207,24 @@ async def chat(messages: list[dict], context: str = "", command: str = None) -> 
             "content": f"[编辑器当前内容]\n{context}\n\n[用户消息]\n{messages[-1]['content']}",
         }
 
-    api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT}] + messages
+    tone_map = {"professional": "专业严谨", "friendly": "亲切自然", "urgent": "简洁紧迫"}
+    length_map = {"short": "短篇", "medium": "中篇", "long": "长篇"}
+    platform_text = "、".join(platforms or ["xiaohongshu"])
+    parameter_prompt = (
+        f"\n本轮偏好：语气={tone_map.get(tone, tone)}；长度={length_map.get(length, length)}；"
+        f"目标平台={platform_text}。"
+        + (f"主题={topic}。" if topic else "")
+    )
+    api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + parameter_prompt}] + messages
+
+    if not DEEPSEEK_API_KEY:
+        seed = topic or (messages[-1]["content"] if messages else context) or "南非跨境物流"
+        return (
+            f"{seed[:36]}｜物流运营建议\n\n"
+            f"围绕「{seed}」，建议从时效变化、成本影响和客户应对三个角度组织内容。"
+            "先给出清晰结论，再补充可执行建议，并用真实业务场景增强可信度。\n\n"
+            "#南非物流 #跨境物流 #供应链"
+        )
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:

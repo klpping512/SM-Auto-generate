@@ -140,6 +140,10 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = []
     context: str = ""       # 编辑器当前内容
     command: str | None = None  # 快捷指令（如 /optimize）
+    tone: str = "professional"
+    length: str = "medium"
+    platforms: list[Platform] = [Platform.XIAOHONGSHU]
+    topic: str = ""
 
 
 class AccountCredentialsRequest(BaseModel):

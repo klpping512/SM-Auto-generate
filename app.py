@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4 as _uuid4
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +30,9 @@ from models import (
 )
 import publish_readiness
 from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
+
+# 从项目本地的 .env 加载敏感配置；.env 已加入 .gitignore，不会进入源码仓库。
+load_dotenv(Path(__file__).with_name(".env"))
 
 # ==================== Logging ====================
 logging.basicConfig(
@@ -124,7 +128,7 @@ async def update_user_status(user_id: int, body: dict, user=Depends(require_role
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return FileResponse(STATIC_DIR / "home.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    return FileResponse(STATIC_DIR / "chat.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/{page_name}.html", response_class=HTMLResponse)
@@ -742,8 +746,19 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         messages=messages,
         context=req.context or "",
         command=req.command,
+        tone=req.tone,
+        length=req.length,
+        platforms=[p.value for p in req.platforms],
+        topic=req.topic,
     )
-    return {"content": result}
+    parsed = ai_engine._parse_json_response(result)
+    body = parsed.get("body") or result
+    title = (parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), "AI 生成内容"))[:80]
+    hashtags = parsed.get("hashtags") or []
+    if not hashtags:
+        import re
+        hashtags = list(dict.fromkeys(re.findall(r"#([\w\u4e00-\u9fff-]+)", body)))[:8]
+    return {"content": result, "title": title, "body": body, "hashtags": hashtags}
 
 
 # ==================== Static Assets ====================

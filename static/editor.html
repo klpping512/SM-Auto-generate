@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=4"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=4"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=4"/>
-<link rel="manifest" href="/static/manifest.json?v=4"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=5"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=5"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=5"/>
+<link rel="manifest" href="/static/manifest.json?v=5"/>
 <meta name="theme-color" content="#B98A4C"/>
-<title>AI 工作区 - SA-LogiFlow</title>
+<title>内容编辑器 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css?v=4"/>
+<link rel="stylesheet" href="/static/design-system.css?v=5"/>
 <style>
-.workspace-grid { flex: 1; display: grid; grid-template-columns: 230px minmax(380px, 1fr) 300px; gap: 14px; overflow: hidden; min-height: 0; }
+.workspace-grid { flex: 1; display: grid; grid-template-columns: minmax(440px, 1fr) minmax(300px, 380px); gap: 14px; overflow: hidden; min-height: 0; padding-top:18px; }
 .col-knowledge,
 .col-editor,
 .col-preview {
@@ -26,6 +26,8 @@
     box-shadow: var(--shadow-card);
     overflow: hidden;
 }
+.col-knowledge { display:none; }
+#tplSelect,#toneSelect,#lengthSelect,#genBtnMain { display:none; }
 .toolbar { padding: 8px 12px; border-bottom: 1px solid var(--border-light); display: flex; gap: 4px; background:var(--bg-subcard); }
 .toolbar button { padding: 6px 8px; border-radius: var(--radius-sm); border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 16px; }
 .toolbar button:hover { background: var(--bg-secondary); color: var(--text-primary); }
@@ -63,7 +65,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=4"></script>
+<script src="/static/common.js?v=5"></script>
 <script>
 const PAGE_ID = 'editor';
 const platformInfo = {
@@ -93,7 +95,7 @@ async function init() {
     ${renderSidebar(PAGE_ID)}
     <div class="main-content">
         <div class="page-header">
-            <h1 class="page-title">AI 工作区</h1>
+            <div><div style="font-size:9px;color:var(--primary);font-weight:900;letter-spacing:1.8px;margin-bottom:3px;">CONTENT PRODUCTION</div><h1 class="page-title">内容编辑器</h1></div>
             <div style="display:flex;gap:8px;">
                 <button class="btn btn-secondary btn-sm" onclick="saveDraft()"><iconify-icon icon="mdi:content-save" width="16"></iconify-icon> 保存草稿</button>
                 <button class="btn btn-primary btn-sm" onclick="submitToQueue()"><iconify-icon icon="mdi:send" width="16"></iconify-icon> 提交发布</button>
@@ -167,7 +169,7 @@ async function init() {
                 </div>
                 <div style="flex:1;padding:16px;overflow-y:auto;display:flex;flex-direction:column;">
                     <input id="editorTitle" class="input" placeholder="标题" style="font-size:18px;font-weight:700;border:none;padding:0;margin-bottom:12px;"/>
-                    <textarea id="editorContent" style="flex:1;width:100%;border:none;outline:none;resize:none;font-size:14px;line-height:1.8;color:var(--text-primary);" placeholder="选择主题后点击生成，或直接输入文案..."></textarea>
+                    <textarea id="editorContent" style="flex:1;width:100%;border:none;outline:none;resize:none;font-size:14px;line-height:1.8;color:var(--text-primary);" placeholder="从 AI 对话导入内容，或直接输入文案..."></textarea>
                 </div>
                 <div style="padding:8px 16px;border-top:1px solid var(--border-light);">
                     <input id="editorHashtags" class="input" placeholder="标签（逗号分隔）" style="font-size:12px;padding:6px 10px;"/>
@@ -195,7 +197,7 @@ async function init() {
                     ${Object.entries(platformInfo).map(([k,v])=>`<button class="preview-tab" data-platform="${k}" onclick="switchPreview('${k}')" style="padding:10px 12px;font-size:11px;font-weight:600;border:none;background:none;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;">${v.name}</button>`).join('')}
                 </div>
                 <div id="previewArea" style="flex:1;overflow-y:auto;padding:20px;">
-                    <div class="empty-state" style="padding-top:80px;"><iconify-icon icon="mdi:sparkles" width="48"></iconify-icon><p style="margin-top:8px;">点击生成按钮预览内容</p></div>
+                    <div class="empty-state" style="padding-top:80px;"><iconify-icon icon="mdi:file-eye-outline" width="48"></iconify-icon><p style="margin-top:8px;">输入或导入内容后即可预览</p></div>
                 </div>
             </div>
         </div>
@@ -317,9 +319,20 @@ function loadDraft() {
         document.getElementById('editorContent').value = draft.body;
         document.getElementById('charCount').textContent = draft.body.length + ' 字';
     }
-    if (draft.hashtags) document.getElementById('editorHashtags').value = draft.hashtags;
-    // 同步进当前平台内容，便于预览与提交
-    if (draft.title || draft.body) syncEditorToContent();
+    if (draft.hashtags) document.getElementById('editorHashtags').value = Array.isArray(draft.hashtags) ? draft.hashtags.join(', ') : draft.hashtags;
+    // 从 AI 对话页可一次带入多个目标平台。
+    if (draft.title || draft.body) {
+        const targets = Array.isArray(draft.platforms) && draft.platforms.length ? draft.platforms : [currentPreview];
+        const hashtags = Array.isArray(draft.hashtags) ? draft.hashtags : String(draft.hashtags || '').split(',').map(s=>s.trim()).filter(Boolean);
+        targets.forEach(platform => { generatedContents[platform] = {platform,title:draft.title||'',body:draft.body||'',hashtags}; });
+        if (!generatedContents[currentPreview]) currentPreview = targets[0];
+        loadPlatformToEditor(currentPreview);
+        renderPreview(currentPreview);
+    }
+    if (draft.source === 'chat') {
+        localStorage.removeItem('draft');
+        showToast('已从 AI 对话导入内容', 'info');
+    }
 }
 
 function renderKnowledgeBase() {

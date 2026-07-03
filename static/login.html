@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=4"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=4"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=4"/>
-<link rel="manifest" href="/static/manifest.json?v=4"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=5"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=5"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=5"/>
+<link rel="manifest" href="/static/manifest.json?v=5"/>
 <meta name="theme-color" content="#B98A4C"/>
 <title>登录 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css?v=4"/>
+<link rel="stylesheet" href="/static/design-system.css?v=5"/>
 <style>
 .login-bg {
     min-height: 100vh;
@@ -29,16 +29,18 @@
     align-items:center;
 }
 .login-logo {
-    width: 64px;
+    width: 270px;
     height: 64px;
-    background: var(--main-gradient);
+    background: #fff;
     border-radius: 2px;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     margin: 0 0 20px;
     box-shadow: none;
+    padding: 12px 14px;
 }
+.login-logo img{display:block;width:100%;height:auto;object-fit:contain;}
 .login-brand { color:#fff; padding:24px 0; }
 .login-brand h1 { font-size:42px;line-height:1;font-weight:900;letter-spacing:1px; }
 .login-brand p { color:#D3C4AF;font-size:14px;margin-top:14px;letter-spacing:1px; }
@@ -59,9 +61,7 @@
 <div class="login-shell">
     <div class="login-brand">
         <div class="login-logo">
-            <svg width="38" height="38" viewBox="0 0 24 24" fill="none" aria-label="SA-LogiFlow Logo">
-                <path d="M3 6h11v9H3zM14 9h3.5l3 3v3H14z" fill="white"/><circle cx="7" cy="17" r="2" fill="white"/><circle cx="17" cy="17" r="2" fill="white"/><path d="M1 9h7M1 12h5" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
+            <img src="/static/icons/buffalo_logo_header.png?v=1" alt="Buffalo Logo"/>
         </div>
         <h1>SA-LOGIFLOW</h1>
         <p>南非物流 · 社媒内容运营中枢</p>
