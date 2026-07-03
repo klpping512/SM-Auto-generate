@@ -16,6 +16,18 @@ def test_twitter_truncation_keeps_complete_sentence():
     assert not shortened.endswith("…")
 
 
+def test_unsupported_claim_detection_catches_vague_metrics_and_fake_attribution():
+    body = "官方数据显示，延误可能持续数周。"
+    warnings = ai_engine._unsupported_claim_warnings(body, "请写港口拥堵提醒")
+    assert "输入中未提供的具体时间或数据" in warnings
+    assert "输入中未提供来源的报告或官方数据归因" in warnings
+
+
+def test_platform_format_detection_requires_douyin_script_markers():
+    assert ai_engine._platform_format_warnings("douyin", "普通通用文案")
+    assert ai_engine._platform_format_warnings("douyin", "【画面】港口\n【口播】注意拥堵") == []
+
+
 @pytest.mark.asyncio
 async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatch):
     monkeypatch.setattr(ai_engine, "DEEPSEEK_API_KEY", "")

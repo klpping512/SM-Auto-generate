@@ -140,6 +140,34 @@ def _truncate_twitter_body(body: str, limit: int = 280) -> str:
     return candidate[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
 
 
+UNSUPPORTED_METRIC_PATTERN = re.compile(
+    r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+\s*(?:-|–|—|to)\s*\d+\s*(?:days?|hours?|weeks?|天|小时|周)|"
+    r"\b\d+(?:\.\d+)?\s*(?:days?|hours?|weeks?|天|小时|周)|(?:数|几|多)\s*(?:天|周|小时))",
+    re.I,
+)
+UNSUPPORTED_ATTRIBUTION_PATTERN = re.compile(
+    r"(?:官方数据(?:显示|表明)|数据显示|行业报告(?:显示|指出)|根据[^。.!?]{0,20}(?:报告|数据)|according to [^.!?]{0,30}(?:report|data))",
+    re.I,
+)
+
+
+def _unsupported_claim_warnings(body: str, source_text: str) -> list[str]:
+    warnings = []
+    if UNSUPPORTED_METRIC_PATTERN.search(body) and not UNSUPPORTED_METRIC_PATTERN.search(source_text):
+        warnings.append("输入中未提供的具体时间或数据")
+    if UNSUPPORTED_ATTRIBUTION_PATTERN.search(body) and not UNSUPPORTED_ATTRIBUTION_PATTERN.search(source_text):
+        warnings.append("输入中未提供来源的报告或官方数据归因")
+    return warnings
+
+
+def _platform_format_warnings(platform: str, body: str) -> list[str]:
+    if platform == "douyin" and not ("【画面】" in body and "【口播】" in body):
+        return ["抖音稿缺少【画面】和【口播】脚本格式"]
+    if platform == "twitter" and len(body) > 280:
+        return ["Twitter/X 正文超过 280 字符"]
+    return []
+
+
 def _fallback_content(platform: Platform, topic: str, category: str) -> GeneratedContent:
     """Generate template content when API fails."""
     templates = {
@@ -315,12 +343,11 @@ async def _chat_one_platform(
             body = parsed.get("body") or raw
             title = parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), platform_names.get(platform, platform))
             hashtags = _normalize_hashtags(parsed.get("hashtags"), body)
-            metric_pattern = re.compile(r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+\s*(?:-|–|—|to)\s*\d+\s*(?:days?|hours?|weeks?|天|小时|周)|\b\d+(?:\.\d+)?\s*(?:days?|hours?|weeks?|天|小时|周))", re.I)
             source_text = " ".join(item.get("content", "") for item in messages) + " " + topic
-            has_unsupported_metric = bool(metric_pattern.search(body)) and not bool(metric_pattern.search(source_text))
+            unsupported_claims = _unsupported_claim_warnings(body, source_text)
             needs_twitter_trim = platform == "twitter" and len(body) > 280
-            if has_unsupported_metric or needs_twitter_trim:
-                constraints = ["Remove every unsupported numeric claim, time range, percentage, price, or statistic. Keep numbered action-list labels, but use no unverified metrics."]
+            if unsupported_claims or needs_twitter_trim:
+                constraints = ["Remove every unsupported numeric claim, vague time range, percentage, price, statistic, and unsupported attribution such as 'official data shows' or 'industry reports'. Keep numbered action-list labels, but make no claim whose source was not supplied by the user."]
                 if platform == "twitter":
                     constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
                 repair_resp = await client.post(
@@ -332,7 +359,7 @@ async def _chat_one_platform(
                     json={
                         "model": "deepseek-chat",
                         "messages": [
-                            {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. " + " ".join(constraints)},
+                            {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. Preserve this platform format exactly: {config['format']} Language: {language_rules.get(platform, '')} " + " ".join(constraints)},
                             {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
                         ],
                         "temperature": 0.3,
@@ -346,11 +373,34 @@ async def _chat_one_platform(
                 title = repaired.get("title") or title
                 hashtags = _normalize_hashtags(repaired.get("hashtags"), body) or hashtags
                 raw = repaired_raw
+            if _platform_format_warnings(platform, body):
+                format_resp = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": [
+                            {"role": "system", "content": f"Rewrite for {platform_names.get(platform, platform)}. Return strict JSON with title, body, hashtags. Mandatory format: {config['format']} Language: {language_rules.get(platform, '')} Do not add any unsupported real-time data, vague time ranges, statistics, or source attribution."},
+                            {"role": "user", "content": body},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": config["max_len"],
+                    },
+                )
+                format_resp.raise_for_status()
+                format_raw = format_resp.json()["choices"][0]["message"]["content"]
+                formatted = _parse_json_response(format_raw)
+                body = formatted.get("body") or format_raw
+                title = formatted.get("title") or title
+                hashtags = _normalize_hashtags(formatted.get("hashtags"), body) or hashtags
+                raw = format_raw
             if platform == "twitter" and len(body) > 280:
                 body = _truncate_twitter_body(body)
-            quality_warnings = []
-            if not metric_pattern.search(source_text) and metric_pattern.search(body):
-                quality_warnings.append("仍包含输入中未提供的具体数据，请人工核实")
+            quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
+            quality_warnings.extend(_platform_format_warnings(platform, body))
             return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "content": raw, "quality_warnings": quality_warnings}
     except Exception as e:
         logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
