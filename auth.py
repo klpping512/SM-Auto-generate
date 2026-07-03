@@ -1,4 +1,4 @@
-"""JWT Authentication & RBAC for SA-LogiFlow v2.0."""
+"""JWT Authentication & RBAC for SA-LogiFlow v3.0."""
 import hashlib
 import os
 import logging

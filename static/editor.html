@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=2"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=2"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=2"/>
-<link rel="manifest" href="/static/manifest.json?v=2"/>
-<meta name="theme-color" content="#6366f1"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=4"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=4"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=4"/>
+<link rel="manifest" href="/static/manifest.json?v=4"/>
+<meta name="theme-color" content="#B98A4C"/>
 <title>AI 工作区 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css"/>
+<link rel="stylesheet" href="/static/design-system.css?v=4"/>
 <style>
 .workspace-grid { flex: 1; display: grid; grid-template-columns: 230px minmax(380px, 1fr) 300px; gap: 14px; overflow: hidden; min-height: 0; }
 .col-knowledge,
@@ -63,7 +63,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=4"></script>
 <script>
 const PAGE_ID = 'editor';
 const platformInfo = {
@@ -330,7 +330,7 @@ function renderKnowledgeBase() {
         // 分类行
         const catDiv = document.createElement('div');
         catDiv.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:12px;font-weight:600;cursor:pointer;border-radius:6px;margin-bottom:2px;';
-        catDiv.innerHTML = `<iconify-icon icon="${escapeHtml(cat.icon)}" width="16" style="color:#3B82F6;"></iconify-icon><span style="flex:1;">${escapeHtml(cat.name_zh)}</span><span style="font-size:10px;color:#9CA3AF;">${cat.topics.length}</span><iconify-icon class="kb-arrow" icon="mdi:chevron-down" width="16" style="color:#9CA3AF;transition:transform 0.2s;"></iconify-icon>`;
+        catDiv.innerHTML = `<iconify-icon icon="${escapeHtml(cat.icon)}" width="16" style="color:var(--primary);"></iconify-icon><span style="flex:1;">${escapeHtml(cat.name_zh)}</span><span style="font-size:10px;color:#9CA3AF;">${cat.topics.length}</span><iconify-icon class="kb-arrow" icon="mdi:chevron-down" width="16" style="color:#9CA3AF;transition:transform 0.2s;"></iconify-icon>`;
         catDiv.onmouseover = function() { this.style.background = '#F3F4F6'; };
         catDiv.onmouseout = function() { this.style.background = ''; };
 
@@ -438,7 +438,7 @@ function renderPreview(platform) {
         <div class="preview-card ${isDark?'dark':''}" style="padding:20px;">
             <h3 style="font-size:15px;font-weight:700;margin-bottom:10px;color:${isDark?'white':'var(--text-primary)'};">${escapeHtml(c.title)}</h3>
             <p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:${isDark?'#ccc':'var(--text-secondary)'};">${escapeHtml(c.body)}</p>
-            ${(c.hashtags||[]).length?`<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:4px;">${c.hashtags.map(h=>`<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:${isDark?'#333':'#EFF6FF'};color:${isDark?'#60A5FA':'var(--primary)'};">#${escapeHtml(h)}</span>`).join('')}</div>`:''}
+            ${(c.hashtags||[]).length?`<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:4px;">${c.hashtags.map(h=>`<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:${isDark?'#333':'rgba(185,138,76,0.12)'};color:${isDark?'#60A5FA':'var(--primary)'};">#${escapeHtml(h)}</span>`).join('')}</div>`:''}
         </div>
         <div style="margin-top:12px;display:flex;gap:6px;justify-content:flex-end;">
             <button class="btn btn-secondary btn-sm" onclick="editPlatform('${platform}')">编辑</button>

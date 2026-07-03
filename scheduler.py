@@ -1,4 +1,4 @@
-"""定时发布调度 + 通知告警 - SA-LogiFlow v2.0."""
+"""定时发布调度 + 通知告警 - SA-LogiFlow v3.0."""
 import asyncio
 import json as _json
 import logging

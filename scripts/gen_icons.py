@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "static", "icons")
 SIZES = [16, 32, 180, 512]
-BG = (99, 102, 241)       # #6366f1
+BG = (185, 138, 76)       # #B98A4C / logistics gold
 FG = (255, 255, 255)      # #FFFFFF
 
 
@@ -34,7 +34,7 @@ def draw_truck(img: Image.Image) -> None:
     cab_r = max(1, int(w * 0.035))
     draw.rounded_rectangle([cab_x, cab_y, cab_x + cw, cab_y + ch], radius=cab_r, fill=FG)
 
-    # --- cab window (indigo cutout) ---
+    # --- cab window (brand-color cutout) ---
     win_margin = max(2, int(w * 0.03))
     win_x = cab_x + win_margin
     win_y = cab_y + win_margin

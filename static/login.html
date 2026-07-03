@@ -3,53 +3,71 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=2"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=2"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=2"/>
-<link rel="manifest" href="/static/manifest.json?v=2"/>
-<meta name="theme-color" content="#6366f1"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=4"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=4"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=4"/>
+<link rel="manifest" href="/static/manifest.json?v=4"/>
+<meta name="theme-color" content="#B98A4C"/>
 <title>登录 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css"/>
+<link rel="stylesheet" href="/static/design-system.css?v=4"/>
 <style>
 .login-bg {
     min-height: 100vh;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
-    background:
-        radial-gradient(circle at 18% 18%, rgba(123,97,255,0.14), transparent 28%),
-        radial-gradient(circle at 82% 16%, rgba(84,160,255,0.13), transparent 24%),
-        var(--bg-page);
+    padding: 32px;
+    background: linear-gradient(112deg, #171717 0 42%, var(--bg-page) 42% 100%);
 }
 .login-shell {
-    width: min(420px, 100%);
+    width: min(980px, 100%);
+    display:grid;
+    grid-template-columns:1fr 420px;
+    gap:96px;
+    align-items:center;
 }
 .login-logo {
-    width: 60px;
-    height: 60px;
+    width: 64px;
+    height: 64px;
     background: var(--main-gradient);
-    border-radius: var(--radius-lg);
+    border-radius: 2px;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin: 0 auto 16px;
-    box-shadow: 0 14px 30px rgba(123,97,255,0.22);
+    margin: 0 0 20px;
+    box-shadow: none;
+}
+.login-brand { color:#fff; padding:24px 0; }
+.login-brand h1 { font-size:42px;line-height:1;font-weight:900;letter-spacing:1px; }
+.login-brand p { color:#D3C4AF;font-size:14px;margin-top:14px;letter-spacing:1px; }
+.login-brand-line { width:72px;height:4px;background:var(--primary);margin-top:28px; }
+.login-card { padding:36px !important;border-top:5px solid var(--primary) !important; }
+@media(max-width:760px){
+    .login-bg{background:var(--bg-page);padding:20px;}
+    .login-shell{display:block;}
+    .login-brand{color:var(--text-primary);text-align:center;padding:0 0 22px;}
+    .login-logo{margin:0 auto 14px;}
+    .login-brand h1{font-size:28px;}
+    .login-brand p{color:var(--text-muted);}
+    .login-brand-line{margin:18px auto 0;}
 }
 </style>
 </head>
 <body class="login-bg">
 <div class="login-shell">
-    <div style="text-align:center;margin-bottom:32px;">
+    <div class="login-brand">
         <div class="login-logo">
-            <iconify-icon icon="mdi:truck-fast" width="30" style="color:white;"></iconify-icon>
+            <svg width="38" height="38" viewBox="0 0 24 24" fill="none" aria-label="SA-LogiFlow Logo">
+                <path d="M3 6h11v9H3zM14 9h3.5l3 3v3H14z" fill="white"/><circle cx="7" cy="17" r="2" fill="white"/><circle cx="17" cy="17" r="2" fill="white"/><path d="M1 9h7M1 12h5" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
         </div>
-        <h1 style="font-size:26px;font-weight:800;color:var(--text-primary);letter-spacing:0;">SA-LogiFlow</h1>
-        <p style="font-size:13px;color:var(--text-muted);margin-top:4px;">南非物流社媒营销平台</p>
+        <h1>SA-LOGIFLOW</h1>
+        <p>南非物流 · 社媒内容运营中枢</p>
+        <div class="login-brand-line"></div>
     </div>
-    <div class="card" style="padding:32px;">
+    <div class="card login-card">
         <h2 style="font-size:18px;font-weight:800;margin-bottom:24px;">登录工作台</h2>
         <div id="errorMsg" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;font-size:13px;padding:10px 12px;border-radius:var(--radius-md);margin-bottom:16px;"></div>
         <div style="display:flex;flex-direction:column;gap:16px;">

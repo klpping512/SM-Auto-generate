@@ -1,4 +1,4 @@
-"""SA-LogiFlow v2.0 - FastAPI Backend."""
+"""SA-LogiFlow v3.0 - FastAPI Backend."""
 import asyncio
 import json as _json
 import logging
@@ -52,13 +52,13 @@ async def lifespan(app: FastAPI):
         logger.info("DeepSeek API key 已加载")
     # 启动定时调度器
     sched.start_scheduler()
-    logger.info("SA-LogiFlow v2.0 启动完成 | 数据库: %s", db.DB_PATH)
+    logger.info("SA-LogiFlow v3.0 启动完成 | 数据库: %s", db.DB_PATH)
     yield
     sched.stop_scheduler()
-    logger.info("SA-LogiFlow v2.0 关闭")
+    logger.info("SA-LogiFlow v3.0 关闭")
 
 
-app = FastAPI(title="SA-LogiFlow", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="SA-LogiFlow", version="3.0.0", lifespan=lifespan)
 
 ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
@@ -69,6 +69,9 @@ app.add_middleware(
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# 扫码登录会话仅用于本机单进程部署；前端据此获得明确的成功/超时/错误状态。
+scan_login_sessions: dict[str, dict] = {}
 
 
 # ==================== Auth API ====================
@@ -308,36 +311,44 @@ async def set_account_credentials(
     return {"ok": True, "ready": r["ready"], "missing": r["missing"]}
 
 
-async def _run_scan_login(account: dict):
+async def _run_scan_login(account: dict, session_id: str):
     """后台：有头浏览器让用户扫码，轮询登录态 → 存 cookie → 置 active。本地单机场景。"""
     from adapters import get_adapter
-    from adapters.rpa_base import RpaAdapter, build_credentials
+    from adapters.rpa_base import RpaAdapter, browser_launch_options, build_credentials
     adapter = get_adapter(account["platform"])
     if not isinstance(adapter, RpaAdapter):
+        scan_login_sessions[session_id] = {
+            "status": "error", "error": "该平台不支持扫码登录",
+            "account_id": account["id"], "platform": account["platform"],
+        }
         return
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            context = await browser.new_context()
-            page = await context.new_page()
-            await page.goto(adapter.login_url, timeout=60000)
-            logged_in = False
-            for _ in range(90):  # 最多 180s
-                if await page.query_selector(adapter._logged_in_selector()):
-                    logged_in = True
-                    break
-                await page.wait_for_timeout(2000)
-            if logged_in:
+            browser = await p.chromium.launch(**browser_launch_options(headless=False))
+            try:
+                context = await browser.new_context()
+                page = await context.new_page()
+                await page.goto(adapter.login_url, timeout=60000, wait_until="domcontentloaded")
+                # wait_for_selector 会跨页面跳转继续等待，避免 query_selector 遇到重定向时
+                # 抛出 "Execution context was destroyed"。
+                await page.wait_for_selector(adapter._logged_in_selector(), timeout=180000)
                 cookies = await context.cookies()
+                if not cookies:
+                    raise RuntimeError("已检测到登录页面，但未获取到 Cookie")
                 db.update_account_credentials(account["account_id"], build_credentials(cookies))
                 db.update_account_status(account["id"], "active")
+                scan_login_sessions[session_id].update({"status": "success"})
                 logger.info("扫码登录成功: %s", account["account_id"])
-            else:
-                db.update_account_status(account["id"], "expired")
-                logger.warning("扫码登录超时: %s", account["account_id"])
-            await browser.close()
-    except Exception:
+            finally:
+                await browser.close()
+    except Exception as exc:
+        error_name = type(exc).__name__
+        is_timeout = error_name in {"TimeoutError", "PlaywrightTimeoutError"} or "Timeout" in error_name
+        status = "timeout" if is_timeout else "error"
+        if status == "timeout":
+            db.update_account_status(account["id"], "expired")
+        scan_login_sessions[session_id].update({"status": status, "error": str(exc)})
         logger.exception("扫码登录异常: %s", account["account_id"])
 
 
@@ -352,9 +363,26 @@ async def scan_login(account_id: int, user=Depends(require_role(UserRole.ADMIN))
     adapter = get_adapter(acc["platform"])
     if not isinstance(adapter, RpaAdapter):
         raise HTTPException(400, "该平台不使用扫码登录，请填写凭据")
-    asyncio.create_task(_run_scan_login(acc))
+    session_id = str(_uuid4())
+    # 限制内存中的历史会话数量。
+    if len(scan_login_sessions) >= 100:
+        for old_id in list(scan_login_sessions)[:20]:
+            scan_login_sessions.pop(old_id, None)
+    scan_login_sessions[session_id] = {
+        "status": "waiting", "account_id": acc["id"], "platform": acc["platform"],
+    }
+    asyncio.create_task(_run_scan_login(acc, session_id))
     db.add_audit_log(user["id"], user["username"], "scan_login", target=f"{acc['platform']}:{acc['account_id']}")
-    return {"started": True, "message": "已启动扫码登录，请在弹出的浏览器完成扫码"}
+    return {"started": True, "session_id": session_id, "status": "waiting",
+            "message": "已启动扫码登录，请在弹出的浏览器完成扫码"}
+
+
+@app.get("/api/accounts/{account_id}/scan-login/{session_id}")
+async def scan_login_status(account_id: int, session_id: str, user=Depends(require_role(UserRole.ADMIN))):
+    session = scan_login_sessions.get(session_id)
+    if not session or session.get("account_id") != account_id:
+        raise HTTPException(404, "扫码登录会话不存在")
+    return {"status": session["status"], "error": session.get("error")}
 
 
 # ==================== API: Queue ====================
@@ -626,6 +654,12 @@ async def kb_upload(file: UploadFile = File(...), user=Depends(get_current_user)
 
 ALLOWED_IMAGE = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
 ALLOWED_VIDEO = {'video/mp4', 'video/quicktime', 'video/webm'}
+ALLOWED_EXTENSIONS = {
+    'image/jpeg': {'.jpg', '.jpeg'}, 'image/png': {'.png'},
+    'image/gif': {'.gif'}, 'image/webp': {'.webp'},
+    'video/mp4': {'.mp4'}, 'video/quicktime': {'.mov'},
+    'video/webm': {'.webm'},
+}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 10MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
 
@@ -634,13 +668,18 @@ MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
 async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
     if file.content_type not in ALLOWED_IMAGE | ALLOWED_VIDEO:
         raise HTTPException(400, "不支持的文件类型，仅接受图片(JPEG/PNG/GIF/WebP)和视频(MP4/MOV/WebM)")
+    original_name = file.filename or ''
+    ext = Path(original_name).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS[file.content_type]:
+        raise HTTPException(400, "文件扩展名与文件类型不匹配")
     content = await file.read()
+    if not content:
+        raise HTTPException(400, "文件内容为空")
     max_size = MAX_VIDEO_SIZE if file.content_type.startswith('video') else MAX_IMAGE_SIZE
     if len(content) > max_size:
         raise HTTPException(400, f"文件过大（最大 {max_size // (1024*1024)}MB）")
     file_type = 'image' if file.content_type.startswith('image') else 'video'
-    ext = (file.filename or 'file').rsplit('.', 1)[-1] if '.' in (file.filename or '') else 'bin'
-    filename = f"{_uuid4().hex}.{ext}"
+    filename = f"{_uuid4().hex}{ext}"
     filepath = f"uploads/{file_type}/{filename}"
     save_dir = STATIC_DIR / filepath
     save_dir.parent.mkdir(parents=True, exist_ok=True)

@@ -3,20 +3,20 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=2"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=2"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=2"/>
-<link rel="manifest" href="/static/manifest.json?v=2"/>
-<meta name="theme-color" content="#6366f1"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=4"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=4"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=4"/>
+<link rel="manifest" href="/static/manifest.json?v=4"/>
+<meta name="theme-color" content="#B98A4C"/>
 <title>账号管理 - SA-LogiFlow</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css"/>
+<link rel="stylesheet" href="/static/design-system.css?v=4"/>
 </head>
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=4"></script>
 <script>
 const PAGE_ID = 'accounts';
 const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
@@ -180,6 +180,7 @@ const connectFlows = {
 let wizardAccountId = null;
 let wizardStep = 0;
 let wizardPlatform = '';
+let wizardPollTimer = null;
 
 function openWizard(id, platform) {
     const flow = connectFlows[platform];
@@ -232,14 +233,17 @@ function wizardNextStep() {
 }
 
 function closeWizard() {
+    if (wizardPollTimer) { clearTimeout(wizardPollTimer); wizardPollTimer = null; }
     document.getElementById('wizardModal').style.display = 'none';
     wizardAccountId = null;
 }
 
 async function scanLoginFromWizard() {
     try {
-        await apiFetch(`/api/accounts/${wizardAccountId}/scan-login`, { method: 'POST' });
-        pollWizardReady(0);
+        const resp = await apiFetch(`/api/accounts/${wizardAccountId}/scan-login`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.session_id) pollWizardReady(data.session_id, 0);
+        else pollWizardLegacyReady(0); // 兼容尚未重启的旧版后端
     } catch (e) {
         document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:alert-circle" width="40" style="color:#EF4444;"></iconify-icon>
             <p style="font-size:13px;color:#EF4444;">启动失败：${escapeHtml(e.message)}</p>`;
@@ -247,24 +251,44 @@ async function scanLoginFromWizard() {
     }
 }
 
-async function pollWizardReady(tries) {
+async function pollWizardLegacyReady(tries) {
+    if (tries > 90) {
+        document.getElementById('wizardBody').innerHTML = `<p style="font-size:13px;color:#F59E0B;">扫码超时，请重试</p>`;
+        return;
+    }
+    wizardPollTimer = setTimeout(async () => {
+        try {
+            const resp = await apiFetch('/api/accounts');
+            accounts = await resp.json();
+            const acc = accounts.find(a => a.id === wizardAccountId);
+            if (acc && acc.ready) { wizardStep = 2; renderWizardStep(); return; }
+        } catch (e) { /* 短暂网络错误时继续轮询 */ }
+        pollWizardLegacyReady(tries + 1);
+    }, 2000);
+}
+
+async function pollWizardReady(sessionId, tries) {
     if (tries > 90) {
         document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:clock-alert" width="40" style="color:#F59E0B;"></iconify-icon>
             <p style="font-size:13px;color:#F59E0B;">扫码超时，请关闭后重试</p>`;
         return;
     }
-    setTimeout(async () => {
+    wizardPollTimer = setTimeout(async () => {
         try {
-            const resp = await apiFetch('/api/accounts');
-            accounts = await resp.json();
-            const acc = accounts.find(a => a.id === wizardAccountId);
-            if (acc && acc.ready) {
+            const resp = await apiFetch(`/api/accounts/${wizardAccountId}/scan-login/${sessionId}`);
+            const state = await resp.json();
+            if (state.status === 'success') {
                 wizardStep = 2;
                 renderWizardStep();
                 return;
             }
-        } catch (e) { /* 继续轮询 */ }
-        pollWizardReady(tries + 1);
+            if (state.status === 'error' || state.status === 'timeout') {
+                document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:alert-circle" width="40" style="color:#EF4444;"></iconify-icon>
+                    <p style="font-size:13px;color:#EF4444;text-align:center;">${state.status === 'timeout' ? '扫码超时，请重试' : '连接失败：' + escapeHtml(state.error || '未知错误')}</p>`;
+                return;
+            }
+        } catch (e) { /* 短暂网络错误时继续轮询 */ }
+        pollWizardReady(sessionId, tries + 1);
     }, 2000);
 }
 
@@ -337,8 +361,10 @@ async function addStep1Next() {
             <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">浏览器将弹出一个新窗口，<br/>请使用 ${platformNames[platform]} APP 扫码完成登录</p>
         </div>`;
         try {
-            await apiFetch(`/api/accounts/${newAcc.id}/scan-login`, { method: 'POST' });
-            pollAddReady(newAcc.id, 0, platform);
+            const loginResp = await apiFetch(`/api/accounts/${newAcc.id}/scan-login`, { method: 'POST' });
+            const loginData = await loginResp.json();
+            if (loginData.session_id) pollAddReady(newAcc.id, loginData.session_id, 0, platform);
+            else pollAddLegacyReady(newAcc.id, 0, platform); // 兼容旧版后端
         } catch (e) {
             step2.innerHTML = `<p style="color:#EF4444;text-align:center;padding:20px;">扫码启动失败：${escapeHtml(e.message)}<br/><button class="btn btn-secondary btn-sm" style="margin-top:12px;" onclick="closeAddModal()">关闭</button></p>`;
         }
@@ -356,6 +382,22 @@ async function addStep1Next() {
     }
 }
 
+async function pollAddLegacyReady(accId, tries, platform) {
+    if (tries > 90) {
+        document.getElementById('addStep2Content').innerHTML = `<p style="text-align:center;color:#F59E0B;">扫码超时，请关闭后重试</p>`;
+        return;
+    }
+    setTimeout(async () => {
+        try {
+            const resp = await apiFetch('/api/accounts');
+            accounts = await resp.json();
+            const acc = accounts.find(a => a.id === accId);
+            if (acc && acc.ready) { showAddComplete(accId, platform, true); return; }
+        } catch (e) { /* 短暂网络错误时继续轮询 */ }
+        pollAddLegacyReady(accId, tries + 1, platform);
+    }, 2000);
+}
+
 async function saveAddCredentials(accId, platform) {
     const fields = requiredFields[platform] || [];
     const credentials = {};
@@ -371,19 +413,22 @@ async function saveAddCredentials(accId, platform) {
     } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
 }
 
-async function pollAddReady(accId, tries, platform) {
+async function pollAddReady(accId, sessionId, tries, platform) {
     if (tries > 90) {
         document.getElementById('addStep2Content').innerHTML = `<p style="text-align:center;color:#F59E0B;">扫码超时，请关闭后重试</p>`;
         return;
     }
     setTimeout(async () => {
         try {
-            const resp = await apiFetch('/api/accounts');
-            accounts = await resp.json();
-            const acc = accounts.find(a => a.id === accId);
-            if (acc && acc.ready) { showAddComplete(accId, platform, true); return; }
+            const resp = await apiFetch(`/api/accounts/${accId}/scan-login/${sessionId}`);
+            const state = await resp.json();
+            if (state.status === 'success') { showAddComplete(accId, platform, true); return; }
+            if (state.status === 'error' || state.status === 'timeout') {
+                document.getElementById('addStep2Content').innerHTML = `<p style="text-align:center;color:#EF4444;">${state.status === 'timeout' ? '扫码超时，请重试' : '连接失败：' + escapeHtml(state.error || '未知错误')}</p>`;
+                return;
+            }
         } catch (e) { /* 继续轮询 */ }
-        pollAddReady(accId, tries + 1, platform);
+        pollAddReady(accId, sessionId, tries + 1, platform);
     }, 2000);
 }
 
@@ -437,23 +482,40 @@ async function saveCredentials() {
 // ==================== RPA 扫码登录 ====================
 async function scanLogin(id) {
     try {
-        await apiFetch(`/api/accounts/${id}/scan-login`, { method: 'POST' });
+        const resp = await apiFetch(`/api/accounts/${id}/scan-login`, { method: 'POST' });
+        const data = await resp.json();
         showToast('已启动，请在弹出的浏览器完成扫码', 'info');
-        pollAccountReady(id, 0);
+        if (data.session_id) pollAccountReady(id, data.session_id, 0);
+        else pollAccountLegacyReady(id, 0);
     } catch (e) { showToast('扫码启动失败: ' + e.message, 'error'); }
 }
 
-function pollAccountReady(id, tries) {
+function pollAccountLegacyReady(id, tries) {
     if (tries > 90) { showToast('扫码超时，请重试', 'error'); return; }
     setTimeout(async () => {
         try {
             const resp = await apiFetch('/api/accounts');
             accounts = await resp.json();
-            render();
             const acc = accounts.find(a => a.id === id);
-            if (acc && acc.ready) { showToast('扫码登录成功，账号就绪'); return; }
+            if (acc && acc.ready) { showToast('扫码登录成功，账号就绪'); init(); return; }
+        } catch (e) { /* 短暂网络错误时继续轮询 */ }
+        pollAccountLegacyReady(id, tries + 1);
+    }, 2000);
+}
+
+function pollAccountReady(id, sessionId, tries) {
+    if (tries > 90) { showToast('扫码超时，请重试', 'error'); return; }
+    setTimeout(async () => {
+        try {
+            const resp = await apiFetch(`/api/accounts/${id}/scan-login/${sessionId}`);
+            const state = await resp.json();
+            if (state.status === 'success') { showToast('扫码登录成功，账号就绪'); init(); return; }
+            if (state.status === 'error' || state.status === 'timeout') {
+                showToast(state.status === 'timeout' ? '扫码超时，请重试' : `连接失败：${state.error || '未知错误'}`, 'error');
+                return;
+            }
         } catch (e) { /* 忽略单次失败，继续轮询 */ }
-        pollAccountReady(id, tries + 1);
+        pollAccountReady(id, sessionId, tries + 1);
     }, 2000);
 }
 

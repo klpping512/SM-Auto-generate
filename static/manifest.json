@@ -3,8 +3,8 @@
   "short_name": "LogiFlow",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0a0f",
-  "theme_color": "#6366f1",
+  "background_color": "#F4F2ED",
+  "theme_color": "#B98A4C",
   "icons": [
     {
       "src": "/static/icons/icon-512.png",

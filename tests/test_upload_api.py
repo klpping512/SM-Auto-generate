@@ -52,6 +52,17 @@ def test_upload_rejects_bad_type(tmp_db, monkeypatch):
     assert r.status_code == 400
 
 
+def test_upload_rejects_mismatched_extension(tmp_db, monkeypatch):
+    client = _client(tmp_db, monkeypatch)
+    tok = _admin_token(tmp_db, client)
+    r = client.post(
+        "/api/upload",
+        headers={"Authorization": f"Bearer {tok}"},
+        files={"file": ("payload.html", b"not really png", "image/png")},
+    )
+    assert r.status_code == 400
+
+
 def test_add_to_queue_with_attachments(tmp_db):
     tmp_db.add_to_queue(
         "t", "b", "facebook",

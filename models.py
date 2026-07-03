@@ -1,4 +1,4 @@
-"""Pydantic models for SA-LogiFlow v2.0."""
+"""Pydantic models for SA-LogiFlow v3.0."""
 from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum

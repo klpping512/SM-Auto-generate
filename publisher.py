@@ -3,8 +3,33 @@ import asyncio
 import logging
 import os
 import shutil
+from pathlib import Path
+
+import database as db
+import publish_readiness
 
 logger = logging.getLogger(__name__)
+UPLOAD_ROOT = (Path(__file__).parent / "static" / "uploads").resolve()
+
+
+def _resolve_uploaded_media(paths: list[str] | None) -> list[str]:
+    """把数据库中的静态相对路径转换为发布工具所需的绝对路径。"""
+    resolved = []
+    for raw in paths or []:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = Path(__file__).parent / "static" / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(UPLOAD_ROOT)
+        except ValueError:
+            logger.warning("忽略 uploads 目录外的附件: %s", raw)
+            continue
+        if candidate.is_file():
+            resolved.append(str(candidate))
+        else:
+            logger.warning("忽略不存在的附件: %s", raw)
+    return resolved
 
 # huimei binary path: 优先环境变量，其次 PATH 查找，兜底直接用命令名
 HUIMEI_BIN = os.environ.get("HUIMEI_BIN") or shutil.which("huimei") or "huimei"
@@ -128,8 +153,15 @@ async def dispatch(
     adapter = get_adapter(platform)
     if adapter is None:
         return {"success": False, "platform": platform, "error": f"无适配器: '{platform}'"}
+    resolved_images = _resolve_uploaded_media(images)
+    resolved_video = (_resolve_uploaded_media([video]) or [None])[0] if video else None
+    if account is None:
+        # 自动选取当前平台第一个状态正常且凭据完整的账号。
+        account = next((a for a in db.get_accounts(platform)
+                        if a.get("status") == "active"
+                        and publish_readiness.readiness(platform, a.get("credentials"))["ready"]), None)
     result = await adapter.publish(
         platform=platform, title=title, content=content,
-        tags=tags, images=images, video=video, account=account,
+        tags=tags, images=resolved_images or None, video=resolved_video, account=account,
     )
     return result.to_dict()

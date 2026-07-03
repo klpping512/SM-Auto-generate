@@ -1,4 +1,4 @@
-"""SQLite database for SA-LogiFlow v2.0."""
+"""SQLite database for SA-LogiFlow v3.0."""
 import sqlite3
 import json
 import logging

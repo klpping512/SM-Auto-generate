@@ -1,11 +1,46 @@
 """Playwright RPA 适配器基类：cookie 登录态存取 + 登录骨架。"""
 import json
 import logging
+import os
+from urllib.parse import unquote, urlparse
 
 import database as db
 from adapters.base import PublishAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def playwright_proxy_from_env(environ: dict | None = None) -> dict | None:
+    """把常见代理环境变量转换为 Playwright 的 proxy 配置。"""
+    env = environ if environ is not None else os.environ
+    raw = next((env.get(k) for k in (
+        "RPA_PROXY", "rpa_proxy", "HTTPS_PROXY", "https_proxy",
+        "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+    ) if env.get(k)), "").strip()
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    if not parsed.hostname:
+        return None
+    server = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        server += f":{parsed.port}"
+    proxy = {"server": server}
+    if parsed.username:
+        proxy["username"] = unquote(parsed.username)
+    if parsed.password:
+        proxy["password"] = unquote(parsed.password)
+    return proxy
+
+
+def browser_launch_options(*, headless: bool) -> dict:
+    options = {"headless": headless}
+    proxy = playwright_proxy_from_env()
+    if proxy:
+        options["proxy"] = proxy
+    return options
 
 
 def parse_cookies(credentials: str | None) -> list[dict]:
@@ -30,7 +65,7 @@ class RpaAdapter(PublishAdapter):
         raise NotImplementedError
 
     async def _new_context(self, playwright, account: dict | None):
-        browser = await playwright.chromium.launch(headless=self.headless)
+        browser = await playwright.chromium.launch(**browser_launch_options(headless=self.headless))
         context = await browser.new_context()
         cookies = parse_cookies((account or {}).get("credentials"))
         if cookies:
