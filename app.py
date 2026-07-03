@@ -742,7 +742,7 @@ async def delete_prompt_template(tpl_id: int, user=Depends(get_current_user)):
 async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
     """多轮 AI 对话 + 快捷指令。"""
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
-    result = await ai_engine.chat(
+    outputs = await ai_engine.chat_platforms(
         messages=messages,
         context=req.context or "",
         command=req.command,
@@ -751,14 +751,16 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         platforms=[p.value for p in req.platforms],
         topic=req.topic,
     )
-    parsed = ai_engine._parse_json_response(result)
-    body = parsed.get("body") or result
-    title = (parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), "AI 生成内容"))[:80]
-    hashtags = parsed.get("hashtags") or []
-    if not hashtags:
-        import re
-        hashtags = list(dict.fromkeys(re.findall(r"#([\w\u4e00-\u9fff-]+)", body)))[:8]
-    return {"content": result, "title": title, "body": body, "hashtags": hashtags}
+    first = outputs[0]
+    context_content = "\n\n".join(
+        f"[{item['platform']}]\n{item['title']}\n{item['body']}"
+        for item in outputs
+    )
+    return {
+        "content": context_content,
+        "title": first["title"], "body": first["body"],
+        "hashtags": first["hashtags"], "outputs": outputs,
+    }
 
 
 # ==================== Static Assets ====================

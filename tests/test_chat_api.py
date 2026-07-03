@@ -26,11 +26,14 @@ def test_chat_api_returns_editor_payload(tmp_db, monkeypatch):
     client, headers = _authorized_client(tmp_db)
     captured = {}
 
-    async def fake_chat(**kwargs):
+    async def fake_chat_platforms(**kwargs):
         captured.update(kwargs)
-        return "德班港预警\n\n港口拥堵，请提前规划。\n\n#南非物流 #德班港"
+        return [
+            {"platform": platform, "title": f"{platform} 德班港预警", "body": f"{platform} 港口拥堵，请提前规划。", "hashtags": ["南非物流", "德班港"], "content": f"{platform} content"}
+            for platform in kwargs["platforms"]
+        ]
 
-    monkeypatch.setattr(app.ai_engine, "chat", fake_chat)
+    monkeypatch.setattr(app.ai_engine, "chat_platforms", fake_chat_platforms)
     response = client.post("/api/ai/chat", headers=headers, json={
         "messages": [
             {"role": "user", "content": "生成港口预警"},
@@ -45,9 +48,11 @@ def test_chat_api_returns_editor_payload(tmp_db, monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["title"] == "德班港预警"
-    assert data["body"].startswith("德班港预警")
+    assert data["title"] == "xiaohongshu 德班港预警"
+    assert data["body"].startswith("xiaohongshu 港口拥堵")
     assert data["hashtags"] == ["南非物流", "德班港"]
+    assert [item["platform"] for item in data["outputs"]] == ["xiaohongshu", "facebook"]
+    assert data["outputs"][0]["body"] != data["outputs"][1]["body"]
     assert captured["tone"] == "urgent"
     assert captured["platforms"] == ["xiaohongshu", "facebook"]
     assert len(captured["messages"]) == 3

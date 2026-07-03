@@ -1,4 +1,5 @@
 """AI Content Generation Engine using DeepSeek API."""
+import asyncio
 import httpx
 import json
 import logging
@@ -113,6 +114,32 @@ def _parse_json_response(text: str) -> dict:
     return {"title": "", "body": text, "hashtags": []}
 
 
+def _normalize_hashtags(value, body: str = "") -> list[str]:
+    """兼容模型把 hashtags 返回为字符串、数组或空值。"""
+    if isinstance(value, list):
+        tags = [str(item).strip().lstrip("#") for item in value]
+    elif isinstance(value, str):
+        tags = [item.lstrip("#") for item in re.findall(r"#?[\w\u4e00-\u9fff-]+", value)]
+    else:
+        tags = []
+    tags = [tag for tag in tags if tag]
+    if not tags:
+        tags = re.findall(r"#([\w\u4e00-\u9fff-]+)", body)
+    return list(dict.fromkeys(tags))[:8]
+
+
+def _truncate_twitter_body(body: str, limit: int = 280) -> str:
+    """超限时优先保留最后一个完整句子，避免发布半句话。"""
+    if len(body) <= limit:
+        return body
+    candidate = body[:limit]
+    sentence_ends = [match.end() for match in re.finditer(r"[.!?](?=\s|$)", candidate)]
+    complete_end = max((end for end in sentence_ends if end >= limit // 2), default=0)
+    if complete_end:
+        return candidate[:complete_end].rstrip()
+    return candidate[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+
+
 def _fallback_content(platform: Platform, topic: str, category: str) -> GeneratedContent:
     """Generate template content when API fails."""
     templates = {
@@ -125,6 +152,13 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
                  f"🔹 要点三：找靠谱的物流合作伙伴\n\n"
                  f"有什么问题欢迎评论区交流👇",
             hashtags=["南非物流", "跨境货运", "物流干货", topic[:4]],
+        ),
+        Platform.DOUYIN: GeneratedContent(
+            platform=platform,
+            title=f"{topic}｜60秒物流提醒",
+            body=f"【画面】港口与货运现场快切\n【口播】做南非物流的注意了！{topic}正在影响时效。"
+                 f"建议马上确认船期、预留缓冲时间，并提前同步客户。关注我们，获取最新物流预警。",
+            hashtags=["南非物流", "跨境电商", "物流避坑"],
         ),
         Platform.FACEBOOK: GeneratedContent(
             platform=platform,
@@ -194,10 +228,23 @@ async def chat(
     tone: str = "professional", length: str = "medium",
     platforms: list[str] | None = None, topic: str = "",
 ) -> str:
-    """多轮对话 / 快捷指令。返回纯文本回复。"""
+    """兼容旧调用：生成首个平台版本并返回纯文本。"""
+    outputs = await chat_platforms(
+        messages=messages, context=context, command=command, tone=tone,
+        length=length, platforms=platforms, topic=topic,
+    )
+    return outputs[0]["content"]
+
+
+async def chat_platforms(
+    messages: list[dict], context: str = "", command: str = None,
+    tone: str = "professional", length: str = "medium",
+    platforms: list[str] | None = None, topic: str = "",
+) -> list[dict]:
+    """按平台并行生成真正独立的内容版本。"""
     if command and command in COMMANDS:
         if not context.strip():
-            return "请先在编辑器输入内容，再使用快捷指令。"
+            return [{"platform": (platforms or ["xiaohongshu"])[0], "title": "需要内容", "body": "请先生成内容，再使用快捷指令。", "hashtags": [], "content": "请先生成内容，再使用快捷指令。"}]
         messages = [{"role": "user", "content": COMMANDS[command].format(context)}]
     elif context.strip() and messages and messages[-1]["role"] == "user":
         # 把编辑器内容作为隐含上下文注入最后一条 user 消息
@@ -207,24 +254,45 @@ async def chat(
             "content": f"[编辑器当前内容]\n{context}\n\n[用户消息]\n{messages[-1]['content']}",
         }
 
-    tone_map = {"professional": "专业严谨", "friendly": "亲切自然", "urgent": "简洁紧迫"}
+    platform_list = list(dict.fromkeys(platforms or ["xiaohongshu"]))
+    return await asyncio.gather(*[
+        _chat_one_platform(messages, platform, tone, length, topic)
+        for platform in platform_list
+    ])
+
+
+async def _chat_one_platform(
+    messages: list[dict], platform: str, tone: str, length: str, topic: str,
+) -> dict:
+    tone_map = {"professional": "专业严谨、信息可信", "friendly": "亲切自然、口语化", "urgent": "简洁紧迫、突出时效"}
     length_map = {"short": "短篇", "medium": "中篇", "long": "长篇"}
-    platform_text = "、".join(platforms or ["xiaohongshu"])
+    platform_names = {"xiaohongshu": "小红书", "douyin": "抖音", "facebook": "Facebook", "twitter": "Twitter/X", "reddit": "Reddit"}
+    language_rules = {
+        "xiaohongshu": "使用简体中文。",
+        "douyin": "使用简体中文口播语言。",
+        "facebook": "默认使用自然、专业的英文；只有用户明确要求中文时才使用中文。",
+        "twitter": "默认使用简洁有力的英文；只有用户明确要求中文时才使用中文。",
+        "reddit": "默认使用自然、专业的英文；只有用户明确要求中文时才使用中文。",
+    }
+    config = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["facebook"])
     parameter_prompt = (
-        f"\n本轮偏好：语气={tone_map.get(tone, tone)}；长度={length_map.get(length, length)}；"
-        f"目标平台={platform_text}。"
-        + (f"主题={topic}。" if topic else "")
+        f"\n你当前只为【{platform_names.get(platform, platform)}】创作，不要混用其他平台的格式。"
+        f"\n本轮偏好：语气={tone_map.get(tone, tone)}；长度={length_map.get(length, length)}。"
+        + (f"\n主题：{topic}。" if topic else "")
+        + f"\n语言要求：{language_rules.get(platform, '根据目标平台选择自然语言。')}"
+        + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
+        + f"\n平台硬性格式：{config['format']}"
+        + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"]}，不要输出 Markdown 代码块或解释。"
     )
-    api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + parameter_prompt}] + messages
+    api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + "\n" + config["system"] + parameter_prompt}] + messages
 
     if not DEEPSEEK_API_KEY:
-        seed = topic or (messages[-1]["content"] if messages else context) or "南非跨境物流"
-        return (
-            f"{seed[:36]}｜物流运营建议\n\n"
-            f"围绕「{seed}」，建议从时效变化、成本影响和客户应对三个角度组织内容。"
-            "先给出清晰结论，再补充可执行建议，并用真实业务场景增强可信度。\n\n"
-            "#南非物流 #跨境物流 #供应链"
-        )
+        seed = topic or (messages[-1]["content"] if messages else "南非跨境物流")
+        try:
+            fallback = _fallback_content(Platform(platform), seed, "")
+        except ValueError:
+            fallback = _fallback_content(Platform.FACEBOOK, seed, "")
+        return {"platform": platform, "title": fallback.title, "body": fallback.body, "hashtags": fallback.hashtags, "content": fallback.body}
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -238,11 +306,52 @@ async def chat(
                     "model": "deepseek-chat",
                     "messages": api_messages,
                     "temperature": 0.7,
-                    "max_tokens": 2000,
+                    "max_tokens": config["max_len"],
                 },
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            raw = resp.json()["choices"][0]["message"]["content"]
+            parsed = _parse_json_response(raw)
+            body = parsed.get("body") or raw
+            title = parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), platform_names.get(platform, platform))
+            hashtags = _normalize_hashtags(parsed.get("hashtags"), body)
+            metric_pattern = re.compile(r"(?:\b\d+(?:\.\d+)?\s*%|\b\d+\s*(?:-|–|—|to)\s*\d+\s*(?:days?|hours?|weeks?|天|小时|周)|\b\d+(?:\.\d+)?\s*(?:days?|hours?|weeks?|天|小时|周))", re.I)
+            source_text = " ".join(item.get("content", "") for item in messages) + " " + topic
+            has_unsupported_metric = bool(metric_pattern.search(body)) and not bool(metric_pattern.search(source_text))
+            needs_twitter_trim = platform == "twitter" and len(body) > 280
+            if has_unsupported_metric or needs_twitter_trim:
+                constraints = ["Remove every unsupported numeric claim, time range, percentage, price, or statistic. Keep numbered action-list labels, but use no unverified metrics."]
+                if platform == "twitter":
+                    constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
+                repair_resp = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": [
+                            {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. " + " ".join(constraints)},
+                            {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 180 if platform == "twitter" else config["max_len"],
+                    },
+                )
+                repair_resp.raise_for_status()
+                repaired_raw = repair_resp.json()["choices"][0]["message"]["content"]
+                repaired = _parse_json_response(repaired_raw)
+                body = repaired.get("body") or repaired_raw
+                title = repaired.get("title") or title
+                hashtags = _normalize_hashtags(repaired.get("hashtags"), body) or hashtags
+                raw = repaired_raw
+            if platform == "twitter" and len(body) > 280:
+                body = _truncate_twitter_body(body)
+            quality_warnings = []
+            if not metric_pattern.search(source_text) and metric_pattern.search(body):
+                quality_warnings.append("仍包含输入中未提供的具体数据，请人工核实")
+            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "content": raw, "quality_warnings": quality_warnings}
     except Exception as e:
-        logger.error("AI 对话失败: %s", e)
-        return f"AI 暂时无法响应（{e}）。请检查 API Key 是否已设置。"
+        logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
+        return {"platform": platform, "title": "生成失败", "body": f"{platform_names.get(platform, platform)} 暂时无法生成，请稍后重试。", "hashtags": [], "content": f"生成失败：{e}"}
