@@ -37,6 +37,7 @@
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
 <script src="/static/common.js?v=5"></script>
+<script src="/static/editor-transfer.js?v=2"></script>
 <script>
 const PAGE_ID='chat';
 const platformNames={xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit'};
@@ -181,7 +182,11 @@ async function sendMessage(topic=''){
 }
 async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms)})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}
 function outputById(id,index){const result=resultStore.get(id);return result?.outputs?.[index]||result;}
-function sendToEditor(id,index=0){const output=outputById(id,index);if(!output)return;localStorage.setItem('draft',JSON.stringify({title:output.title||'',body:output.body||output.content,hashtags:output.hashtags||[],platforms:[output.platform||Array.from(selectedPlatforms)[0]],source:'chat'}));window.location.href='/editor.html';}
+function sendToEditor(id,index=0){
+  const draft=EditorTransfer.buildDraft(resultStore.get(id),index,Array.from(selectedPlatforms));if(!draft){showToast('没有可导入的内容','error');return;}
+  localStorage.setItem('draft',JSON.stringify(draft));
+  window.location.href='/editor.html';
+}
 async function copyResult(id,index=0){const output=outputById(id,index);if(!output)return;try{await navigator.clipboard.writeText(`${output.title||''}\n\n${output.body||output.content}`);showToast(`已复制${platformNames[output.platform]||''}版本`);}catch(e){showToast('复制失败','error');}}
 function setSending(on){isSending=on;['sendBtn','historyBtn','newChatBtn'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=on;});}
 function clearChat(){if(isSending)return;chatHistory.length=0;lastResult=null;resetComposer();restoreHistory();saveSessions();}

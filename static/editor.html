@@ -66,6 +66,7 @@
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
 <script src="/static/common.js?v=5"></script>
+<script src="/static/editor-transfer.js?v=2"></script>
 <script>
 const PAGE_ID = 'editor';
 const platformInfo = {
@@ -85,6 +86,7 @@ let kbCategories = [];           // 企业知识库分类
 let selectedKbCats = new Set();  // 已勾选引用的知识库分类 id
 let promptTemplates = [];        // Prompt 模板
 let attachments = [];            // 上传的图片/视频附件
+let importedFromChat = false;     // AI 对话导入时，仅展示实际带入的平台
 
 async function init() {
     try { const r = await apiFetch('/api/topics'); categories = await r.json(); } catch(e) { categories = []; }
@@ -149,13 +151,7 @@ async function init() {
             </div>
             <!-- 中栏：编辑器 -->
             <div class="col-editor">
-                <div style="padding:12px 16px;border-bottom:1px solid var(--border-light);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-                    <div id="currentTopicTag" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--primary-light);color:var(--primary);border-radius:var(--radius-full);font-size:12px;font-weight:600;">
-                        <iconify-icon icon="mdi:tag-outline" width="14"></iconify-icon>
-                        <span id="currentTopicText">未选择主题</span>
-                        <iconify-icon id="clearTopicBtn" icon="mdi:close-circle" width="14" onclick="clearTopic()" title="清除主题" style="cursor:pointer;display:none;opacity:0.7;"></iconify-icon>
-                    </div>
-                    <div style="flex:1;"></div>
+                <div style="display:none;" aria-hidden="true">
                     <select id="tplSelect" class="select" style="font-size:12px;min-width:120px;" onchange="applyTemplate(this.value)" title="套用 Prompt 模板">
                         <option value="">Prompt 模板…</option>
                     </select>
@@ -314,24 +310,17 @@ function loadDraft() {
     let draft;
     try { draft = JSON.parse(localStorage.getItem('draft')); } catch(e) { draft = null; }
     if (!draft) return;
-    if (draft.title) document.getElementById('editorTitle').value = draft.title;
-    if (draft.body) {
-        document.getElementById('editorContent').value = draft.body;
-        document.getElementById('charCount').textContent = draft.body.length + ' 字';
-    }
-    if (draft.hashtags) document.getElementById('editorHashtags').value = Array.isArray(draft.hashtags) ? draft.hashtags.join(', ') : draft.hashtags;
-    // 从 AI 对话页可一次带入多个目标平台。
-    if (draft.title || draft.body) {
-        const targets = Array.isArray(draft.platforms) && draft.platforms.length ? draft.platforms : [currentPreview];
-        const hashtags = Array.isArray(draft.hashtags) ? draft.hashtags : String(draft.hashtags || '').split(',').map(s=>s.trim()).filter(Boolean);
-        targets.forEach(platform => { generatedContents[platform] = {platform,title:draft.title||'',body:draft.body||'',hashtags}; });
-        if (!generatedContents[currentPreview]) currentPreview = targets[0];
-        loadPlatformToEditor(currentPreview);
-        renderPreview(currentPreview);
-    }
-    if (draft.source === 'chat') {
+    const normalized = EditorTransfer.normalizeDraft(draft,Object.keys(platformInfo),currentPreview);
+    importedFromChat = normalized.importedFromChat && normalized.valid;
+    normalized.contents.forEach(item => { generatedContents[item.platform] = item; });
+    currentPreview = normalized.activePlatform;
+    refreshPreviewTabs();
+    if (normalized.valid) { loadPlatformToEditor(currentPreview); renderPreview(currentPreview); }
+    if (draft.source === 'chat' && normalized.valid) {
         localStorage.removeItem('draft');
         showToast('已从 AI 对话导入内容', 'info');
+    } else if (draft.source === 'chat') {
+        showToast('AI 内容导入失败，草稿已保留，可刷新后重试', 'error');
     }
 }
 
@@ -375,8 +364,10 @@ function renderKnowledgeBase() {
                 // 记录选中主题
                 selectedTopic = t;
                 selectedCategory = cat.id;
-                document.getElementById('currentTopicText').textContent = t;
-                document.getElementById('clearTopicBtn').style.display = 'inline-block';
+                const topicText = document.getElementById('currentTopicText');
+                const clearBtn = document.getElementById('clearTopicBtn');
+                if (topicText) topicText.textContent = t;
+                if (clearBtn) clearBtn.style.display = 'inline-block';
                 document.getElementById('aiInput').value = '';
                 document.getElementById('aiInput').placeholder = `已选「${t}」，可补充要求或直接点 AI 生成`;
                 showToast(`已选择主题：${t}`, 'info');
@@ -401,8 +392,10 @@ function renderKnowledgeBase() {
 function clearTopic() {
     selectedTopic = '';
     selectedCategory = 'custom';
-    document.getElementById('currentTopicText').textContent = '未选择主题';
-    document.getElementById('clearTopicBtn').style.display = 'none';
+    const topicText = document.getElementById('currentTopicText');
+    const clearBtn = document.getElementById('clearTopicBtn');
+    if (topicText) topicText.textContent = '';
+    if (clearBtn) clearBtn.style.display = 'none';
     document.getElementById('aiInput').placeholder = '输入需求...';
     document.querySelectorAll('.kb-topic-item').forEach(el => {
         el.dataset.selected = '';
@@ -414,6 +407,10 @@ function clearTopic() {
 }
 
 function switchPreview(platform) {
+    if (importedFromChat && !generatedContents[platform]) {
+        showToast('该平台未从 AI 对话导入，当前内容已保留', 'info');
+        return;
+    }
     if (!platform || platform === currentPreview) {
         // 即便同平台也要确保预览最新
         if (platform) renderPreview(platform);
@@ -429,6 +426,17 @@ function switchPreview(platform) {
     });
     loadPlatformToEditor(platform);
     renderPreview(platform);
+}
+
+function refreshPreviewTabs() {
+    document.querySelectorAll('.preview-tab').forEach(b => {
+        const platform = b.dataset.platform;
+        const available = !!generatedContents[platform];
+        b.style.display = importedFromChat && !available ? 'none' : '';
+        const active = platform === currentPreview;
+        b.style.color = active ? 'var(--primary)' : 'var(--text-muted)';
+        b.style.borderBottomColor = active ? 'var(--primary)' : 'transparent';
+    });
 }
 
 // 把指定平台内容装载进编辑器（程序赋值不触发 input，不会污染数据）
@@ -575,17 +583,14 @@ async function generateContent() {
             showToast('生成失败：服务未返回有效内容', 'error');
             return;
         }
+        importedFromChat = false;
         generatedContents = {}; data.contents.forEach(c=>generatedContents[c.platform]=c);
         // 装载当前预览平台到编辑器（保持编辑器/Tab/预览三者一致）
         if (!generatedContents[currentPreview]) currentPreview = data.contents[0].platform;
         loadPlatformToEditor(currentPreview);
         renderPreview(currentPreview);
         // 同步 Tab 高亮到 currentPreview
-        document.querySelectorAll('.preview-tab').forEach(b => {
-            const active = b.dataset.platform === currentPreview;
-            b.style.color = active ? 'var(--primary)' : 'var(--text-muted)';
-            b.style.borderBottomColor = active ? 'var(--primary)' : 'transparent';
-        });
+        refreshPreviewTabs();
         // 区分 AI / 模板模式
         if (data.source === 'fallback') {
             showToast('⚠️ 未配置 AI，使用模板生成。请在「设置」配置 DeepSeek API Key', 'info');

@@ -67,3 +67,23 @@ def test_chat_page_has_multi_session_history():
     assert "历史对话" in response.text
     assert "logiflowChatSessionsV2" in response.text
     assert "switchSession" in response.text
+
+
+def test_chat_to_editor_uses_versioned_multi_platform_transfer_contract():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app.app)
+    chat_page = client.get("/chat.html").text
+    editor_page = client.get("/editor.html").text
+    transfer_module = client.get("/static/editor-transfer.js").text
+
+    assert "editor-transfer.js" in chat_page
+    assert "EditorTransfer.buildDraft" in chat_page
+    assert "editor-transfer.js" in editor_page
+    assert "EditorTransfer.normalizeDraft" in editor_page
+    assert "version: 2" in transfer_module
+    assert "activePlatform" in transfer_module
+    assert "contents" in transfer_module
+    assert "refreshPreviewTabs" in editor_page
+    assert "该平台未从 AI 对话导入，当前内容已保留" in editor_page
+    assert "未选择主题" not in editor_page

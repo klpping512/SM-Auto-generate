@@ -1,4 +1,9 @@
 #!/bin/bash
 cd ~/Desktop/distribution-manager
-export DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-"sk-f4074055a1ed4973a471a81743713ce1"}
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+: "${DEEPSEEK_API_KEY:?请先通过环境变量设置 DEEPSEEK_API_KEY}"
 exec python3 app.py
