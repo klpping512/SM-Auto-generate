@@ -33,6 +33,9 @@
 .toolbar button:hover { background: var(--bg-secondary); color: var(--text-primary); }
 .preview-card { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; background: white; box-shadow:var(--shadow-sm); }
 .preview-card.dark { background: #1a1a1a; border-color: #333; }
+.xhs-carousel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.xhs-image{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:12px;border:1px solid var(--border);cursor:zoom-in}.xhs-image:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
+.lightbox{position:fixed;inset:0;background:#000d;z-index:10000;display:flex;align-items:center;justify-content:center}.lightbox[hidden]{display:none}.lightbox img{max-width:82vw;max-height:86vh;border-radius:10px}.lightbox button{position:absolute;border:0;background:#ffffff22;color:white;border-radius:50%;width:44px;height:44px;font-size:26px;cursor:pointer}.lightbox-close{right:28px;top:22px}.lightbox-prev{left:24px}.lightbox-next{right:24px}.lightbox-count{position:absolute;bottom:20px;color:white;font-size:13px}
+.scene-card{border:1px solid #3b3b3b;border-radius:12px;padding:12px;margin-bottom:10px}.scene-card input,.scene-card textarea,.scene-card select{width:100%;background:#242424;border:1px solid #444;color:white;border-radius:7px;padding:7px;font-size:11px;margin-top:6px}.scene-meta{display:flex;justify-content:space-between;color:#aaa;font-size:10px}.render-panel{margin-top:14px;padding:12px;border-radius:12px;background:#262626;color:white}.render-progress{height:7px;background:#444;border-radius:9px;overflow:hidden;margin:8px 0}.render-progress i{display:block;height:100%;background:#B98A4C}
 .kb-category {
     display: flex;
     align-items: center;
@@ -65,6 +68,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
+<div id="xhsLightbox" class="lightbox" hidden aria-modal="true" role="dialog"><button class="lightbox-close" aria-label="关闭">×</button><button class="lightbox-prev" aria-label="上一张">‹</button><img alt="小红书大图预览"/><button class="lightbox-next" aria-label="下一张">›</button><span class="lightbox-count"></span></div>
 <script src="/static/common.js?v=5"></script>
 <script src="/static/editor-transfer.js?v=2"></script>
 <script>
@@ -87,11 +91,16 @@ let selectedKbCats = new Set();  // 已勾选引用的知识库分类 id
 let promptTemplates = [];        // Prompt 模板
 let attachments = [];            // 上传的图片/视频附件
 let importedFromChat = false;     // AI 对话导入时，仅展示实际带入的平台
+let mediaAssets = [];
+let mediaCapabilities = {};
+let lightboxImages = [], lightboxIndex = 0, renderPoller = null;
 
 async function init() {
     try { const r = await apiFetch('/api/topics'); categories = await r.json(); } catch(e) { categories = []; }
     try { const r = await apiFetch('/api/kb/categories'); kbCategories = await r.json(); } catch(e) { kbCategories = []; }
     try { const r = await apiFetch('/api/prompt-templates'); promptTemplates = await r.json(); } catch(e) { promptTemplates = []; }
+    try { const r = await apiFetch('/api/assets'); mediaAssets = await r.json(); } catch(e) { mediaAssets = []; }
+    try { const r = await apiFetch('/api/media/capabilities'); mediaCapabilities = await r.json(); } catch(e) { mediaCapabilities = {}; }
 
     document.getElementById('app').innerHTML = `
     ${renderSidebar(PAGE_ID)}
@@ -218,7 +227,13 @@ async function init() {
     renderTemplateOptions();
 
     // 加载本地草稿
+    const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
     loadDraft();
+    if (selectedAssets.length) {
+        const d = generatedContents.douyin || {platform:'douyin',title:'抖音视频',body:'请编辑抖音脚本',hashtags:[],scenes:[]};
+        d.selected_asset_ids = Array.from(new Set([...(d.selected_asset_ids||[]), ...selectedAssets])); generatedContents.douyin=d;
+        localStorage.removeItem('selectedMediaAssets');
+    }
 }
 
 // 渲染"引用企业知识库"勾选 chips
@@ -315,7 +330,10 @@ function loadDraft() {
     normalized.contents.forEach(item => { generatedContents[item.platform] = item; });
     currentPreview = normalized.activePlatform;
     refreshPreviewTabs();
-    if (normalized.valid) { loadPlatformToEditor(currentPreview); renderPreview(currentPreview); }
+    if (normalized.valid) {
+        loadPlatformToEditor(currentPreview); renderPreview(currentPreview);
+        if (generatedContents.xiaohongshu) ensureXhsAssets('xiaohongshu');
+    }
     if (draft.source === 'chat' && normalized.valid) {
         localStorage.removeItem('draft');
         showToast('已从 AI 对话导入内容', 'info');
@@ -448,14 +466,59 @@ function loadPlatformToEditor(platform) {
     document.getElementById('charCount').textContent = (c.body || '').length + ' 字';
 }
 
+const XHS_TEMPLATE_VERSION = 'buffalo-gold-v1';
+async function ensureXhsAssets(platform='xiaohongshu') {
+    const content = generatedContents[platform];
+    if (content?.title === '生成失败') return content;
+    if (!content) return content;
+    const imageAssets = Array.isArray(content.attachments) ? content.attachments.filter(a=>a.type==='image') : [];
+    const hasCurrentTemplate = imageAssets.length && imageAssets.every(a=>a.template_version===XHS_TEMPLATE_VERSION);
+    if (hasCurrentTemplate) return content;
+    try {
+        const response = await apiFetch('/api/xhs/render', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({title:content.title, body:content.body, image_pages:content.image_pages||[]})
+        });
+        const data = await response.json();
+        content.image_pages = Array.isArray(data.image_pages) ? data.image_pages : [];
+        content.attachments = Array.isArray(data.attachments) ? data.attachments : [];
+        generatedContents[platform] = content;
+        if (currentPreview === platform) renderPreview(platform);
+        if (content.attachments.length) showToast(imageAssets.length
+            ? `旧版轮播图已升级为 BUFFALO 品牌版（${content.attachments.length} 张）`
+            : `已自动生成 ${content.attachments.length} 张 BUFFALO 品牌轮播图`, 'info');
+        return content;
+    } catch (error) {
+        showToast(`小红书图片生成失败：${error.message}`, 'error');
+        return content;
+    }
+}
+
 function renderPreview(platform) {
     const c = generatedContents[platform];
     const area = document.getElementById('previewArea');
     const p = platformInfo[platform];
     if (!c) { area.innerHTML='<div class="empty-state" style="padding-top:60px;"><iconify-icon icon="mdi:file-outline" width="40"></iconify-icon><p style="margin-top:8px;">该平台暂无内容</p></div>'; return; }
     const isDark = platform==='douyin';
+    const carousel = platform === 'xiaohongshu' && Array.isArray(c.attachments) && c.attachments.length
+        ? `<div style="margin-bottom:16px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                <span style="font-size:12px;font-weight:700;color:var(--text-primary);">可发布轮播图</span>
+                <span style="font-size:11px;color:var(--text-muted);">已自动生成 ${c.attachments.length} 张</span>
+            </div>
+            <div class="xhs-carousel">
+                ${c.attachments.map((asset,index)=>`<div>
+                    <img class="xhs-image" src="${escapeHtml(asset.url)}" data-xhs-index="${index}" alt="小红书轮播图第 ${index+1} 页"/>
+                    <div style="font-size:10px;color:var(--text-muted);text-align:center;margin-top:4px;">第 ${index+1} 页</div>
+                </div>`).join('')}
+            </div>
+            <div style="font-size:11px;line-height:1.5;color:var(--text-muted);background:var(--bg-secondary);border-radius:8px;padding:8px 10px;">这些图片会自动随小红书内容进入审核队列，无需再次上传。</div>
+        </div>` : '';
+    const douyinScript = platform === 'douyin' ? renderDouyinScript(c) : '';
     area.innerHTML=`<div class="fade-in">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;"><iconify-icon icon="${p.icon}" style="color:${p.color};font-size:20px;"></iconify-icon><span style="font-size:13px;font-weight:700;">${p.name} 预览</span></div>
+        ${carousel}
+        ${douyinScript}
         <div class="preview-card ${isDark?'dark':''}" style="padding:20px;">
             <h3 style="font-size:15px;font-weight:700;margin-bottom:10px;color:${isDark?'white':'var(--text-primary)'};">${escapeHtml(c.title)}</h3>
             <p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:${isDark?'#ccc':'var(--text-secondary)'};">${escapeHtml(c.body)}</p>
@@ -466,7 +529,29 @@ function renderPreview(platform) {
             <button class="btn btn-secondary btn-sm" onclick="copyPlatform('${platform}')">复制</button>
         </div>
     </div>`;
+    if (platform === 'xiaohongshu') bindXhsImages(c.attachments || []);
 }
+
+function renderDouyinScript(content) {
+    const scenes=Array.isArray(content.scenes)?content.scenes:[];
+    const selected=new Set(content.selected_asset_ids||[]);
+    const selectedList=Array.from(selected); scenes.forEach((scene,index)=>{if(!scene.asset_id&&selectedList[index])scene.asset_id=selectedList[index];});
+    const options=mediaAssets.filter(a=>a.file_type==='video'||a.file_type==='image').map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
+    const ready=mediaCapabilities.ready;
+    return `<div class="render-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><strong>🎬 30 秒分镜</strong><a href="/assets.html" style="color:#d7b57e;font-size:11px;">管理素材</a></div>
+    ${scenes.length?scenes.map((s,i)=>`<div class="scene-card"><div class="scene-meta"><b>场景 ${i+1}</b><span>${Number(s.duration||5)} 秒</span></div><input value="${escapeHtml(s.visual||'')}" aria-label="场景画面" onchange="updateScene(${i},'visual',this.value)"/><textarea rows="2" aria-label="口播" onchange="updateScene(${i},'voiceover',this.value)">${escapeHtml(s.voiceover||'')}</textarea><input value="${escapeHtml(s.text_overlay||'')}" aria-label="字幕" onchange="updateScene(${i},'text_overlay',this.value)"/><select onchange="updateScene(${i},'asset_id',this.value?Number(this.value):null)"><option value="">品牌信息卡兜底</option>${mediaAssets.map(a=>`<option value="${a.id}" ${Number(s.asset_id)===a.id||(!s.asset_id&&selected.has(a.id)&&i===0)?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`).join(''):`<div style="font-size:12px;color:#aaa;padding:12px;">当前内容没有结构化分镜，请重新生成抖音内容。</div>`}
+    <label style="font-size:11px;color:#aaa;">MiMo 中文音色</label><select id="douyinVoice" style="width:100%;margin:6px 0 10px;background:#242424;border:1px solid #444;color:white;border-radius:7px;padding:8px;"><option value="">请选择音色</option>${(mediaCapabilities.voices||['冰糖','茉莉','苏打','白桦']).map(v=>`<option value="${v}" ${content.voice===v?'selected':''}>${v}</option>`).join('')}</select>
+    <button class="btn btn-primary" style="width:100%" onclick="startDouyinRender()" ${!ready||!scenes.length?'disabled':''}>生成可发布 MP4</button>${!ready?`<div style="font-size:10px;color:#fca5a5;margin-top:7px;">缺少：${!mediaCapabilities.ffmpeg?'FFmpeg ':''}${!mediaCapabilities.ffprobe?'ffprobe ':''}${!mediaCapabilities.mimo_key?'MiMo API Key':''}</div>`:''}<div id="renderStatus"></div>${content.rendered_video?`<video src="${escapeHtml(content.rendered_video.url)}" controls style="width:100%;margin-top:10px;border-radius:10px;"></video>`:''}</div>`;
+}
+
+function updateScene(index,key,value){const c=generatedContents.douyin;if(!c?.scenes?.[index])return;c.scenes[index][key]=value;}
+async function startDouyinRender(){const c=generatedContents.douyin;const voice=document.getElementById('douyinVoice').value;if(!voice){showToast('请选择 MiMo 音色','error');return;}c.voice=voice;try{const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){showToast(e.message,'error');}}
+async function pollRender(id){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/douyin/render/${id}`);const job=await r.json();const box=document.getElementById('renderStatus');if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${escapeHtml(job.stage)} · ${job.progress}%</div><div class="render-progress"><i style="width:${job.progress}%"></i></div>${job.error?`<div style="color:#fca5a5;font-size:10px;">${escapeHtml(job.error)}</div>`:''}`;if(job.status==='succeeded'){clearInterval(renderPoller);generatedContents.douyin.rendered_video=job.rendered_video;generatedContents.douyin.attachments=[...(generatedContents.douyin.attachments||[]).filter(a=>a.type!=='video'),job.rendered_video];renderPreview('douyin');showToast('MP4 渲染完成');}else if(job.status==='failed'){clearInterval(renderPoller);showToast('视频渲染失败','error');}}catch(e){clearInterval(renderPoller);}};await tick();renderPoller=setInterval(tick,2000);}
+
+function bindXhsImages(items){lightboxImages=items.map(a=>a.url);document.querySelectorAll('[data-xhs-index]').forEach(img=>img.addEventListener('click',()=>openXhsLightbox(Number(img.dataset.xhsIndex))));}
+function openXhsLightbox(index){lightboxIndex=index;updateLightbox();document.getElementById('xhsLightbox').hidden=false;document.body.style.overflow='hidden';}
+function updateLightbox(){const box=document.getElementById('xhsLightbox');box.querySelector('img').src=lightboxImages[lightboxIndex]||'';box.querySelector('.lightbox-count').textContent=`${lightboxIndex+1} / ${lightboxImages.length}`;}
+function closeXhsLightbox(){document.getElementById('xhsLightbox').hidden=true;document.body.style.overflow='';}
 
 // 预览卡片"编辑"按钮：切到该平台并聚焦正文编辑器
 function editPlatform(p) {
@@ -593,7 +678,7 @@ async function generateContent() {
         refreshPreviewTabs();
         // 区分 AI / 模板模式
         if (data.source === 'fallback') {
-            showToast('⚠️ 未配置 AI，使用模板生成。请在「设置」配置 DeepSeek API Key', 'info');
+            showToast('⚠️ 未配置 AI，使用模板生成。请在「设置」配置 MiMo API Key', 'info');
         } else {
             showToast('AI 内容生成成功');
         }
@@ -651,12 +736,19 @@ async function submitToQueue() {
     const entries = Object.entries(generatedContents).filter(([, c]) => c && c.title && c.body);
     if (!entries.length) { showToast('请先生成或输入内容', 'error'); return; }
 
+    if (generatedContents.xiaohongshu) await ensureXhsAssets('xiaohongshu');
+
     let added = 0;
     const failed = [];
     for (const [platform, c] of entries) {
         try {
+            const platformAttachments = platform === 'xiaohongshu'
+                ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
+                : platform === 'douyin'
+                    ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
+                    : attachments;
             await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review', attachments: attachments }) });
+                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review', attachments: platformAttachments }) });
             added++;
         } catch(e) {
             failed.push(platformInfo[platform]?.name || platform);
@@ -674,8 +766,13 @@ async function submitToQueue() {
     }
 }
 
-function saveDraft() { localStorage.setItem('draft',JSON.stringify({title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value})); showToast('草稿已保存'); }
+function saveDraft() { syncEditorToContent();localStorage.setItem('draft',JSON.stringify({version:2,source:'editor',activePlatform:currentPreview,contents:Object.values(generatedContents),title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value})); showToast('草稿已保存'); }
 
+document.getElementById('xhsLightbox').addEventListener('click',e=>{if(e.target.id==='xhsLightbox')closeXhsLightbox();});
+document.querySelector('.lightbox-close').addEventListener('click',closeXhsLightbox);
+document.querySelector('.lightbox-prev').addEventListener('click',()=>{lightboxIndex=(lightboxIndex-1+lightboxImages.length)%lightboxImages.length;updateLightbox();});
+document.querySelector('.lightbox-next').addEventListener('click',()=>{lightboxIndex=(lightboxIndex+1)%lightboxImages.length;updateLightbox();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeXhsLightbox();});
 init();
 </script>
 </body>

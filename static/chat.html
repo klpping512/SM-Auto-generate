@@ -31,6 +31,28 @@
 .history-backdrop{background:rgba(246,244,240,.9)}
 .typing{display:inline-flex;gap:4px}.typing i{width:6px;height:6px;background:var(--primary);border-radius:50%;animation:typing 1s infinite alternate}.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}@keyframes typing{to{transform:translateY(-5px);opacity:.45}}
 @media(max-width:760px){.chat-page-header{min-height:42px}.current-chat-title{display:none}.chat-shell{padding-top:8px}.chat-welcome{padding:9px 12px}.welcome-mark{display:none}.chat-stage{padding-bottom:12px}.composer{padding:0 10px 9px}.topic-list{grid-template-columns:repeat(2,minmax(0,1fr))}.params-bar .select{flex:1}.params-divider,.platform-label{display:none}.chat-bubble{max-width:88%}}
+
+/* 抖音成片相关样式 */
+.douyin-scenes{margin-top:12px;padding:12px;background:#f8f6f2;border-radius:8px;border:1px solid var(--border-light)}
+.scenes-header{font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text-primary)}
+.scene-card{padding:10px;margin-bottom:8px;background:#fff;border:1px solid var(--border-light);border-radius:6px}
+.scene-card:last-child{margin-bottom:0}
+.scene-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:6px}
+.scene-visual,.scene-voiceover,.scene-text{font-size:12px;margin-bottom:4px;line-height:1.5}
+.scene-visual strong,.scene-voiceover strong,.scene-text strong{color:var(--text-primary)}
+.render-panel{margin-top:12px;padding:12px;background:#fff;border-radius:8px;border:1px solid var(--border-light);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.render-voice-select{display:flex;align-items:center;gap:8px}
+.render-voice-select label{font-size:12px;color:var(--text-secondary)}
+.render-voice-select select{min-width:80px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px}
+.render-status{width:100%;margin-top:8px}
+.render-progress{height:6px;background:var(--border-light);border-radius:3px;overflow:hidden}
+.render-progress i{display:block;height:100%;background:var(--primary);transition:width .3s}
+.render-status-text{font-size:11px;color:var(--text-muted);margin-top:4px}
+.render-success{padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px}
+.render-success video{display:block;margin:8px 0}
+.render-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.render-error{padding:8px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#dc2626;font-size:12px}
+
 </style>
 </head>
 <body>
@@ -162,10 +184,152 @@ function resultCardMarkup(result,id){
   const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
   resultStore.set(id,result);
   const tabs=outputs.map((o,i)=>`<button class="result-tab ${i===0?'active':''}" onclick="selectResultTab('${id}',${i},this)">${escapeHtml(platformNames[o.platform]||o.platform)}</button>`).join('');
-  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(o.body||o.content||'')}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">⚠ ${warnings.map(escapeHtml).join('；')}</div>`:''}<div class="result-actions"><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',${i})">发送到编辑器</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制</button></div></div>`}).join('');
+  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const douyinScenes=o.platform==='douyin'&&o.scenes?.length?douyinScenesMarkup(o,id,i):'';return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(o.body||o.content||'')}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">⚠ ${warnings.map(escapeHtml).join('；')}</div>`:''}${douyinScenes}<div class="result-actions"><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',${i})">发送到编辑器</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制</button></div></div>`}).join('');
   return `<div class="result-card" id="result-${id}"><div class="result-tabs">${tabs}</div>${panels}</div>`;
 }
 function selectResultTab(id,index,btn){const card=document.getElementById(`result-${id}`);if(!card)return;card.querySelectorAll('.result-tab').forEach(b=>b.classList.toggle('active',b===btn));card.querySelectorAll('.result-panel').forEach(p=>p.classList.toggle('active',Number(p.dataset.index)===index));}
+// 抖音成片相关函数
+const VOICES = ['冰糖', '茉莉', '苏打', '白桦'];
+let renderPollers = {};
+
+function douyinScenesMarkup(output, resultId, index) {
+  const scenes = output.scenes || [];
+  if (!scenes.length) return '';
+  
+  const scenesHtml = scenes.map((s, i) => {
+    return `
+    <div class="scene-card">
+      <div class="scene-meta">
+        <span>分镜 ${s.scene || i+1}</span>
+        <span>${s.duration || 5}秒</span>
+      </div>
+      <div class="scene-visual"><strong>画面：</strong>${escapeHtml(s.visual || '品牌信息卡')}</div>
+      <div class="scene-voiceover"><strong>口播：</strong>${escapeHtml(s.voiceover || '')}</div>
+      <div class="scene-text"><strong>字幕：</strong>${escapeHtml(s.text_overlay || '')}</div>
+    </div>`;
+  }).join('');
+  
+  return `
+    <div class="douyin-scenes">
+      <div class="scenes-header">🎬 抖音脚本 · ${scenes.length} 个分镜 · ${output.duration_target || 30}秒</div>
+      ${scenesHtml}
+      <div class="render-panel">
+        <div class="render-voice-select">
+          <label>选择音色：</label>
+          <select id="voice-${resultId}-${index}" class="select">
+            ${VOICES.map(v => `<option value="${v}">${v}</option>`).join('')}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="startDouyinRender('${resultId}', ${index})">🎬 一键成片</button>
+        <div id="render-status-${resultId}-${index}" class="render-status" style="display:none;"></div>
+      </div>
+    </div>
+  `;
+}
+
+async function startDouyinRender(resultId, index) {
+  const output = outputById(resultId, index);
+  if (!output || !output.scenes?.length) {
+    showToast('没有可渲染的抖音脚本', 'error');
+    return;
+  }
+  
+  const voiceSelect = document.getElementById(`voice-${resultId}-${index}`);
+  const voice = voiceSelect?.value || '冰糖';
+  const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
+  
+  statusDiv.style.display = 'block';
+  statusDiv.innerHTML = '<div class="render-progress"><i style="width:5%"></i></div><div class="render-status-text">正在提交渲染任务...</div>';
+  
+  try {
+    const resp = await apiFetch('/api/douyin/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: output.title,
+        scenes: output.scenes,
+        voice: voice,
+        music_suggestion: output.music_suggestion || ''
+      })
+    });
+    const data = await resp.json();
+    
+    if (data.job_id) {
+      showToast('渲染任务已提交', 'success');
+      pollRenderStatus(data.job_id, resultId, index);
+    } else {
+      throw new Error(data.detail || '提交失败');
+    }
+  } catch (e) {
+    statusDiv.innerHTML = `<div class="render-error">❌ ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function pollRenderStatus(jobId, resultId, index) {
+  const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
+  const key = `${resultId}-${index}`;
+  
+  if (renderPollers[key]) clearInterval(renderPollers[key]);
+  
+  renderPollers[key] = setInterval(async () => {
+    try {
+      const resp = await apiFetch(`/api/douyin/render/${jobId}`);
+      const job = await resp.json();
+      
+      const progress = job.progress || 0;
+      const stage = job.stage || '处理中';
+      
+      statusDiv.innerHTML = `
+        <div class="render-progress"><i style="width:${progress}%"></i></div>
+        <div class="render-status-text">${escapeHtml(stage)} ${progress}%</div>
+      `;
+      
+      if (job.status === 'succeeded') {
+        clearInterval(renderPollers[key]);
+        delete renderPollers[key];
+        
+        const videoUrl = job.rendered_video?.url || job.output_url || ('/static/' + job.output_path);
+        statusDiv.innerHTML = `
+          <div class="render-success">
+            ✅ 成片完成！
+            <div class="render-actions">
+              <video src="${escapeHtml(videoUrl)}" controls style="max-width:100%;max-height:300px;border-radius:8px;margin:8px 0;"></video>
+              <div>
+                <a href="${escapeHtml(videoUrl)}" download class="btn btn-secondary btn-sm">下载 MP4</a>
+                <button class="btn btn-primary btn-sm" onclick="sendDouyinToQueue('${escapeHtml(videoUrl)}', '${escapeHtml(job.title || '')}')">发布到抖音</button>
+              </div>
+            </div>
+          </div>
+        `;
+      } else if (job.status === 'failed') {
+        clearInterval(renderPollers[key]);
+        delete renderPollers[key];
+        statusDiv.innerHTML = `<div class="render-error">❌ 渲染失败：${escapeHtml(job.error || '未知错误')}</div>`;
+      }
+    } catch (e) {
+      // 继续轮询
+    }
+  }, 2000);
+}
+
+async function sendDouyinToQueue(videoUrl, title) {
+  try {
+    await apiFetch('/api/queue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: title || '抖音视频',
+        body: '',
+        platforms: ['douyin'],
+        hashtags: [],
+        attachments: [{type: 'video', url: videoUrl, path: videoUrl}]
+      })
+    });
+    showToast('已添加到发布队列', 'success');
+  } catch (e) {
+    showToast('添加失败：' + e.message, 'error');
+  }
+}
 
 function appendMessage(role,text,result=null,scroll=true){
   const shell=document.getElementById('chatShell');const box=document.getElementById('chatMessages');if(shell?.classList.contains('is-empty'))box.querySelector('.chat-welcome')?.remove();shell?.classList.remove('is-empty');const row=document.createElement('div');row.className=`chat-row ${role}`;

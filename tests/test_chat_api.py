@@ -22,9 +22,10 @@ def test_root_serves_chat_page():
     assert "buffalo_logo_header.png" not in response.text  # Logo 由公共侧栏脚本渲染
 
 
-def test_chat_api_returns_editor_payload(tmp_db, monkeypatch):
+def test_chat_api_returns_editor_payload(tmp_db, monkeypatch, tmp_path):
     client, headers = _authorized_client(tmp_db)
     captured = {}
+    monkeypatch.setattr(app, "STATIC_DIR", tmp_path)
 
     async def fake_chat_platforms(**kwargs):
         captured.update(kwargs)
@@ -53,6 +54,8 @@ def test_chat_api_returns_editor_payload(tmp_db, monkeypatch):
     assert data["hashtags"] == ["南非物流", "德班港"]
     assert [item["platform"] for item in data["outputs"]] == ["xiaohongshu", "facebook"]
     assert data["outputs"][0]["body"] != data["outputs"][1]["body"]
+    assert data["outputs"][0]["attachments"]
+    assert data["outputs"][1].get("attachments") is None
     assert captured["tone"] == "urgent"
     assert captured["platforms"] == ["xiaohongshu", "facebook"]
     assert len(captured["messages"]) == 3

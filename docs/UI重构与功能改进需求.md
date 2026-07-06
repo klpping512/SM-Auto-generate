@@ -330,8 +330,8 @@ async def ai_chat(req: ChatRequest):
     
     messages = [{"role": "system", "content": system_prompt}] + req.messages
     
-    # 调用 DeepSeek
-    response = await call_deepseek(messages)
+    # 调用 MiMo
+    response = await call_mimo(messages)
     
     # 解析返回内容
     content = parse_ai_response(response)

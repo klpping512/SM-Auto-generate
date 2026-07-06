@@ -1,4 +1,4 @@
-"""AI Content Generation Engine using DeepSeek API."""
+"""AI content generation using Xiaomi MiMo V2.5."""
 import asyncio
 import httpx
 import json
@@ -9,14 +9,15 @@ from topic_library import PLATFORM_PROMPTS
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek API config
-DEEPSEEK_API_KEY = ""
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+# MiMo API config
+MIMO_API_KEY = ""
+MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MIMO_MODEL = "mimo-v2.5"
 
 
 def set_api_key(key: str):
-    global DEEPSEEK_API_KEY
-    DEEPSEEK_API_KEY = key
+    global MIMO_API_KEY
+    MIMO_API_KEY = key
 
 
 async def generate_content(
@@ -27,6 +28,7 @@ async def generate_content(
     length: str = "medium",
     instruction: str = "",
     kb_context: str = "",
+    assets: list[dict] | None = None,
 ) -> list[GeneratedContent]:
     """Generate platform-specific content for a given topic."""
     results = []
@@ -46,6 +48,26 @@ async def generate_content(
             f"不要编造与之矛盾的事实：\n----\n{kb_context}\n----\n"
             if kb_context else ""
         )
+        asset_instruction = ""
+        if platform == Platform.XIAOHONGSHU:
+            asset_instruction = """
+除文案外，必须生成 5-7 页可直接制作成小红书轮播图的 image_pages。视觉内容应适合 BUFFALO 金棕品牌风格：封面标题有冲击力，内页每条要点应包含具体信息，避免空泛口号。
+第 1 页 type=cover，其余 type=content；每页 headline 不超过 18 字，
+points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建议或互动引导。
+"""
+        elif platform == Platform.DOUYIN:
+            asset_catalog = [{"id": a["id"], "name": a["name"], "type": a["file_type"], "category": a["category"]} for a in (assets or [])]
+            asset_instruction = """
+【重要规则】必须生成 4-6 个 scenes，总时长约 30 秒。
+每个场景必须包含：scene、duration（整数秒）、visual、voiceover、text_overlay、asset_id。
+
+【强制要求】
+- 前 4 个场景的 asset_id 必须从下方素材目录中选择，不能为 null
+- 最后 1 个场景可以是品牌信息卡（asset_id=null）
+- 每个场景选择最匹配画面描述的素材
+
+可用素材（必须从中选择）：
+""" + json.dumps(asset_catalog, ensure_ascii=False)
         user_prompt = f"""请为以下物流主题生成{platform.value}平台的内容：
 
 主题：{topic}
@@ -55,29 +77,37 @@ async def generate_content(
 {extra}{kb_block}
 {prompt_config['format']}
 
-请严格按照以下JSON格式返回，不要有任何其他文字：
+{asset_instruction}
+
+【最终要求】请严格按照以下JSON格式返回，不要有任何其他文字：
 {{
   "title": "标题",
   "body": "正文内容",
-  "hashtags": ["标签1", "标签2", "标签3"]
-}}"""
+  "hashtags": ["标签1", "标签2", "标签3"],
+  "image_pages": [{{"type": "cover", "headline": "封面标题", "subheadline": "封面副标题", "points": []}}],
+  "scenes": [{{"scene": 1, "duration": 5, "visual": "画面", "voiceover": "口播", "text_overlay": "字幕", "asset_id": 1}}],
+  "music_suggestion": "音乐风格"
+}}
+
+再次强调：scenes 中的 asset_id 必须是素材目录中的真实 ID，不能为 null（最后一个场景除外）。"""
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{MIMO_BASE_URL}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "api-key": MIMO_API_KEY,
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-chat",
+                        "model": MIMO_MODEL,
                         "messages": [
                             {"role": "system", "content": prompt_config["system"]},
                             {"role": "user", "content": user_prompt},
                         ],
                         "temperature": 0.7,
-                        "max_tokens": prompt_config["max_len"],
+                        "max_completion_tokens": prompt_config["max_len"],
+                        "response_format": {"type": "json_object"},
                     },
                 )
                 resp.raise_for_status()
@@ -90,6 +120,10 @@ async def generate_content(
                     title=parsed.get("title", topic),
                     body=parsed.get("body", content_text),
                     hashtags=parsed.get("hashtags", []),
+                    image_pages=parsed.get("image_pages", []) if platform == Platform.XIAOHONGSHU else [],
+                    duration_target=30 if platform == Platform.DOUYIN else None,
+                    scenes=_normalize_douyin_scenes(parsed.get("scenes"), topic, {a["id"] for a in (assets or [])}) if platform == Platform.DOUYIN else [],
+                    music_suggestion=parsed.get("music_suggestion", "") if platform == Platform.DOUYIN else "",
                 ))
                 logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
         except Exception as e:
@@ -168,6 +202,30 @@ def _platform_format_warnings(platform: str, body: str) -> list[str]:
     return []
 
 
+def _normalize_douyin_scenes(value, topic: str, allowed_asset_ids: set[int] | None = None) -> list[dict]:
+    scenes = []
+    for index, item in enumerate(value if isinstance(value, list) else []):
+        if not isinstance(item, dict): continue
+        try: duration = max(3, min(8, int(item.get("duration") or 5)))
+        except (TypeError, ValueError): duration = 5
+        raw_asset = item.get("asset_id")
+        # 允许 int 或字符串类型的 asset_id
+        try:
+            asset_id_int = int(raw_asset) if raw_asset is not None else None
+        except (TypeError, ValueError):
+            asset_id_int = None
+        asset_id = asset_id_int if asset_id_int is not None and asset_id_int in (allowed_asset_ids or set()) else None
+        scenes.append({"scene": index + 1, "duration": duration, "visual": str(item.get("visual") or "品牌信息卡")[:80], "voiceover": str(item.get("voiceover") or "")[:180], "text_overlay": str(item.get("text_overlay") or item.get("voiceover") or "")[:48], "asset_id": asset_id})
+    if 4 <= len(scenes) <= 6: return scenes
+    return [
+        {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"做南非物流的注意了，{topic}值得马上关注。", "text_overlay": "南非物流提醒", "asset_id": None},
+        {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "第一，及时核对最新船期与节点状态。", "text_overlay": "核对最新动态", "asset_id": None},
+        {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "第二，提前检查资料，避免关键环节临时返工。", "text_overlay": "提前检查资料", "asset_id": None},
+        {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "第三，为运输节点预留缓冲，并及时同步客户。", "text_overlay": "预留运输缓冲", "asset_id": None},
+        {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "关注 Buffalo，持续获取真实可执行的南非物流建议。", "text_overlay": "关注南非物流动态", "asset_id": None},
+    ]
+
+
 def _fallback_content(platform: Platform, topic: str, category: str) -> GeneratedContent:
     """Generate template content when API fails."""
     templates = {
@@ -180,6 +238,14 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
                  f"🔹 要点三：找靠谱的物流合作伙伴\n\n"
                  f"有什么问题欢迎评论区交流👇",
             hashtags=["南非物流", "跨境货运", "物流干货", topic[:4]],
+            image_pages=[
+                {"type": "cover", "headline": topic[:18], "subheadline": "南非物流实用指南", "points": []},
+                {"type": "content", "headline": "为什么要关注？", "points": ["物流节点变化会影响整体时效", "提前掌握信息，减少临时调整"]},
+                {"type": "content", "headline": "第一步：确认动态", "points": ["及时核对船期与港口状态", "向服务商确认最新可执行方案"]},
+                {"type": "content", "headline": "第二步：预留缓冲", "points": ["为关键节点留出合理时间", "提前同步客户，管理交付预期"]},
+                {"type": "content", "headline": "第三步：准备预案", "points": ["评估替代路线与资源", "关键资料提前检查并留档"]},
+                {"type": "content", "headline": "收藏这份提醒", "points": ["持续关注南非物流动态", "有具体问题欢迎留言交流"]},
+            ],
         ),
         Platform.DOUYIN: GeneratedContent(
             platform=platform,
@@ -187,6 +253,15 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
             body=f"【画面】港口与货运现场快切\n【口播】做南非物流的注意了！{topic}正在影响时效。"
                  f"建议马上确认船期、预留缓冲时间，并提前同步客户。关注我们，获取最新物流预警。",
             hashtags=["南非物流", "跨境电商", "物流避坑"],
+            duration_target=30,
+            scenes=[
+                {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"做南非物流的注意了，{topic}值得马上关注。", "text_overlay": "南非物流提醒", "asset_id": None},
+                {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "第一，及时核对最新船期与港口状态。", "text_overlay": "核对最新动态", "asset_id": None},
+                {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "第二，提前检查资料，避免关键环节临时返工。", "text_overlay": "提前检查资料", "asset_id": None},
+                {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "第三，为运输节点预留缓冲，并及时同步客户。", "text_overlay": "预留运输缓冲", "asset_id": None},
+                {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "关注 Buffalo，持续获取真实可执行的南非物流建议。", "text_overlay": "关注南非物流动态", "asset_id": None},
+            ],
+            music_suggestion="稳健、有节奏的商务电子乐",
         ),
         Platform.FACEBOOK: GeneratedContent(
             platform=platform,
@@ -268,6 +343,7 @@ async def chat_platforms(
     messages: list[dict], context: str = "", command: str = None,
     tone: str = "professional", length: str = "medium",
     platforms: list[str] | None = None, topic: str = "",
+    assets: list[dict] | None = None,
 ) -> list[dict]:
     """按平台并行生成真正独立的内容版本。"""
     if command and command in COMMANDS:
@@ -284,13 +360,13 @@ async def chat_platforms(
 
     platform_list = list(dict.fromkeys(platforms or ["xiaohongshu"]))
     return await asyncio.gather(*[
-        _chat_one_platform(messages, platform, tone, length, topic)
+        _chat_one_platform(messages, platform, tone, length, topic, assets or [])
         for platform in platform_list
     ])
 
 
 async def _chat_one_platform(
-    messages: list[dict], platform: str, tone: str, length: str, topic: str,
+    messages: list[dict], platform: str, tone: str, length: str, topic: str, assets: list[dict] | None = None,
 ) -> dict:
     tone_map = {"professional": "专业严谨、信息可信", "friendly": "亲切自然、口语化", "urgent": "简洁紧迫、突出时效"}
     length_map = {"short": "短篇", "medium": "中篇", "long": "长篇"}
@@ -310,31 +386,35 @@ async def _chat_one_platform(
         + f"\n语言要求：{language_rules.get(platform, '根据目标平台选择自然语言。')}"
         + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
         + f"\n平台硬性格式：{config['format']}"
-        + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"]}，不要输出 Markdown 代码块或解释。"
+        + ("\n小红书还必须返回 image_pages 数组，共 5-7 页。每项格式为 {\"type\":\"cover或content\",\"headline\":\"不超过18字\",\"subheadline\":\"可选副标题\",\"points\":[\"2-4条具体短句，每条说明一个真实问题或行动\"]}。第一页是有冲击力的封面，内页信息具体，最后一页是建议或互动引导，避免空泛口号。" if platform == "xiaohongshu" else "")
+        + ("\n抖音必须返回 4-6 个 scenes，总时长约30秒；每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id=null。" if platform == "douyin" else "")
+        + (("\n可用素材目录（只能引用这些 id）：" + json.dumps([{"id": a["id"], "name": a["name"], "type": a["file_type"], "category": a["category"]} for a in (assets or [])], ensure_ascii=False)) if platform == "douyin" else "")
+        + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"],\"image_pages\":[],\"scenes\":[],\"music_suggestion\":\"\"}，不要输出 Markdown 代码块或解释。"
     )
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + "\n" + config["system"] + parameter_prompt}] + messages
 
-    if not DEEPSEEK_API_KEY:
+    if not MIMO_API_KEY:
         seed = topic or (messages[-1]["content"] if messages else "南非跨境物流")
         try:
             fallback = _fallback_content(Platform(platform), seed, "")
         except ValueError:
             fallback = _fallback_content(Platform.FACEBOOK, seed, "")
-        return {"platform": platform, "title": fallback.title, "body": fallback.body, "hashtags": fallback.hashtags, "content": fallback.body}
+        return {"platform": platform, "title": fallback.title, "body": fallback.body, "hashtags": fallback.hashtags, "image_pages": fallback.image_pages, "duration_target": fallback.duration_target, "scenes": fallback.scenes, "music_suggestion": fallback.music_suggestion, "content": fallback.body}
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{MIMO_BASE_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "api-key": MIMO_API_KEY,
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "deepseek-chat",
+                    "model": MIMO_MODEL,
                     "messages": api_messages,
                     "temperature": 0.7,
-                    "max_tokens": config["max_len"],
+                    "max_completion_tokens": config["max_len"],
+                    "response_format": {"type": "json_object"},
                 },
             )
             resp.raise_for_status()
@@ -351,19 +431,20 @@ async def _chat_one_platform(
                 if platform == "twitter":
                     constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
                 repair_resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{MIMO_BASE_URL}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "api-key": MIMO_API_KEY,
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-chat",
+                        "model": MIMO_MODEL,
                         "messages": [
                             {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. Preserve this platform format exactly: {config['format']} Language: {language_rules.get(platform, '')} " + " ".join(constraints)},
                             {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
                         ],
                         "temperature": 0.3,
-                        "max_tokens": 180 if platform == "twitter" else config["max_len"],
+                        "max_completion_tokens": 180 if platform == "twitter" else config["max_len"],
+                        "response_format": {"type": "json_object"},
                     },
                 )
                 repair_resp.raise_for_status()
@@ -375,19 +456,20 @@ async def _chat_one_platform(
                 raw = repaired_raw
             if _platform_format_warnings(platform, body):
                 format_resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{MIMO_BASE_URL}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "api-key": MIMO_API_KEY,
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-chat",
+                        "model": MIMO_MODEL,
                         "messages": [
                             {"role": "system", "content": f"Rewrite for {platform_names.get(platform, platform)}. Return strict JSON with title, body, hashtags. Mandatory format: {config['format']} Language: {language_rules.get(platform, '')} Do not add any unsupported real-time data, vague time ranges, statistics, or source attribution."},
                             {"role": "user", "content": body},
                         ],
                         "temperature": 0.3,
-                        "max_tokens": config["max_len"],
+                        "max_completion_tokens": config["max_len"],
+                        "response_format": {"type": "json_object"},
                     },
                 )
                 format_resp.raise_for_status()
@@ -401,7 +483,19 @@ async def _chat_one_platform(
                 body = _truncate_twitter_body(body)
             quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
             quality_warnings.extend(_platform_format_warnings(platform, body))
-            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "content": raw, "quality_warnings": quality_warnings}
+            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": 30 if platform == "douyin" else None, "scenes": _normalize_douyin_scenes(parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])}) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings}
     except Exception as e:
         logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
-        return {"platform": platform, "title": "生成失败", "body": f"{platform_names.get(platform, platform)} 暂时无法生成，请稍后重试。", "hashtags": [], "content": f"生成失败：{e}"}
+        seed = topic or (messages[-1].get("content", "") if messages else "南非物流")
+        try:
+            fallback = _fallback_content(Platform(platform), seed[:40], "")
+        except ValueError:
+            fallback = _fallback_content(Platform.FACEBOOK, seed[:40], "")
+        return {
+            "platform": platform, "title": fallback.title, "body": fallback.body,
+            "hashtags": fallback.hashtags, "image_pages": fallback.image_pages,
+            "duration_target": fallback.duration_target, "scenes": fallback.scenes,
+            "music_suggestion": fallback.music_suggestion, "content": fallback.body,
+            "quality_warnings": ["AI 服务暂不可用，当前为可编辑模板内容，请人工确认"],
+            "source": "fallback",
+        }

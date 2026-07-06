@@ -1,132 +1,28 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=5"/>
-<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=5"/>
-<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=5"/>
-<link rel="manifest" href="/static/manifest.json?v=5"/>
-<meta name="theme-color" content="#B98A4C"/>
-<title>内容资产 - SA-LogiFlow</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-<link rel="stylesheet" href="/static/design-system.css?v=5"/>
-</head>
-<body>
-<div class="app-layout" id="app"></div>
-<div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=5"></script>
-<script>
-const PAGE_ID = 'assets';
-const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
-const statusMap = { draft:{label:'草稿',cls:'badge-gray'}, pending_review:{label:'待审核',cls:'badge-purple'}, approved:{label:'已通过',cls:'badge-blue'}, queued:{label:'待发布',cls:'badge-yellow'}, published:{label:'已发布',cls:'badge-green'}, failed:{label:'失败',cls:'badge-red'}, rejected:{label:'已驳回',cls:'badge-red'} };
-
-let allItems = [];
-let filterStatus = '';
-let filterPlatform = '';
-let searchText = '';
-
-async function init() {
-    const resp = await apiFetch('/api/queue');
-    allItems = await resp.json();
-    render();
-}
-
-function getFiltered() {
-    return allItems.filter(item => {
-        if (filterStatus && item.status !== filterStatus) return false;
-        if (filterPlatform && item.platform !== filterPlatform) return false;
-        if (searchText && !item.title.includes(searchText) && !item.body.includes(searchText)) return false;
-        return true;
-    });
-}
-
-function render() {
-    const filtered = getFiltered();
-    document.getElementById('app').innerHTML = `
-    ${renderSidebar(PAGE_ID)}
-    <div class="main-content">
-        <div class="page-header">
-            <h1 class="page-title">内容资产</h1>
-            <div style="display:flex;gap:8px;">
-                <a href="/editor.html" class="btn btn-primary btn-sm"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 新建内容</a>
-            </div>
-        </div>
-        <div class="page-body">
-            <!-- 筛选栏 -->
-            <div class="card" style="margin-bottom:16px;">
-                <div style="padding:16px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-                    <input class="input" placeholder="搜索标题或内容..." style="width:240px;font-size:13px;" oninput="searchText=this.value;render();" value="${searchText}"/>
-                    <select class="select" style="font-size:13px;" onchange="filterPlatform=this.value;render();">
-                        <option value="">全部平台</option>
-                        ${Object.entries(platformNames).map(([k,v])=>`<option value="${k}" ${filterPlatform===k?'selected':''}>${v}</option>`).join('')}
-                    </select>
-                    <select class="select" style="font-size:13px;" onchange="filterStatus=this.value;render();">
-                        <option value="">全部状态</option>
-                        ${Object.entries(statusMap).map(([k,v])=>`<option value="${k}" ${filterStatus===k?'selected':''}>${v.label}</option>`).join('')}
-                    </select>
-                    <span style="font-size:12px;color:var(--text-muted);margin-left:auto;">共 ${filtered.length} 条</span>
-                </div>
-            </div>
-
-            <!-- 内容列表 -->
-            <div class="card">
-                <div class="card-body" style="padding:0;">
-                    <table class="data-table">
-                        <thead><tr>
-                            <th style="width:40px;"><input type="checkbox" onchange="toggleAll(this.checked)"/></th>
-                            <th>标题</th>
-                            <th style="width:80px;">平台</th>
-                            <th style="width:80px;">状态</th>
-                            <th style="width:140px;">创建时间</th>
-                            <th style="width:140px;">定时发布</th>
-                            <th style="width:100px;">操作</th>
-                        </tr></thead>
-                        <tbody>
-                            ${filtered.length === 0 ? `<tr><td colspan="7" class="empty-state"><iconify-icon icon="mdi:tray-arrow-down" width="40"></iconify-icon><p style="margin-top:8px;">暂无内容</p></td></tr>` :
-                            filtered.map(item => {
-                                const s = statusMap[item.status] || statusMap.draft;
-                                return `<tr>
-                                    <td><input type="checkbox" class="item-cb" value="${item.id}"/></td>
-                                    <td>
-                                        <div style="font-weight:600;font-size:13px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.title)}</div>
-                                        <div style="font-size:12px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${escapeHtml(item.body.substring(0,80))}</div>
-                                    </td>
-                                    <td><span style="font-size:12px;">${platformNames[item.platform]||item.platform}</span></td>
-                                    <td><span class="badge ${s.cls}">${s.label}</span></td>
-                                    <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(item.created_at)||'-'}</td>
-                                    <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(item.scheduled_at)||'-'}</td>
-                                    <td>
-                                        <div style="display:flex;gap:4px;">
-                                            <button class="btn btn-ghost btn-sm" onclick="copyItem(${item.id})" title="复制"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
-                                            <button class="btn btn-ghost btn-sm" onclick="deleteItem(${item.id})" title="删除"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
-                                        </div>
-                                    </td>
-                                </tr>`;
-                            }).join('')}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>`;
-}
-
-function toggleAll(checked) { document.querySelectorAll('.item-cb').forEach(cb=>cb.checked=checked); }
-
-async function copyItem(id) {
-    const item = allItems.find(i=>i.id===id);
-    if (!item) return;
-    try { await navigator.clipboard.writeText(`${item.title}\n\n${item.body}\n\n${(item.hashtags||[]).map(h=>'#'+h).join(' ')}`); showToast('已复制'); } catch(e) { showToast('复制失败','error'); }
-}
-
-async function deleteItem(id) {
-    if (!confirm('确定删除？')) return;
-    try { await apiFetch(`/api/queue/${id}`,{method:'DELETE'}); allItems=allItems.filter(i=>i.id!==id); render(); showToast('已删除'); } catch(e) { showToast('删除失败','error'); }
-}
-
-init();
-</script>
-</body>
-</html>
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>素材库 - SA-LogiFlow</title><script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css?v=6"/></head><body>
+<div class="app-layout" id="app"></div><div id="toastContainer" class="toast-container"></div>
+<div id="mediaModal" class="media-modal" hidden><div class="media-modal-card"><button class="media-close" aria-label="关闭" onclick="closePreview()">×</button><div id="mediaPreview"></div></div></div>
+<script src="/static/common.js?v=6"></script><script>
+const PAGE_ID='assets';let assets=[],typeFilter='',categoryFilter='',query='';
+const categoryNames={warehouse:'海外仓',delivery:'配送',customs:'清关',brand:'品牌',other:'其他'};
+async function init(){await loadAssets();render();}
+async function loadAssets(){const p=new URLSearchParams();if(typeFilter)p.set('type',typeFilter);if(categoryFilter)p.set('category',categoryFilter);if(query)p.set('query',query);const r=await apiFetch('/api/assets?'+p);assets=await r.json();}
+function formatSize(n){return n>1048576?(n/1048576).toFixed(1)+' MB':Math.ceil(n/1024)+' KB';}
+function render(){document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content"><div class="page-header"><div><h1 class="page-title">素材库</h1><p style="font-size:13px;color:var(--text-muted);margin-top:4px;">统一管理可用于小红书和抖音的真实图片、视频素材</p></div><div style="display:flex;gap:8px;"><button class="btn btn-secondary" onclick="importDirectory()">扫描导入目录</button><label class="btn btn-primary" style="cursor:pointer;">上传素材<input type="file" multiple accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm" hidden onchange="uploadFiles(this.files);this.value=''"/></label></div></div><div class="page-body">
+<div class="card" style="padding:16px 20px;margin-bottom:18px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;"><input class="input" style="max-width:260px" placeholder="搜索素材名称" value="${escapeHtml(query)}" onkeydown="if(event.key==='Enter'){query=this.value;refresh();}"/><select class="select" onchange="typeFilter=this.value;refresh()"><option value="">全部类型</option><option value="image" ${typeFilter==='image'?'selected':''}>图片</option><option value="video" ${typeFilter==='video'?'selected':''}>视频</option></select><select class="select" onchange="categoryFilter=this.value;refresh()"><option value="">全部分类</option>${Object.entries(categoryNames).map(([k,v])=>`<option value="${k}" ${categoryFilter===k?'selected':''}>${v}</option>`).join('')}</select><span style="margin-left:auto;font-size:12px;color:var(--text-muted)">${assets.length} 个素材</span></div>
+${assets.length?`<div class="asset-grid">${assets.map(assetCard).join('')}</div>`:`<div class="card empty-state"><iconify-icon icon="mdi:image-multiple-outline" width="50"></iconify-icon><p>暂无素材。可上传文件，或将素材放入 static/assets/import 后扫描。</p></div>`}
+</div></main>`;}
+function assetCard(a){const media=a.file_type==='video'?`<video src="${escapeHtml(a.url)}" muted preload="metadata"></video>`:`<img src="${escapeHtml(a.thumbnail_url||a.url)}" alt="${escapeHtml(a.name)}"/>`;return `<article class="asset-card"><button class="asset-media" onclick="openPreview(${a.id})">${media}<span class="asset-type">${a.file_type==='video'?'视频':'图片'}</span></button><div class="asset-info"><strong>${escapeHtml(a.name)}</strong><div>${categoryNames[a.category]||a.category} · ${a.duration?Math.round(a.duration)+'秒 · ':''}${formatSize(a.size)}</div><div class="asset-actions"><button class="btn btn-primary btn-sm" onclick="useAsset(${a.id})">使用此素材</button><button class="btn btn-ghost btn-sm" onclick="editAsset(${a.id})">编辑</button><button class="btn btn-ghost btn-sm" onclick="deleteAsset(${a.id})">删除</button></div></div></article>`;}
+async function refresh(){await loadAssets();render();}
+async function uploadFiles(files){for(const file of files){const fd=new FormData();fd.append('file',file);try{await apiFetch('/api/assets/upload?category='+encodeURIComponent(categoryFilter||'other'),{method:'POST',body:fd});showToast('已上传 '+file.name);}catch(e){showToast(file.name+'：'+e.message,'error');}}await refresh();}
+async function importDirectory(){try{const r=await apiFetch('/api/assets/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:categoryFilter||'other'})});const d=await r.json();showToast(`导入 ${d.imported.length} 个，失败 ${d.errors.length} 个`,d.errors.length?'error':'success');await refresh();}catch(e){showToast(e.message,'error');}}
+function openPreview(id){const a=assets.find(x=>x.id===id);if(!a)return;document.getElementById('mediaPreview').innerHTML=a.file_type==='video'?`<video src="${escapeHtml(a.url)}" controls autoplay style="max-width:82vw;max-height:82vh"></video>`:`<img src="${escapeHtml(a.url)}" alt="${escapeHtml(a.name)}" style="max-width:82vw;max-height:82vh"/>`;document.getElementById('mediaModal').hidden=false;document.body.style.overflow='hidden';}
+function closePreview(){document.getElementById('mediaModal').hidden=true;document.getElementById('mediaPreview').innerHTML='';document.body.style.overflow='';}
+function useAsset(id){const selected=JSON.parse(localStorage.getItem('selectedMediaAssets')||'[]');if(!selected.includes(id))selected.push(id);localStorage.setItem('selectedMediaAssets',JSON.stringify(selected));showToast('已关联到内容编辑器');setTimeout(()=>location.href='/editor.html',350);}
+async function editAsset(id){const a=assets.find(x=>x.id===id);const name=prompt('素材名称',a.name);if(name===null)return;const category=prompt('分类：warehouse / delivery / customs / brand / other',a.category);if(category===null)return;try{await apiFetch(`/api/assets/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,category,status:'active'})});await refresh();}catch(e){showToast(e.message,'error');}}
+async function deleteAsset(id){if(!confirm('确定删除？已被视频任务引用的素材只会停用。'))return;try{const r=await apiFetch(`/api/assets/${id}`,{method:'DELETE'});const d=await r.json();showToast(d.status==='inactive'?'素材已被引用，已停用':'已删除');await refresh();}catch(e){showToast(e.message,'error');}}
+document.getElementById('mediaModal').addEventListener('click',e=>{if(e.target.id==='mediaModal')closePreview();});document.addEventListener('keydown',e=>{if(e.key==='Escape')closePreview();});init();
+</script><style>
+.asset-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}.asset-card{background:white;border:1px solid var(--border);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-sm)}.asset-media{position:relative;width:100%;height:180px;border:0;padding:0;background:#eee;cursor:pointer}.asset-media img,.asset-media video{width:100%;height:100%;object-fit:cover}.asset-type{position:absolute;left:10px;top:10px;background:#0009;color:white;padding:3px 8px;border-radius:99px;font-size:10px}.asset-info{padding:14px}.asset-info strong{display:block;font-size:14px}.asset-info>div:nth-child(2){font-size:11px;color:var(--text-muted);margin:5px 0 12px}.asset-actions{display:flex;gap:5px}.media-modal{position:fixed;inset:0;background:#000c;z-index:10000;display:flex;align-items:center;justify-content:center}.media-modal[hidden]{display:none}.media-modal-card{position:relative}.media-close{position:absolute;right:0;top:-44px;border:0;background:none;color:white;font-size:34px;cursor:pointer}
+</style></body></html>

@@ -14,7 +14,17 @@
         const title = item.title || '';
         const body = item.body || item.content || '';
         if (!platform || (!title && !body)) return null;
-        return { platform, title, body, hashtags: tags(item.hashtags) };
+        return {
+            platform, title, body, hashtags: tags(item.hashtags),
+            image_pages: Array.isArray(item.image_pages) ? item.image_pages : [],
+            attachments: Array.isArray(item.attachments) ? item.attachments : [],
+            duration_target: item.duration_target || null,
+            voice: item.voice || null,
+            scenes: Array.isArray(item.scenes) ? item.scenes : [],
+            music_suggestion: item.music_suggestion || '',
+            selected_asset_ids: Array.isArray(item.selected_asset_ids) ? item.selected_asset_ids : [],
+            rendered_video: item.rendered_video || null,
+        };
     }
 
     function buildDraft(result, activeIndex, fallbackPlatforms) {

@@ -18,6 +18,9 @@ import database as db
 import ai_engine
 import publisher
 import scheduler as sched
+from xhs_cards import pages_from_content, render_carousel
+import media_assets
+import video_renderer
 from auth import (
     create_access_token, verify_password, hash_password,
     get_current_user, require_role,
@@ -50,10 +53,10 @@ async def lifespan(app: FastAPI):
         db.create_user("admin", hash_password("admin123"), "admin", "系统管理员")
         logger.info("已创建默认管理员: admin / admin123")
     # 从环境变量加载 API key
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    key = os.environ.get("MIMO_API_KEY", "")
     if key:
         ai_engine.set_api_key(key)
-        logger.info("DeepSeek API key 已加载")
+        logger.info("MiMo API key 已加载")
     # 启动定时调度器
     sched.start_scheduler()
     logger.info("SA-LogiFlow v3.0 启动完成 | 数据库: %s", db.DB_PATH)
@@ -76,6 +79,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # 扫码登录会话仅用于本机单进程部署；前端据此获得明确的成功/超时/错误状态。
 scan_login_sessions: dict[str, dict] = {}
+video_render_semaphore = asyncio.Semaphore(1)
 
 
 # ==================== Auth API ====================
@@ -194,16 +198,23 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     # 引用企业知识库：按分类取文档全文，注入 prompt
     kb_context = db.get_kb_context(req.kb_category_ids) if req.kb_category_ids else ""
 
-    if not ai_engine.DEEPSEEK_API_KEY:
-        logger.warning("DeepSeek API key 未配置，使用 fallback 模板")
+    if not ai_engine.MIMO_API_KEY:
+        logger.warning("MiMo API key 未配置，使用 fallback 模板")
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
+        for content in contents:
+            if content.platform.value == "xiaohongshu":
+                content.image_pages, content.attachments = render_carousel(content.title, content.image_pages, STATIC_DIR)
         return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat(), source="fallback")
 
     contents = await ai_engine.generate_content(
         topic=req.topic, category=req.category, platforms=req.platforms,
         tone=req.tone, length=req.length, instruction=req.instruction,
         kb_context=kb_context,
+        assets=db.list_assets(status="active"),
     )
+    for content in contents:
+        if content.platform.value == "xiaohongshu":
+            content.image_pages, content.attachments = render_carousel(content.title, content.image_pages, STATIC_DIR)
     db.add_audit_log(user["id"], user["username"], "generate_content", target=req.topic)
     return GenerateResponse(topic=req.topic, contents=contents, generated_at=datetime.now().isoformat(), source="ai")
 
@@ -214,8 +225,20 @@ async def set_api_key_endpoint(body: dict, user=Depends(require_role(UserRole.AD
     if key:
         ai_engine.set_api_key(key)
         db.add_audit_log(user["id"], user["username"], "set_api_key")
-        return {"status": "ok", "message": "API key set"}
+        os.environ["MIMO_API_KEY"] = key
+        return {"status": "ok", "message": "MiMo API key set"}
     raise HTTPException(400, "Missing key")
+
+
+@app.post("/api/config/mimo-key")
+async def set_mimo_key(body: dict, user=Depends(require_role(UserRole.ADMIN))):
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "Missing key")
+    os.environ["MIMO_API_KEY"] = key
+    ai_engine.set_api_key(key)
+    db.add_audit_log(user["id"], user["username"], "set_mimo_key")
+    return {"status": "ok"}
 
 
 @app.post("/api/config/notification")
@@ -404,11 +427,18 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
         initial_status = "pending_review"
 
     for platform in req.platforms:
+        platform_attachments = req.attachments
+        if platform.value == "xiaohongshu" and not any(a.get("type") == "image" for a in platform_attachments):
+            _, platform_attachments = render_carousel(
+                req.title, pages_from_content(req.title, req.body), STATIC_DIR,
+            )
+        if platform.value == "douyin" and not any(a.get("type") == "video" for a in platform_attachments):
+            raise HTTPException(400, "抖音内容必须先生成或上传 MP4 视频")
         db.add_to_queue(
             title=req.title, body=req.body, platform=platform.value,
             hashtags=req.hashtags, scheduled_at=req.scheduled_at,
             status=initial_status, created_by=user["id"],
-            attachments=req.attachments,
+            attachments=platform_attachments,
         )
     db.add_audit_log(user["id"], user["username"], "add_to_queue", target=req.title, detail=f"{len(req.platforms)} platforms")
     return {"status": "ok", "added": len(req.platforms)}
@@ -463,6 +493,26 @@ async def review_item(item_id: int, req: ReviewRequest, user=Depends(require_rol
 
 # ==================== API: Publish ====================
 
+@app.post("/api/xhs/render")
+async def render_xhs_assets(body: dict, user=Depends(get_current_user)):
+    title = str(body.get("title") or "小红书物流指南").strip()
+    content = str(body.get("body") or "").strip()
+    pages = body.get("image_pages") if isinstance(body.get("image_pages"), list) else []
+    if not pages:
+        pages = pages_from_content(title, content)
+    normalized, attachments = render_carousel(title, pages, STATIC_DIR)
+    return {"image_pages": normalized, "attachments": attachments}
+
+
+def _repair_xhs_queue_media(item: dict, attachments: list[dict]) -> list[dict]:
+    if item["platform"] != "xiaohongshu" or any(a.get("type") == "image" for a in attachments):
+        return attachments
+    _, generated = render_carousel(
+        item["title"], pages_from_content(item["title"], item["body"]), STATIC_DIR,
+    )
+    db.update_queue_attachments(item["id"], generated)
+    return generated
+
 @app.post("/api/publish/{item_id}")
 async def publish_item(item_id: int, user=Depends(get_current_user)):
     item = db.get_queue_item_by_id(item_id)
@@ -470,6 +520,7 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
         raise HTTPException(404, "Queue item not found")
 
     attachments = _json.loads(item.get('attachments') or '[]')
+    attachments = _repair_xhs_queue_media(item, attachments)
     images = [a['path'] for a in attachments if a.get('type') == 'image']
     video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
     result = await publisher.dispatch(
@@ -509,6 +560,7 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
             continue
 
         attachments = _json.loads(item.get('attachments') or '[]')
+        attachments = _repair_xhs_queue_media(item, attachments)
         images = [a['path'] for a in attachments if a.get('type') == 'image']
         video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
         result = await publisher.dispatch(
@@ -698,6 +750,147 @@ async def upload_file(file: UploadFile = File(...), user=Depends(get_current_use
     }
 
 
+# ==================== API: Media Assets ====================
+
+@app.get("/api/assets")
+async def list_media_assets(type: str = None, category: str = None, query: str = None, status: str = "active", user=Depends(get_current_user)):
+    return [media_assets.public_asset(item) for item in db.list_assets(type, category, query, status)]
+
+
+@app.post("/api/assets/upload")
+async def upload_media_asset(
+    file: UploadFile = File(...), category: str = "other",
+    user=Depends(require_role(UserRole.ADMIN)),
+):
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in media_assets.IMAGE_EXTS | media_assets.VIDEO_EXTS:
+        raise HTTPException(400, "不支持的素材格式")
+    content = await file.read()
+    max_size = media_assets.MAX_VIDEO if suffix in media_assets.VIDEO_EXTS else media_assets.MAX_IMAGE
+    if not content or len(content) > max_size:
+        raise HTTPException(400, "素材为空或超过大小限制")
+    import tempfile
+    temp_path = Path(tempfile.gettempdir()) / f"asset-{_uuid4().hex}{suffix}"
+    try:
+        temp_path.write_bytes(content)
+        asset = media_assets.ingest_file(temp_path, STATIC_DIR, category, "upload", user["id"])
+        db.add_audit_log(user["id"], user["username"], "upload_asset", target=str(asset["id"]))
+        return media_assets.public_asset(asset)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+@app.post("/api/assets/import")
+async def import_media_assets(body: dict = None, user=Depends(require_role(UserRole.ADMIN))):
+    import_root = (STATIC_DIR / "assets" / "import").resolve()
+    import_root.mkdir(parents=True, exist_ok=True)
+    category = str((body or {}).get("category") or "other")
+    results, errors = [], []
+    for path in sorted(import_root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in media_assets.IMAGE_EXTS | media_assets.VIDEO_EXTS:
+            continue
+        try:
+            asset = media_assets.ingest_file(path, STATIC_DIR, category, "directory", user["id"])
+            results.append(media_assets.public_asset(asset))
+        except Exception as exc:
+            errors.append({"file": path.name, "error": str(exc)[:200]})
+    db.add_audit_log(user["id"], user["username"], "import_assets", detail=f"success={len(results)}, errors={len(errors)}")
+    return {"imported": results, "errors": errors}
+
+
+@app.put("/api/assets/{asset_id}")
+async def update_media_asset(asset_id: int, body: dict, user=Depends(require_role(UserRole.ADMIN))):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "素材不存在")
+    name = str(body.get("name") or asset["name"]).strip()[:100]
+    category = str(body.get("category") or asset["category"])
+    status = str(body.get("status") or asset["status"])
+    if category not in media_assets.CATEGORIES or status not in {"active", "inactive"}:
+        raise HTTPException(400, "分类或状态无效")
+    db.update_asset(asset_id, name, category, status)
+    return media_assets.public_asset(db.get_asset(asset_id))
+
+
+@app.delete("/api/assets/{asset_id}")
+async def delete_media_asset(asset_id: int, user=Depends(require_role(UserRole.ADMIN))):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "素材不存在")
+    if db.asset_is_referenced(asset_id):
+        db.update_asset(asset_id, asset["name"], asset["category"], "inactive")
+        return {"status": "inactive", "reason": "素材已被视频任务引用"}
+    for relative in (asset["filepath"], asset.get("thumbnail")):
+        if relative:
+            target = (STATIC_DIR / relative).resolve()
+            if STATIC_DIR.resolve() in target.parents:
+                target.unlink(missing_ok=True)
+    db.delete_asset(asset_id)
+    return {"status": "deleted"}
+
+
+@app.get("/api/media/capabilities")
+async def media_capabilities(user=Depends(get_current_user)):
+    result = media_assets.capabilities()
+    result["mimo_key"] = bool(os.environ.get("MIMO_API_KEY"))
+    result["ready"] = all(result.values())
+    result["voices"] = sorted(video_renderer.VOICES)
+    return result
+
+
+async def _run_video_job(job_id: str):
+    async with video_render_semaphore:
+        await asyncio.to_thread(video_renderer.render_job, job_id, STATIC_DIR)
+
+
+@app.post("/api/douyin/render")
+async def create_douyin_render(body: dict, user=Depends(get_current_user)):
+    caps = media_assets.capabilities()
+    if not caps["ffmpeg"] or not caps["ffprobe"]:
+        raise HTTPException(503, "未安装 FFmpeg/ffprobe")
+    if not os.environ.get("MIMO_API_KEY"):
+        raise HTTPException(503, "未配置 MiMo API Key")
+    voice = str(body.get("voice") or "")
+    asset_ids = {asset["id"] for asset in db.list_assets(status="active")}
+    try:
+        script = video_renderer.normalize_script(body, asset_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if voice not in video_renderer.VOICES:
+        raise HTTPException(400, "请选择有效的 MiMo 中文音色")
+    job_id = _uuid4().hex
+    db.create_render_job(job_id, script, voice, user["id"])
+    asyncio.create_task(_run_video_job(job_id))
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/douyin/render/{job_id}")
+async def get_douyin_render(job_id: str, user=Depends(get_current_user)):
+    job = db.get_render_job(job_id)
+    if not job:
+        raise HTTPException(404, "渲染任务不存在")
+    if job.get("output_path"):
+        job["rendered_video"] = {
+            "type": "video", "path": job["output_path"],
+            "url": "/static/" + job["output_path"], "filename": Path(job["output_path"]).name,
+        }
+    return job
+
+
+@app.post("/api/douyin/render/{job_id}/retry")
+async def retry_douyin_render(job_id: str, user=Depends(get_current_user)):
+    job = db.get_render_job(job_id)
+    if not job:
+        raise HTTPException(404, "渲染任务不存在")
+    if job["status"] == "running":
+        raise HTTPException(409, "任务正在运行")
+    db.update_render_job(job_id, status="pending", stage="等待重试", progress=0, error=None, output_path=None)
+    asyncio.create_task(_run_video_job(job_id))
+    return {"job_id": job_id, "status": "pending"}
+
+
 # ==================== API: Prompt Templates ====================
 
 @app.get("/api/prompt-templates")
@@ -750,7 +943,13 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         length=req.length,
         platforms=[p.value for p in req.platforms],
         topic=req.topic,
+        assets=db.list_assets(status="active"),
     )
+    for item in outputs:
+        if item["platform"] == "xiaohongshu" and item.get("title") != "生成失败":
+            item["image_pages"], item["attachments"] = render_carousel(
+                item["title"], item.get("image_pages"), STATIC_DIR,
+            )
     first = outputs[0]
     context_content = "\n\n".join(
         f"[{item['platform']}]\n{item['title']}\n{item['body']}"

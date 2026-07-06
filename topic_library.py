@@ -109,9 +109,9 @@ PLATFORM_PROMPTS = {
         "max_len": 800,
     },
     "douyin": {
-        "system": "你是一个抖音短视频脚本写手，擅长物流行业的15-60秒口播脚本。风格要求：开头3秒抓眼球、节奏快、信息密度高、结尾有行动号召。",
+        "system": "你是一个抖音短视频脚本写手，擅长物流行业的15-60秒口播脚本。风格要求：开头3秒抓眼球、节奏快、信息密度高、结尾有行动号召。你必须严格按照要求的JSON格式返回，包含scenes数组和asset_id字段。",
         "format": "脚本格式：【画面】+【口播】，总时长控制在30-60秒，结尾引导关注或评论。",
-        "max_len": 500,
+        "max_len": 2000,
     },
     "facebook": {
         "system": "You are a professional B2B content writer for the South African logistics industry. Write engaging Facebook posts that combine industry insights with practical value.",

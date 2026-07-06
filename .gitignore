@@ -6,3 +6,14 @@ __pycache__/
 .DS_Store
 nohup.out
 uploads/
+
+# 素材库视频文件（太大不进 git）
+static/assets/import/
+static/assets/library/
+static/assets/thumbnails/
+*.mov
+*.MOV
+*.mp4
+*.MP4
+static/chat.html.bak
+video_renderer.py.bak

@@ -136,6 +136,40 @@ def init_db():
                 created_by INTEGER,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                filepath TEXT NOT NULL UNIQUE,
+                file_type TEXT NOT NULL,
+                category TEXT DEFAULT 'other',
+                duration REAL,
+                width INTEGER,
+                height INTEGER,
+                size INTEGER NOT NULL,
+                thumbnail TEXT,
+                sha256 TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT 'upload',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_by INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS video_render_jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                stage TEXT DEFAULT '等待渲染',
+                progress INTEGER DEFAULT 0,
+                script TEXT NOT NULL,
+                voice TEXT NOT NULL,
+                output_path TEXT,
+                error TEXT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            );
         """)
         # 迁移：为旧数据库添加缺失的列
         _ensure_column(conn, "queue", "created_by", "INTEGER")
@@ -285,6 +319,14 @@ def update_queue_status(item_id, status, error_msg=None, scheduled_at=_UNSET):
             conn.execute("UPDATE queue SET status=?, error_msg=? WHERE id=?", (status, error_msg, item_id))
         else:
             conn.execute("UPDATE queue SET status=?, error_msg=?, scheduled_at=? WHERE id=?", (status, error_msg, scheduled_at, item_id))
+
+
+def update_queue_attachments(item_id: int, attachments: list[dict]):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE queue SET attachments=? WHERE id=?",
+            (json.dumps(attachments or [], ensure_ascii=False), item_id),
+        )
 
 
 def update_queue_review(item_id: int, reviewer_id: int, status: str, review_note: str = None):
@@ -553,3 +595,100 @@ def update_prompt_template(tpl_id: int, name: str, category: str, content: str):
 def delete_prompt_template(tpl_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM prompt_templates WHERE id=?", (tpl_id,))
+
+
+# ==================== Media Assets ====================
+
+def list_assets(file_type=None, category=None, query=None, status="active") -> list[dict]:
+    with get_conn() as conn:
+        sql, params = "SELECT * FROM assets WHERE 1=1", []
+        if file_type:
+            sql += " AND file_type=?"; params.append(file_type)
+        if category:
+            sql += " AND category=?"; params.append(category)
+        if status:
+            sql += " AND status=?"; params.append(status)
+        if query:
+            sql += " AND name LIKE ?"; params.append(f"%{query}%")
+        sql += " ORDER BY created_at DESC, id DESC"
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def get_asset(asset_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_asset_by_hash(sha256: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM assets WHERE sha256=?", (sha256,)).fetchone()
+        return dict(row) if row else None
+
+
+def create_asset(data: dict) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO assets
+            (name,filepath,file_type,category,duration,width,height,size,thumbnail,sha256,source,status,created_by)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            tuple(data.get(key) for key in (
+                "name", "filepath", "file_type", "category", "duration", "width", "height",
+                "size", "thumbnail", "sha256", "source", "status", "created_by",
+            )),
+        )
+        return cur.lastrowid
+
+
+def update_asset(asset_id: int, name: str, category: str, status: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE assets SET name=?, category=?, status=? WHERE id=?", (name, category, status, asset_id))
+
+
+def asset_is_referenced(asset_id: int) -> bool:
+    needle = f'"asset_id": {asset_id}'
+    with get_conn() as conn:
+        return conn.execute("SELECT 1 FROM video_render_jobs WHERE script LIKE ? LIMIT 1", (f"%{needle}%",)).fetchone() is not None
+
+
+def delete_asset(asset_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
+
+
+# ==================== Video Render Jobs ====================
+
+def create_render_job(job_id: str, script: dict, voice: str, created_by: int):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO video_render_jobs (id,script,voice,created_by) VALUES (?,?,?,?)",
+            (job_id, json.dumps(script, ensure_ascii=False), voice, created_by),
+        )
+
+
+def get_render_job(job_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM video_render_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row); result["script"] = json.loads(result["script"])
+        return result
+
+
+def update_render_job(job_id: str, **fields):
+    allowed = {"status", "stage", "progress", "output_path", "error"}
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    with get_conn() as conn:
+        assignments = ",".join(f"{key}=?" for key in values)
+        conn.execute(
+            f"UPDATE video_render_jobs SET {assignments}, updated_at=datetime('now') WHERE id=?",
+            [*values.values(), job_id],
+        )
+
+
+def get_unfinished_render_jobs() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id FROM video_render_jobs WHERE status IN ('pending','running')").fetchall()
+        return [dict(row) for row in rows]

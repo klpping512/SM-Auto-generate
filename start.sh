@@ -5,5 +5,5 @@ if [ -f .env ]; then
   . ./.env
   set +a
 fi
-: "${DEEPSEEK_API_KEY:?请先通过环境变量设置 DEEPSEEK_API_KEY}"
+: "${MIMO_API_KEY:?请先通过环境变量设置 MIMO_API_KEY}"
 exec python3 app.py

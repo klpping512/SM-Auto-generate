@@ -95,6 +95,15 @@ class GeneratedContent(BaseModel):
     title: str
     body: str
     hashtags: list[str] = []
+    image_pages: list[dict] = []
+    attachments: list[dict] = []
+    duration_target: int | None = None
+    voice: str | None = None
+    scenes: list[dict] = []
+    music_suggestion: str = ""
+    selected_asset_ids: list[int] = []
+    render_job_id: str | None = None
+    rendered_video: dict | None = None
 
 
 class GenerateResponse(BaseModel):

@@ -4,7 +4,9 @@ AI 驱动的物流内容自动发布系统，支持一键生成多平台内容�
 
 ## 功能特性
 
-- **AI 内容生成** - DeepSeek API 驱动，6大物流主题 × 48个子话题
+- **AI 内容生成** - Xiaomi MiMo v2.5 驱动，支持文本生成及多模态素材理解
+- **小红书轮播图** - 自动生成 3:4 品牌卡片并支持全屏翻页预览
+- **抖音视频成片** - 素材分镜、MiMo TTS、字幕与 FFmpeg 竖屏 MP4 合成
 - **多平台发布** - 支持小红书、抖音、TikTok、Facebook、Twitter、Reddit 等
 - **慧媒集成** - 通过 [慧媒](https://huimei.smaroot.tech) CLI 实现国内平台自动发布
 - **发布队列** - 队列管理、定时发布、状态追踪
@@ -14,7 +16,7 @@ AI 驱动的物流内容自动发布系统，支持一键生成多平台内容�
 
 - **后端**: Python FastAPI + SQLite
 - **前端**: 纯 HTML + TailwindCSS + ECharts
-- **AI**: DeepSeek API
+- **AI**: Xiaomi MiMo v2.5 / MiMo v2.5 TTS
 - **发布**: 慧媒 CLI (huimei)
 
 ## 快速开始
@@ -25,7 +27,7 @@ pip install -r requirements.txt
 pip install huimei
 
 # 启动服务
-DEEPSEEK_API_KEY=your_key python3 app.py
+MIMO_API_KEY=your_key python3 app.py
 ```
 
 访问 http://localhost:8080
@@ -34,7 +36,7 @@ DEEPSEEK_API_KEY=your_key python3 app.py
 
 ```
 ├── app.py              # FastAPI 后端
-├── ai_engine.py        # DeepSeek AI 内容生成
+├── ai_engine.py        # MiMo v2.5 内容与分镜生成
 ├── publisher.py        # 慧媒发布封装
 ├── topic_library.py    # 南非物流主题库
 ├── database.py         # SQLite 数据库

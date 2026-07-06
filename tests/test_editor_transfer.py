@@ -23,6 +23,15 @@ def test_build_draft_preserves_all_platforms_and_active_selection():
     assert result["contents"][0]["hashtags"] == ["物流"]
 
 
+def test_build_draft_preserves_generated_media_assets():
+    result = _run_transfer("t.buildDraft({outputs:[{platform:'xiaohongshu',title:'X',body:'B',"
+        "image_pages:[{type:'cover',headline:'H'}],attachments:[{type:'image',path:'uploads/image/a.png'}]}]"
+        "},0,['xiaohongshu'])")
+    content = result["contents"][0]
+    assert content["image_pages"][0]["headline"] == "H"
+    assert content["attachments"][0]["path"] == "uploads/image/a.png"
+
+
 def test_build_draft_keeps_clicked_output_when_an_earlier_output_is_invalid():
     result = _run_transfer("t.buildDraft({outputs:["
         "{platform:'xiaohongshu',title:'',body:''},"

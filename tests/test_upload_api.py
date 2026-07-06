@@ -73,3 +73,58 @@ def test_add_to_queue_with_attachments(tmp_db):
     att = json.loads(items[0]["attachments"])
     assert att[0]["type"] == "image"
     assert att[0]["path"] == "uploads/image/x.png"
+
+    tmp_db.update_queue_attachments(items[0]["id"], [{"type": "image", "path": "uploads/image/generated.png"}])
+    updated = tmp_db.get_queue_item_by_id(items[0]["id"])
+    assert json.loads(updated["attachments"])[0]["path"] == "uploads/image/generated.png"
+
+
+def test_generate_fallback_returns_xhs_publishable_images(tmp_db, monkeypatch, tmp_path):
+    import app
+    client = _client(tmp_db, monkeypatch)
+    tok = _admin_token(tmp_db, client)
+    monkeypatch.setattr(app, "STATIC_DIR", tmp_path)
+    monkeypatch.setattr(app.ai_engine, "MIMO_API_KEY", "")
+
+    response = client.post(
+        "/api/generate",
+        headers={"Authorization": f"Bearer {tok}"},
+        json={"topic": "德班港提醒", "platforms": ["xiaohongshu"]},
+    )
+
+    assert response.status_code == 200
+    content = response.json()["contents"][0]
+    assert len(content["image_pages"]) >= 5
+    assert len(content["attachments"]) == len(content["image_pages"])
+    assert all(item["template_version"] == "buffalo-gold-v1" for item in content["attachments"])
+    assert all((tmp_path / item["path"]).exists() for item in content["attachments"])
+
+
+def test_legacy_xhs_queue_submission_auto_generates_images(tmp_db, monkeypatch, tmp_path):
+    import app
+    client = _client(tmp_db, monkeypatch)
+    tok = _admin_token(tmp_db, client)
+    monkeypatch.setattr(app, "STATIC_DIR", tmp_path)
+
+    response = client.post(
+        "/api/queue",
+        headers={"Authorization": f"Bearer {tok}"},
+        json={"title": "PAT 注册三步走", "body": "第一步：准备资料\n\n第二步：提交申请", "platforms": ["xiaohongshu"], "attachments": []},
+    )
+
+    assert response.status_code == 200
+    item = tmp_db.get_queue(platform="xiaohongshu")[-1]
+    attachments = json.loads(item["attachments"])
+    assert len(attachments) >= 3
+    assert all((tmp_path / asset["path"]).exists() for asset in attachments)
+
+
+def test_douyin_queue_requires_video(tmp_db, monkeypatch):
+    client = _client(tmp_db, monkeypatch)
+    tok = _admin_token(tmp_db, client)
+    response = client.post(
+        "/api/queue", headers={"Authorization": f"Bearer {tok}"},
+        json={"title": "抖音稿", "body": "正文", "platforms": ["douyin"], "attachments": []},
+    )
+    assert response.status_code == 400
+    assert "MP4" in response.json()["detail"]

@@ -1,6 +1,7 @@
 import pytest
 
 import ai_engine
+from models import Platform
 
 
 def test_normalize_hashtags_accepts_model_string_or_list():
@@ -28,9 +29,36 @@ def test_platform_format_detection_requires_douyin_script_markers():
     assert ai_engine._platform_format_warnings("douyin", "【画面】港口\n【口播】注意拥堵") == []
 
 
+def test_douyin_scene_normalization_falls_back_to_publishable_timeline():
+    scenes = ai_engine._normalize_douyin_scenes([], "德班港提醒")
+    assert len(scenes) == 5
+    assert 25 <= sum(scene["duration"] for scene in scenes) <= 35
+    assert all(scene["asset_id"] is None for scene in scenes)
+
+
+@pytest.mark.asyncio
+async def test_content_generation_uses_mimo_json_api(monkeypatch):
+    captured = {}
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": '{"title":"T","body":"B","hashtags":[]}'}}]}
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, headers, json): captured.update({"url":url,"headers":headers,"json":json}); return Response()
+    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(ai_engine, "MIMO_API_KEY", "test-key")
+    result = await ai_engine.generate_content("主题", "custom", [Platform.FACEBOOK])
+    assert result[0].title == "T"
+    assert captured["json"]["model"] == "mimo-v2.5"
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["headers"]["api-key"] == "test-key"
+
+
 @pytest.mark.asyncio
 async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatch):
-    monkeypatch.setattr(ai_engine, "DEEPSEEK_API_KEY", "")
+    monkeypatch.setattr(ai_engine, "MIMO_API_KEY", "")
 
     outputs = await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "生成德班港拥堵预警"}],

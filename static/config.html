@@ -116,6 +116,14 @@ function render() {
                 </div>
             </div>
 
+            <!-- 视频生成 -->
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#F3E8FF;display:flex;align-items:center;gap:10px;">
+                    <iconify-icon icon="mdi:movie-open-play" width="22" style="color:#7C3AED;"></iconify-icon><span style="font-size:15px;font-weight:700;">抖音视频生成</span>
+                </div>
+                <div class="card-body"><p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">MiMo v2.5 TTS 负责旁白，FFmpeg 负责竖屏 MP4 合成。密钥只保存在服务运行环境。</p><div style="display:flex;gap:8px;"><input id="mimoKey" type="password" class="input" placeholder="MiMo API Key"/><button class="btn btn-primary" onclick="saveMimoKey()">保存</button></div><div id="mediaCaps" style="font-size:12px;margin-top:12px;color:var(--text-secondary);">正在检测...</div></div>
+            </div>
+
             <!-- 系统信息 -->
             <div class="card">
                 <div class="card-body" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary);">
@@ -154,7 +162,10 @@ async function testNotification(channel = 'all') {
     } catch(e) { showToast('发送失败: ' + e.message, 'error'); }
 }
 
-render();
+async function saveMimoKey(){const key=document.getElementById('mimoKey').value.trim();if(!key){showToast('请输入 MiMo API Key','error');return;}try{await apiFetch('/api/config/mimo-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});document.getElementById('mimoKey').value='';showToast('MiMo Key 已加载');loadCapabilities();}catch(e){showToast(e.message,'error');}}
+async function loadCapabilities(){try{const r=await apiFetch('/api/media/capabilities');const c=await r.json();const mark=v=>v?'✅':'❌';document.getElementById('mediaCaps').innerHTML=`${mark(c.ffmpeg)} FFmpeg &nbsp; ${mark(c.ffprobe)} ffprobe &nbsp; ${mark(c.mimo_key)} MiMo Key<br/><strong>${c.ready?'视频生成已就绪':'请补齐缺失项后再生成视频'}</strong>`;}catch(e){document.getElementById('mediaCaps').textContent='能力检测失败';}}
+
+render();loadCapabilities();
 </script>
 </body>
 </html>
