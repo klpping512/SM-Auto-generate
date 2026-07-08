@@ -91,6 +91,7 @@ function render() {
                                         ${a.credential_kind==='token' ? `<button class="btn btn-ghost btn-sm" title="填写凭据" onclick="openCredModal(${a.id},'${a.platform}')"><iconify-icon icon="mdi:key-outline" width="16"></iconify-icon></button>` : ''}
                                         ${a.credential_kind==='cookie' && a.status!=='expired' ? `<button class="btn btn-ghost btn-sm" title="连接账号" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:qrcode-scan" width="16"></iconify-icon></button>` : ''}
                                         ${a.status==='expired' && a.credential_kind==='cookie' ? `<button class="btn btn-ghost btn-sm" style="color:var(--error);" title="重新连接" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:login-variant" width="16"></iconify-icon></button>` : ''}
+                                        ${a.ready ? `<button class="btn btn-ghost btn-sm" title="测试连接" onclick="testConnection(${a.id})"><iconify-icon icon="mdi:lan-connect" width="16"></iconify-icon></button>` : ''}
                                         <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
                                     </td>
                                 </tr>`;
@@ -443,6 +444,17 @@ function showAddComplete(accId, platform, success) {
 }
 
 async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }
+
+// 测试连接：cookie 平台实际打开浏览器校验登录态，可能需数秒
+async function testConnection(id) {
+    showToast('正在测试连接，请稍候…', 'info');
+    try {
+        const r = await apiFetch(`/api/accounts/${id}/test-connection`, { method: 'POST' });
+        const d = await r.json();
+        showToast(d.ok ? '连接正常，账号可用' : ('连接失败：' + (d.reason || '账号不可用')), d.ok ? 'success' : 'error');
+        init();
+    } catch (e) { showToast('测试失败：' + e.message, 'error'); }
+}
 
 // ==================== 凭据 Modal ====================
 let credAccountId = null;

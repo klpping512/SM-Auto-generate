@@ -156,10 +156,12 @@ async def dispatch(
     resolved_images = _resolve_uploaded_media(images)
     resolved_video = (_resolve_uploaded_media([video]) or [None])[0] if video else None
     if account is None:
-        # 自动选取当前平台第一个状态正常且凭据完整的账号。
-        account = next((a for a in db.get_accounts(platform)
-                        if a.get("status") == "active"
-                        and publish_readiness.readiness(platform, a.get("credentials"))["ready"]), None)
+        # 选取凭据完整的账号：优先 active，其次任何有有效凭据的账号。
+        # 不因 status=='expired' 直接排除——该状态可能被上次探测误标，真实有效性由发布时判断。
+        ready_accounts = [a for a in db.get_accounts(platform)
+                          if publish_readiness.readiness(platform, a.get("credentials"))["ready"]]
+        account = next((a for a in ready_accounts if a.get("status") == "active"),
+                       ready_accounts[0] if ready_accounts else None)
     result = await adapter.publish(
         platform=platform, title=title, content=content,
         tags=tags, images=resolved_images or None, video=resolved_video, account=account,

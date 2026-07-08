@@ -17,7 +17,53 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm"}
 MAX_IMAGE = 15 * 1024 * 1024
 MAX_VIDEO = 500 * 1024 * 1024
-CATEGORIES = {"warehouse", "delivery", "customs", "brand", "other"}
+CATEGORIES = {"warehouse", "delivery", "customs", "brand", "staff", "facility", "customer", "other"}
+
+# 子目录名 / 文件名关键词 → 分类映射。子目录优先于文件名。
+# 新增分类时在这里加关键词即可，无需改其他地方。
+CATEGORY_KEYWORDS = {
+    "warehouse": (
+        "海外仓", "仓库", "仓储", "warehouse", "storage", "stock", "货架", "外景",
+        # 仓库作业场景 — 这些是仓库运营的一部分，不是独立的人员素材
+        "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
+        "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描",
+    ),
+    "delivery": ("配送", "快递", "物流", "运输", "派送", "delivery", "courier", "shipping", "logistics"),
+    "customs": ("清关", "海关", "报关", "通关", "customs", "clearance"),
+    "brand": ("品牌", "商标", "brand", "logo", "标识"),
+    "staff": (
+        # 以人物为主体：肖像、团队照、办公场景、采访
+        "工作人员", "员工", "职员", "staff", "团队", "培训", "工人",
+        "办公", "开会", "会议", "面试", "访谈", "合照", "团建",
+    ),
+    "facility": ("设备", "设施", "facility", "叉车", "传送带", "机器", "流水线"),
+    "customer": ("客户", "customer", "案例", "好评", "反馈", "见证"),
+}
+
+
+def guess_category(path: Path, import_root: Path | None = None) -> str:
+    """按子目录名/文件名关键词猜测分类。子目录优先，其次文件名，未命中返回 'other'。
+
+    path: 素材文件路径。
+    import_root: 导入根目录；若提供，则只取 import_root 之下的相对路径部分参与匹配，
+                 避免绝对路径里的无关目录名误命中。
+    """
+    try:
+        rel = path.relative_to(import_root) if import_root else path
+    except ValueError:
+        rel = path
+    parts = [p.lower() for p in rel.parts]
+    # 子目录优先（去掉最后一段文件名）
+    for part in parts[:-1]:
+        for cat, keywords in CATEGORY_KEYWORDS.items():
+            if any(kw.lower() in part for kw in keywords):
+                return cat
+    # 其次文件名（不含扩展名）
+    stem = parts[-1].rsplit(".", 1)[0] if parts else ""
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw.lower() in stem for kw in keywords):
+            return cat
+    return "other"
 
 
 def capabilities() -> dict:
@@ -68,7 +114,7 @@ def _thumbnail(source: Path, target: Path, file_type: str):
     )
 
 
-def ingest_file(source: Path, static_dir: Path, category="other", origin="upload", created_by=None, move=False) -> dict:
+def ingest_file(source: Path, static_dir: Path, category="other", origin="upload", created_by=None, move=False, import_root: Path | None = None, name: str | None = None) -> dict:
     source = source.resolve()
     ext = source.suffix.lower()
     if ext not in IMAGE_EXTS | VIDEO_EXTS:
@@ -88,8 +134,20 @@ def ingest_file(source: Path, static_dir: Path, category="other", origin="upload
     digest = _sha256(source)
     existing = db.get_asset_by_hash(digest)
     if existing:
+        # 命中已停用（inactive）记录：用户重新上传曾删除的素材，重新激活它
+        # 否则前端列表过滤 active 看不到，用户会以为"已存在却看不到"
+        reactivated = existing.get("status") == "inactive"
+        if reactivated:
+            db.update_asset(existing["id"], name or source.stem, existing["category"], "active")
+            existing = db.get_asset(existing["id"])
+        existing["_dedup"] = True
+        existing["_reactivated"] = bool(reactivated)
         return existing
-    category = category if category in CATEGORIES else "other"
+    # auto: 按子目录名/文件名关键词智能分类；显式分类不在 CATEGORIES 时回落到 other
+    if category == "auto":
+        category = guess_category(source, import_root.resolve() if import_root else None)
+    else:
+        category = category if category in CATEGORIES else "other"
     stored_rel = Path("assets") / "library" / file_type / f"{uuid4().hex}{ext}"
     stored = (static_dir / stored_rel).resolve()
     static_root = static_dir.resolve()
@@ -104,7 +162,7 @@ def ingest_file(source: Path, static_dir: Path, category="other", origin="upload
     try:
         _thumbnail(stored, static_dir / thumb_rel, file_type)
         asset_id = db.create_asset({
-            "name": source.stem, "filepath": stored_rel.as_posix(), "file_type": file_type,
+            "name": name or source.stem, "filepath": stored_rel.as_posix(), "file_type": file_type,
             "category": category, **meta, "size": size, "thumbnail": thumb_rel.as_posix(),
             "sha256": digest, "source": origin, "status": "active", "created_by": created_by,
         })
@@ -112,11 +170,16 @@ def ingest_file(source: Path, static_dir: Path, category="other", origin="upload
         stored.unlink(missing_ok=True)
         (static_dir / thumb_rel).unlink(missing_ok=True)
         raise
-    return db.get_asset(asset_id)
+    asset = db.get_asset(asset_id)
+    asset["_dedup"] = False
+    asset["_reactivated"] = False
+    return asset
 
 
 def public_asset(asset: dict) -> dict:
     item = dict(asset)
+    item.pop("_dedup", None)  # 内部去重标记，不暴露给前端
+    item.pop("_reactivated", None)
     item["url"] = "/static/" + item["filepath"]
     item["thumbnail_url"] = "/static/" + item["thumbnail"] if item.get("thumbnail") else None
     item["mime"] = mimetypes.guess_type(item["filepath"])[0]

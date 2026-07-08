@@ -63,7 +63,7 @@
 <script>
 const PAGE_ID='chat';
 const platformNames={xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit'};
-const selectedPlatforms=new Set(['xiaohongshu']);
+const selectedPlatforms=new Set();
 const CHAT_SESSIONS_KEY='logiflowChatSessionsV2';
 const CURRENT_SESSION_KEY='logiflowCurrentChatSession';
 let chatSessions=[];
@@ -95,7 +95,7 @@ async function init(){
           <select id="toneSelect" class="select"><option value="professional">专业严谨</option><option value="friendly">亲切自然</option><option value="urgent">紧急通知</option></select>
           <select id="lengthSelect" class="select"><option value="short">短文案</option><option value="medium" selected>中文案</option><option value="long">长文案</option></select>
           <span class="params-divider"></span><span class="platform-label" style="font-size:11px;color:var(--text-muted);font-weight:700;">目标平台</span>
-          ${Object.entries(platformNames).map(([k,v])=>`<button class="platform-chip ${k==='xiaohongshu'?'active':''}" data-platform="${k}" onclick="togglePlatform('${k}',this)">${v}</button>`).join('')}
+          ${Object.entries(platformNames).map(([k,v])=>`<button class="platform-chip" data-platform="${k}" onclick="togglePlatform('${k}',this)">${v}</button>`).join('')}
         </div>
         <div class="chat-input-row"><textarea id="chatInput" class="input input-glow" placeholder="描述你想写什么，或先从上方选择主题…" oninput="autoResize(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea><button id="sendBtn" class="btn btn-primary btn-glow send-btn" onclick="sendMessage()" aria-label="发送"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg></button></div>
         <div class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行</div>
@@ -170,7 +170,7 @@ function deleteSession(id){
 }
 function openHistory(){renderHistoryList();document.getElementById('historyDrawer').classList.add('open');document.getElementById('historyBackdrop').classList.add('open');}
 function closeHistory(){document.getElementById('historyDrawer')?.classList.remove('open');document.getElementById('historyBackdrop')?.classList.remove('open');}
-function togglePlatform(p,btn){if(selectedPlatforms.has(p)&&selectedPlatforms.size>1){selectedPlatforms.delete(p);btn.classList.remove('active');}else{selectedPlatforms.add(p);btn.classList.add('active');}}
+function togglePlatform(p,btn){if(selectedPlatforms.has(p)){selectedPlatforms.delete(p);btn.classList.remove('active');}else{selectedPlatforms.add(p);btn.classList.add('active');}}
 function quickTopic(topic,btn){
   selectedTopic=topic;document.querySelectorAll('.quick-topic').forEach(b=>b.classList.toggle('selected',b===btn));
   const input=document.getElementById('chatInput');input.value=`请围绕「${topic}」创作一篇内容。`;
@@ -228,16 +228,21 @@ function douyinScenesMarkup(output, resultId, index) {
 }
 
 async function startDouyinRender(resultId, index) {
+  const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
+  if (statusDiv && statusDiv.dataset.rendering === '1') {
+    showToast('该内容正在渲染中，请等待完成后再操作', 'error');
+    return;
+  }
   const output = outputById(resultId, index);
   if (!output || !output.scenes?.length) {
     showToast('没有可渲染的抖音脚本', 'error');
     return;
   }
-  
+
   const voiceSelect = document.getElementById(`voice-${resultId}-${index}`);
   const voice = voiceSelect?.value || '冰糖';
-  const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
-  
+
+  if (statusDiv) statusDiv.dataset.rendering = '1';
   statusDiv.style.display = 'block';
   statusDiv.innerHTML = '<div class="render-progress"><i style="width:5%"></i></div><div class="render-status-text">正在提交渲染任务...</div>';
   
@@ -261,6 +266,7 @@ async function startDouyinRender(resultId, index) {
       throw new Error(data.detail || '提交失败');
     }
   } catch (e) {
+    if (statusDiv) statusDiv.dataset.rendering = '';
     statusDiv.innerHTML = `<div class="render-error">❌ ${escapeHtml(e.message)}</div>`;
   }
 }
@@ -278,17 +284,28 @@ function pollRenderStatus(jobId, resultId, index) {
       
       const progress = job.progress || 0;
       const stage = job.stage || '处理中';
-      
+      const isPending = job.status === 'pending';
+
       statusDiv.innerHTML = `
-        <div class="render-progress"><i style="width:${progress}%"></i></div>
-        <div class="render-status-text">${escapeHtml(stage)} ${progress}%</div>
+        <div class="render-progress"><i style="width:${isPending ? 5 : progress}%"></i></div>
+        <div class="render-status-text">${isPending ? '排队等待中（前面有任务正在渲染）…' : escapeHtml(stage) + ' ' + progress + '%'}</div>
       `;
       
       if (job.status === 'succeeded') {
         clearInterval(renderPollers[key]);
         delete renderPollers[key];
+        statusDiv.dataset.rendering = '';
         
         const videoUrl = job.rendered_video?.url || job.output_url || ('/static/' + job.output_path);
+        const renderedVideo = { type: 'video', url: videoUrl, path: job.output_path || videoUrl, filename: (job.title || 'douyin') + '.mp4' };
+
+        // 关键：把成片回写到 resultStore 的 output，sendToEditor / buildDraft 才能带上视频
+        const output = outputById(resultId, index);
+        if (output) {
+          output.rendered_video = renderedVideo;
+          output.attachments = [...(output.attachments || []).filter(a => a.type !== 'video'), renderedVideo];
+        }
+
         statusDiv.innerHTML = `
           <div class="render-success">
             ✅ 成片完成！
@@ -296,7 +313,7 @@ function pollRenderStatus(jobId, resultId, index) {
               <video src="${escapeHtml(videoUrl)}" controls style="max-width:100%;max-height:300px;border-radius:8px;margin:8px 0;"></video>
               <div>
                 <a href="${escapeHtml(videoUrl)}" download class="btn btn-secondary btn-sm">下载 MP4</a>
-                <button class="btn btn-primary btn-sm" onclick="sendDouyinToQueue('${escapeHtml(videoUrl)}', '${escapeHtml(job.title || '')}')">发布到抖音</button>
+                <button class="btn btn-primary btn-sm" onclick="sendDouyinToQueue('${resultId}', ${index})">发布到抖音</button>
               </div>
             </div>
           </div>
@@ -304,6 +321,7 @@ function pollRenderStatus(jobId, resultId, index) {
       } else if (job.status === 'failed') {
         clearInterval(renderPollers[key]);
         delete renderPollers[key];
+        statusDiv.dataset.rendering = '';
         statusDiv.innerHTML = `<div class="render-error">❌ 渲染失败：${escapeHtml(job.error || '未知错误')}</div>`;
       }
     } catch (e) {
@@ -312,20 +330,25 @@ function pollRenderStatus(jobId, resultId, index) {
   }, 2000);
 }
 
-async function sendDouyinToQueue(videoUrl, title) {
+// 抖音发布：视频 + 文案（标题/正文/话题）一起进审核队列
+async function sendDouyinToQueue(resultId, index = 0) {
+  const output = outputById(resultId, index);
+  const video = output?.rendered_video;
+  if (!video) { showToast('没有可发布的视频', 'error'); return; }
   try {
     await apiFetch('/api/queue', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        title: title || '抖音视频',
-        body: '',
+        title: output.title || '抖音视频',
+        body: output.body || '',
         platforms: ['douyin'],
-        hashtags: [],
-        attachments: [{type: 'video', url: videoUrl, path: videoUrl}]
+        hashtags: output.hashtags || [],
+        status: 'pending_review',
+        attachments: [video, ...(output.attachments || []).filter(a => a.type !== 'video')]
       })
     });
-    showToast('已添加到发布队列', 'success');
+    showToast('已添加到发布队列（视频 + 文案）', 'success');
   } catch (e) {
     showToast('添加失败：' + e.message, 'error');
   }
@@ -340,11 +363,12 @@ function addTyping(){const row=document.createElement('div');row.id='typingRow';
 
 async function sendMessage(topic=''){
   const input=document.getElementById('chatInput');const msg=input.value.trim();if(!msg)return;
+  if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}
   const chosenTopic=topic||selectedTopic;input.value='';autoResize(input);selectedTopic='';document.getElementById('selectedTopicLabel').classList.remove('show');document.getElementById('composerHint').textContent='Enter 发送 · Shift + Enter 换行';appendMessage('user',msg);chatHistory.push({role:'user',content:msg});saveSessions();addTyping();setSending(true);
   try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:'',command:null,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms),topic:chosenTopic})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}
   catch(e){document.getElementById('typingRow')?.remove();appendMessage('assistant','请求失败：'+e.message);showToast('AI 请求失败','error');}finally{setSending(false);}
 }
-async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms)})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}
+async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms)})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}
 function outputById(id,index){const result=resultStore.get(id);return result?.outputs?.[index]||result;}
 function sendToEditor(id,index=0){
   const draft=EditorTransfer.buildDraft(resultStore.get(id),index,Array.from(selectedPlatforms));if(!draft){showToast('没有可导入的内容','error');return;}

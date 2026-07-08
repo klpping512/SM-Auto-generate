@@ -26,7 +26,7 @@ const statusMap = { draft:{label:'草稿',cls:'badge-gray',border:'#9CA3AF'}, pe
 
 let items = [];
 let filterPlatform = '';
-let filterStatus = '';
+let filterStatus = new URLSearchParams(location.search).get('status') || '';
 
 async function init() {
     const resp = await apiFetch('/api/queue');
@@ -44,12 +44,15 @@ function getFiltered() {
 
 function render() {
     const filtered = getFiltered();
+    const pendingCount = items.filter(i => i.status === 'pending_review').length;
+    const canReview = ['admin', 'reviewer'].includes((getCurrentUser() || {}).role);
     document.getElementById('app').innerHTML = `
     ${renderSidebar(PAGE_ID)}
     <div class="main-content">
         <div class="page-header">
             <h1 class="page-title">发布队列</h1>
-            <div style="display:flex;gap:8px;">
+            <div style="display:flex;gap:8px;align-items:center;">
+                ${pendingCount ? `<button class="btn btn-sm" style="background:#8B5CF6;color:#fff;border-color:#8B5CF6;" onclick="filterStatus='pending_review';render();" title="仅看待审核"><iconify-icon icon="mdi:clipboard-check-outline" width="16"></iconify-icon> ${pendingCount} 待审核</button>` : ''}
                 <span style="font-size:13px;color:var(--text-muted);line-height:32px;">共 ${filtered.length} 条</span>
                 <button class="btn btn-secondary btn-sm" onclick="init()"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon> 刷新</button>
             </div>
@@ -101,7 +104,9 @@ function render() {
                             </div>
                             <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
                                 <button class="btn btn-ghost btn-sm" onclick="copyContent('${copyText}')" title="复制文案"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
-                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="publishItem(${item.id})" title="发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
+                                ${item.status==='pending_review' && canReview?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="reviewItem(${item.id},'approve')" title="通过审核"><iconify-icon icon="mdi:check-circle-outline" width="16"></iconify-icon></button><button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="openRejectModal(${item.id})" title="驳回"><iconify-icon icon="mdi:close-circle-outline" width="16"></iconify-icon></button>`:''}
+                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="publishItem(${item.id})" title="自动发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
+                                ${(item.platform==='xiaohongshu'||item.platform==='douyin') && (item.status==='queued'||item.status==='failed')?`<button class="btn btn-ghost btn-sm" style="color:#8B5CF6;" onclick="manualPublish(${item.id})" title="打开浏览器手动发布"><iconify-icon icon="mdi:open-in-new" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='failed'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'queued')" title="重试"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon></button>`:''}
                                 <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteItem(${item.id})" title="删除"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
                             </div>
@@ -110,13 +115,78 @@ function render() {
                 }).join('')}
             </div>
         </div>
+    </div>
+
+    <!-- 驳回弹窗 -->
+    <div id="rejectModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:440px;padding:24px;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:16px;">驳回内容</h3>
+            <textarea id="rejectNote" class="input" rows="4" placeholder="请填写驳回原因（必填）" style="resize:none;"></textarea>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+                <button class="btn btn-secondary btn-sm" onclick="closeRejectModal()">取消</button>
+                <button class="btn btn-error btn-sm" onclick="confirmReject()">确认驳回</button>
+            </div>
+        </div>
     </div>`;
+}
+
+// ==================== 审核（合并自审核中心）====================
+let rejectItemId = null;
+async function reviewItem(id, action, note='') {
+    try {
+        const resp = await apiFetch(`/api/review/${id}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, note}) });
+        const d = await resp.json();
+        showToast(action==='approve' ? '已通过，已加入发布队列' : '已驳回');
+        init();
+    } catch(e) { showToast(e.message || '操作失败','error'); }
+}
+function openRejectModal(id) {
+    rejectItemId = id;
+    const modal = document.getElementById('rejectModal');
+    modal.style.display = 'flex';
+    const ta = document.getElementById('rejectNote');
+    ta.value = ''; ta.focus();
+}
+function closeRejectModal() { document.getElementById('rejectModal').style.display = 'none'; rejectItemId = null; }
+function confirmReject() {
+    const note = document.getElementById('rejectNote').value.trim();
+    if (!note) { showToast('请填写驳回原因','error'); return; }
+    const id = rejectItemId;
+    closeRejectModal();
+    reviewItem(id, 'reject', note);
 }
 
 async function copyContent(text) { try{await navigator.clipboard.writeText(decodeURIComponent(text));showToast('已复制');}catch(e){showToast('复制失败','error');}}
 async function updateSchedule(id,dt) { const s=dt?dt.replace('T',' ')+':00':null; try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'queued',scheduled_at:s})});showToast('已更新');}catch(e){showToast('更新失败','error');}}
 async function updateStatus(id,status) { try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});init();}catch(e){showToast('操作失败','error');}}
 async function publishItem(id) { if(!confirm('确定发布？'))return; try{const r=await apiFetch(`/api/publish/${id}`,{method:'POST'});const d=await r.json();showToast(d.success?'发布成功':'发布失败: '+(d.error||''),d.success?'success':'error');init();}catch(e){showToast('发布失败','error');}}
+
+// 手动发布：后端弹出有头浏览器自动填好内容，停在发布页，用户核对话题后手动点「发布」
+async function manualPublish(id) {
+    showToast('正在打开浏览器并填充内容，请稍候…','info');
+    try {
+        const r = await apiFetch(`/api/publish/${id}/manual`, {method:'POST'});
+        const d = await r.json();
+        if (d.session_id) pollManual(d.session_id, 0, false);
+    } catch(e) { showToast('打开失败：'+e.message,'error'); }
+}
+function pollManual(sid, tries, notifiedReady) {
+    if (tries > 220) return;
+    setTimeout(async () => {
+        try {
+            const r = await apiFetch(`/api/publish/manual/${sid}`);
+            const s = await r.json();
+            if (s.status === 'ready' && !notifiedReady) {
+                showToast('已打开发布页并填好内容，请在弹出的浏览器里核对话题后点「发布」','info');
+                notifiedReady = true;
+            }
+            if (s.status === 'published') { showToast('发布成功'); init(); return; }
+            if (s.status === 'error') { showToast('失败：'+(s.error||'未知错误'),'error'); init(); return; }
+            if (s.status === 'closed') { showToast('浏览器已关闭（未检测到发布）','info'); return; }
+            pollManual(sid, tries + 1, notifiedReady);
+        } catch(e) { pollManual(sid, tries + 1, notifiedReady); }
+    }, 3000);
+}
 async function deleteItem(id) { if(!confirm('确定删除？'))return; try{await apiFetch(`/api/queue/${id}`,{method:'DELETE'});init();}catch(e){showToast('删除失败','error');}}
 
 init();

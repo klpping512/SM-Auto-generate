@@ -9,6 +9,75 @@ from topic_library import PLATFORM_PROMPTS
 
 logger = logging.getLogger(__name__)
 
+# 话题关键词 → 推荐素材分类，用于 AI prompt 中的素材优先级提示
+TOPIC_TO_CATEGORY_HINTS = [
+    (["海外仓", "仓库", "仓储", "warehouse", "入库", "出库", "库存", "货架", "堆场"], "warehouse"),
+    (["配送", "快递", "运输", "派送", "delivery", "courier", "物流", "干线", "末端"], "delivery"),
+    (["清关", "海关", "报关", "customs", "税务", "退税", "关税"], "customs"),
+    (["品牌", "logo", "brand", "商标", "VI", "视觉"], "brand"),
+    (["设备", "叉车", "传送带", "流水线", "机器", "facility", "设施"], "facility"),
+    (["客户", "案例", "好评", "customer", "见证", "买家", "卖家"], "customer"),
+    (["员工", "团队", "培训", "办公", "staff", "人物", "会议"], "staff"),
+]
+
+
+def _get_category_priority_hint(topic: str, category: str, assets: list[dict]) -> str:
+    """根据话题关键词，生成素材分类优先级提示，注入到 AI prompt 中。"""
+    topic_text = f"{topic} {category}".lower()
+    recommended_categories = []
+    for keywords, cat in TOPIC_TO_CATEGORY_HINTS:
+        if any(kw.lower() in topic_text for kw in keywords):
+            if cat not in recommended_categories:
+                recommended_categories.append(cat)
+
+    if not recommended_categories:
+        return ""
+
+    # 统计各分类素材数量
+    cat_counts = {}
+    for a in assets:
+        c = a.get("category", "other")
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+
+    lines = [
+        "\n【素材分类优先级指南】",
+        f"根据话题「{topic}」，推荐优先使用以下分类的素材：",
+    ]
+    for i, rc in enumerate(recommended_categories[:3], 1):
+        count = cat_counts.get(rc, 0)
+        cat_names = {
+            "warehouse": "仓库/仓储",
+            "delivery": "配送/运输",
+            "customs": "清关/税务",
+            "brand": "品牌/标识",
+            "staff": "员工/团队",
+            "facility": "设备/设施",
+            "customer": "客户/案例",
+        }
+        cn = cat_names.get(rc, rc)
+        lines.append(f"  {i}. {rc}（{cn}）- {count} 个可用素材")
+
+    lines.append("请优先从推荐分类中选择 asset_id，只有推荐分类素材不足时才考虑其他分类。")
+    return "\n".join(lines)
+
+
+def _format_asset_catalog(assets: list[dict]) -> str:
+    """将素材列表按分类分组格式化，方便 AI 快速扫描选择 asset_id。"""
+    cat_names = {
+        "warehouse": "仓库/仓储", "delivery": "配送/运输", "customs": "清关/税务",
+        "brand": "品牌/标识", "staff": "员工/团队", "facility": "设备/设施",
+        "customer": "客户/案例", "other": "其他",
+    }
+    groups: dict[str, list[str]] = {}
+    for a in assets:
+        cat = a.get("category", "other")
+        groups.setdefault(cat, []).append(f"id={a['id']} {a['name']}")
+    lines = ["可用素材目录（scene.asset_id 只能填以下 id，每个场景选不同素材）："]
+    for cat in ["warehouse", "delivery", "customs", "facility", "brand", "customer", "staff", "other"]:
+        if cat in groups:
+            lines.append(f"[{cat}/{cat_names.get(cat, cat)}] " + " | ".join(groups[cat]))
+    return "\n".join(lines)
+
 # MiMo API config
 MIMO_API_KEY = ""
 MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
@@ -56,7 +125,7 @@ async def generate_content(
 points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建议或互动引导。
 """
         elif platform == Platform.DOUYIN:
-            asset_catalog = [{"id": a["id"], "name": a["name"], "type": a["file_type"], "category": a["category"]} for a in (assets or [])]
+            category_hint = _get_category_priority_hint(topic, category, assets or [])
             asset_instruction = """
 【重要规则】必须生成 4-6 个 scenes，总时长约 30 秒。
 每个场景必须包含：scene、duration（整数秒）、visual、voiceover、text_overlay、asset_id。
@@ -64,10 +133,9 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
 【强制要求】
 - 前 4 个场景的 asset_id 必须从下方素材目录中选择，不能为 null
 - 最后 1 个场景可以是品牌信息卡（asset_id=null）
-- 每个场景选择最匹配画面描述的素材
-
-可用素材（必须从中选择）：
-""" + json.dumps(asset_catalog, ensure_ascii=False)
+- 每个场景选择最匹配画面描述的素材，同一素材不能重复使用
+- visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言
+""" + category_hint + "\n" + _format_asset_catalog(assets or [])
         user_prompt = f"""请为以下物流主题生成{platform.value}平台的内容：
 
 主题：{topic}
@@ -82,7 +150,7 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
 【最终要求】请严格按照以下JSON格式返回，不要有任何其他文字：
 {{
   "title": "标题",
-  "body": "正文内容",
+  "body": "正文内容（抖音的 body 是面向观众的发布文案，不要写【画面】【口播】脚本标记；分镜写进 scenes）",
   "hashtags": ["标签1", "标签2", "标签3"],
   "image_pages": [{{"type": "cover", "headline": "封面标题", "subheadline": "封面副标题", "points": []}}],
   "scenes": [{{"scene": 1, "duration": 5, "visual": "画面", "voiceover": "口播", "text_overlay": "字幕", "asset_id": 1}}],
@@ -195,8 +263,8 @@ def _unsupported_claim_warnings(body: str, source_text: str) -> list[str]:
 
 
 def _platform_format_warnings(platform: str, body: str) -> list[str]:
-    if platform == "douyin" and not ("【画面】" in body and "【口播】" in body):
-        return ["抖音稿缺少【画面】和【口播】脚本格式"]
+    if platform == "douyin" and ("【画面】" in body or "【口播】" in body):
+        return ["抖音发布文案不应包含【画面】【口播】脚本标记，请改写为面向观众的种草文案（分镜写进 scenes）"]
     if platform == "twitter" and len(body) > 280:
         return ["Twitter/X 正文超过 280 字符"]
     return []
@@ -250,8 +318,9 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
         Platform.DOUYIN: GeneratedContent(
             platform=platform,
             title=f"{topic}｜60秒物流提醒",
-            body=f"【画面】港口与货运现场快切\n【口播】做南非物流的注意了！{topic}正在影响时效。"
-                 f"建议马上确认船期、预留缓冲时间，并提前同步客户。关注我们，获取最新物流预警。",
+            body=f"做南非市场的朋友注意了！{topic}正在悄悄影响你的货运时效。"
+                 f"想让库存转得快、清关不卡壳，建议马上做三件事：确认最新船期、预留缓冲时间、提前同步客户。"
+                 f"头程、清关、仓储、末端派送，一个靠谱的海外仓帮你全链路搞定。关注我们，获取真实可执行的南非物流建议～",
             hashtags=["南非物流", "跨境电商", "物流避坑"],
             duration_target=30,
             scenes=[
@@ -387,8 +456,8 @@ async def _chat_one_platform(
         + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
         + f"\n平台硬性格式：{config['format']}"
         + ("\n小红书还必须返回 image_pages 数组，共 5-7 页。每项格式为 {\"type\":\"cover或content\",\"headline\":\"不超过18字\",\"subheadline\":\"可选副标题\",\"points\":[\"2-4条具体短句，每条说明一个真实问题或行动\"]}。第一页是有冲击力的封面，内页信息具体，最后一页是建议或互动引导，避免空泛口号。" if platform == "xiaohongshu" else "")
-        + ("\n抖音必须返回 4-6 个 scenes，总时长约30秒；每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id=null。" if platform == "douyin" else "")
-        + (("\n可用素材目录（只能引用这些 id）：" + json.dumps([{"id": a["id"], "name": a["name"], "type": a["file_type"], "category": a["category"]} for a in (assets or [])], ensure_ascii=False)) if platform == "douyin" else "")
+        + ("\n抖音的 body 是面向观众的发布文案（种草文字，不要写【画面】【口播】标记）；分镜必须返回 4-6 个 scenes，总时长约30秒，每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id。**每个场景的 asset_id 必须从素材目录中选择一个真实 ID**，同一视频不能重复引用同一素材，最后1个场景可以是品牌信息卡（asset_id=null）。visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言。" if platform == "douyin" else "")
+        + (("\n" + _get_category_priority_hint(topic or messages[-1]["content"][:40] if messages else "", "douyin", assets or []) + "\n" + _format_asset_catalog(assets or [])) if platform == "douyin" else "")
         + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"],\"image_pages\":[],\"scenes\":[],\"music_suggestion\":\"\"}，不要输出 Markdown 代码块或解释。"
     )
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + "\n" + config["system"] + parameter_prompt}] + messages

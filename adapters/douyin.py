@@ -57,3 +57,35 @@ class DouyinAdapter(RpaAdapter):
         except Exception as e:
             logger.exception("抖音发布异常")
             return PublishResult(success=False, platform=self.name, error=str(e))
+
+    async def fill_publish_form(self, page, *, title, content, tags=None, images=None, video=None):
+        """打开抖音创作平台上传页，自动填好文案和话题标签，但**不点发布**，供人工复核后手动发布。"""
+        await page.goto(self.publish_url, timeout=30000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
+        # 检查登录态
+        if "login" in (page.url or "").lower():
+            raise RuntimeError("cookie/登录失效，请到「账号管理」重新扫码登录抖音")
+        # 等待上传入口就绪
+        try:
+            await page.wait_for_selector(self.UPLOAD_INPUT, state="attached", timeout=20000)
+        except Exception:
+            if "login" in (page.url or "").lower():
+                raise RuntimeError("cookie/登录失效，请重新扫码登录抖音")
+            raise RuntimeError("发布页未就绪（未找到上传入口）")
+        # 上传视频（如果有）
+        media = [video] if video else (images or [])
+        if media:
+            await page.set_input_files(self.UPLOAD_INPUT, media, timeout=60000)
+            await page.wait_for_timeout(5000)  # 等视频处理
+        # 填写文案：标题 + 正文 + 话题标签
+        caption = f"{title} {content}".strip() if title else content
+        if tags:
+            caption += " " + " ".join(f"#{t}" for t in tags)
+        try:
+            await page.wait_for_selector(self.CONTENT_INPUT, timeout=15000)
+            await page.fill(self.CONTENT_INPUT, caption, timeout=15000)
+        except Exception:
+            # 抖音的输入框可能是 contenteditable div，尝试 click + type
+            editor = page.locator(self.CONTENT_INPUT).first
+            await editor.click()
+            await editor.type(caption, delay=3)

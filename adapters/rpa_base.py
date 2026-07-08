@@ -35,11 +35,13 @@ def playwright_proxy_from_env(environ: dict | None = None) -> dict | None:
     return proxy
 
 
-def browser_launch_options(*, headless: bool) -> dict:
+def browser_launch_options(*, headless: bool, use_proxy: bool = True) -> dict:
     options = {"headless": headless}
-    proxy = playwright_proxy_from_env()
-    if proxy:
-        options["proxy"] = proxy
+    # 国内站点（小红书/抖音）必须直连；若走 Clash 等国外代理会被掐断（ERR_CONNECTION_CLOSED）。
+    if use_proxy:
+        proxy = playwright_proxy_from_env()
+        if proxy:
+            options["proxy"] = proxy
     return options
 
 
@@ -60,12 +62,13 @@ class RpaAdapter(PublishAdapter):
     name = ""
     login_url = ""
     headless = True
+    use_proxy = False  # RPA 目标多为国内站，默认直连；如需代理的平台可在子类置 True
 
     def _logged_in_selector(self) -> str:
         raise NotImplementedError
 
     async def _new_context(self, playwright, account: dict | None):
-        browser = await playwright.chromium.launch(**browser_launch_options(headless=self.headless))
+        browser = await playwright.chromium.launch(**browser_launch_options(headless=self.headless, use_proxy=self.use_proxy))
         context = await browser.new_context()
         cookies = parse_cookies((account or {}).get("credentials"))
         if cookies:
@@ -79,8 +82,17 @@ class RpaAdapter(PublishAdapter):
                 browser, context = await self._new_context(p, account)
                 try:
                     page = await context.new_page()
-                    await page.goto(self.login_url, timeout=30000)
-                    return await page.query_selector(self._logged_in_selector()) is not None
+                    # 目标站点多为 SPA：goto 后会有客户端重定向/异步渲染，
+                    # 必须 wait_for_selector 等登录态标记出现，不能用 query_selector 立即判断。
+                    await page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_selector(self._logged_in_selector(), timeout=20000)
+                        return True
+                    except Exception:
+                        # 兜底：登录态下访问 /login 通常会被重定向离开登录页；
+                        # 若最终 URL 不再停留在登录页，视为已登录（应对 SPA 文案/结构变化）。
+                        await page.wait_for_timeout(1500)
+                        return "login" not in (page.url or "").lower()
                 finally:
                     await browser.close()
         except Exception as e:

@@ -79,7 +79,6 @@ const NAV_ITEMS = [
     { id: 'knowledge', label: '企业知识库', href: '/knowledge.html' },
     { id: 'templates', label: 'Prompt 模板', href: '/templates.html' },
     { section: '运营' },
-    { id: 'review', label: '审核中心', href: '/review.html' },
     { id: 'accounts', label: '账号管理', href: '/accounts.html' },
     { section: '设置' },
     { id: 'config', label: '平台配置', href: '/config.html' },

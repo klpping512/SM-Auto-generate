@@ -24,9 +24,10 @@ def test_unsupported_claim_detection_catches_vague_metrics_and_fake_attribution(
     assert "输入中未提供来源的报告或官方数据归因" in warnings
 
 
-def test_platform_format_detection_requires_douyin_script_markers():
-    assert ai_engine._platform_format_warnings("douyin", "普通通用文案")
-    assert ai_engine._platform_format_warnings("douyin", "【画面】港口\n【口播】注意拥堵") == []
+def test_platform_format_detection_flags_script_markers_in_douyin_caption():
+    # 抖音 body 现在是发布文案：正常种草文案不该报警，含脚本标记才报警
+    assert ai_engine._platform_format_warnings("douyin", "普通种草文案，关注我们获取物流干货") == []
+    assert ai_engine._platform_format_warnings("douyin", "【画面】港口\n【口播】注意拥堵")
 
 
 def test_douyin_scene_normalization_falls_back_to_publishable_timeline():
@@ -69,8 +70,10 @@ async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatc
 
     assert list(by_platform) == ["xiaohongshu", "douyin", "twitter", "facebook"]
     assert len({item["body"] for item in outputs}) == 4
-    assert "【画面】" in by_platform["douyin"]["body"]
-    assert "【口播】" in by_platform["douyin"]["body"]
+    # 抖音 body 是发布文案，不含脚本标记；分镜脚本在 scenes 里
+    assert "【画面】" not in by_platform["douyin"]["body"]
+    assert "【口播】" not in by_platform["douyin"]["body"]
+    assert by_platform["douyin"]["scenes"]
     assert "Breaking" in by_platform["twitter"]["body"]
     assert "Attention" in by_platform["facebook"]["body"]
     assert "最近很多" in by_platform["xiaohongshu"]["body"]

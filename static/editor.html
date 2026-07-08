@@ -63,12 +63,141 @@
     .workspace-grid { grid-template-columns: 1fr; overflow: visible; }
     .col-knowledge, .col-editor, .col-preview { min-height: 360px; }
 }
+
+/* 历史记录弹窗样式 */
+.history-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.history-modal[hidden] { display: none; }
+.history-panel {
+    background: white;
+    border-radius: 16px;
+    width: 90%;
+    max-width: 700px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.history-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.history-header h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.history-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+}
+.history-item {
+    padding: 12px 16px;
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.history-item:hover {
+    background: var(--bg-secondary);
+    border-color: var(--primary);
+}
+.history-item .history-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.history-item .history-source {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 6px;
+}
+.history-item .history-source.ai { background: #EDE9FE; color: #7C3AED; }
+.history-item .history-source.manual { background: #DBEAFE; color: #2563EB; }
+.history-item .history-source.import { background: #FEF3C7; color: #D97706; }
+.history-item .history-preview {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.history-item .history-platforms {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+}
+.history-item .history-platform-tag {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+}
+.history-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+}
+.history-empty iconify-icon {
+    font-size: 48px;
+    margin-bottom: 12px;
+    display: block;
+}
+.history-footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-light);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+}
 </style>
 </head>
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
 <div id="xhsLightbox" class="lightbox" hidden aria-modal="true" role="dialog"><button class="lightbox-close" aria-label="关闭">×</button><button class="lightbox-prev" aria-label="上一张">‹</button><img alt="小红书大图预览"/><button class="lightbox-next" aria-label="下一张">›</button><span class="lightbox-count"></span></div>
+
+<!-- 历史记录弹窗 -->
+<div id="historyModal" class="history-modal" hidden>
+    <div class="history-panel">
+        <div class="history-header">
+            <h3><iconify-icon icon="mdi:history" style="color:var(--primary);"></iconify-icon> 历史记录</h3>
+            <button class="btn btn-ghost btn-sm" onclick="closeHistoryModal()">
+                <iconify-icon icon="mdi:close" width="18"></iconify-icon>
+            </button>
+        </div>
+        <div id="historyList" class="history-list"></div>
+        <div class="history-footer">
+            <span>最多保存 20 条历史记录</span>
+            <button class="btn btn-secondary btn-sm" onclick="clearAllHistory()">
+                <iconify-icon icon="mdi:delete-outline" width="14"></iconify-icon> 清空历史
+            </button>
+        </div>
+    </div>
+</div>
+
 <script src="/static/common.js?v=5"></script>
 <script src="/static/editor-transfer.js?v=2"></script>
 <script>
@@ -107,7 +236,9 @@ async function init() {
     <div class="main-content">
         <div class="page-header">
             <div><div style="font-size:9px;color:var(--primary);font-weight:900;letter-spacing:1.8px;margin-bottom:3px;">CONTENT PRODUCTION</div><h1 class="page-title">内容编辑器</h1></div>
-            <div style="display:flex;gap:8px;">
+            <div style="display:flex;gap:8px;align-items:center;">
+                <span id="saveStatus" style="font-size:11px;color:var(--text-muted);display:inline-flex;align-items:center;gap:3px;"></span>
+                <button class="btn btn-secondary btn-sm" onclick="openHistoryModal()"><iconify-icon icon="mdi:history" width="16"></iconify-icon> 历史记录</button>
                 <button class="btn btn-secondary btn-sm" onclick="saveDraft()"><iconify-icon icon="mdi:content-save" width="16"></iconify-icon> 保存草稿</button>
                 <button class="btn btn-primary btn-sm" onclick="submitToQueue()"><iconify-icon icon="mdi:send" width="16"></iconify-icon> 提交发布</button>
             </div>
@@ -229,12 +360,185 @@ async function init() {
     // 加载本地草稿
     const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
     loadDraft();
+    // 没有从 AI 对话导入内容时，尝试恢复上次编辑的自动保存草稿
+    if (!Object.keys(generatedContents).length) {
+        try {
+            const autoSaved = JSON.parse(localStorage.getItem('editorAutoSave') || 'null');
+            if (autoSaved && Array.isArray(autoSaved.contents) && autoSaved.contents.length) {
+                const normalized = EditorTransfer.normalizeDraft(autoSaved, Object.keys(platformInfo), currentPreview);
+                if (normalized.valid) {
+                    normalized.contents.forEach(item => { generatedContents[item.platform] = item; });
+                    currentPreview = normalized.activePlatform;
+                    refreshPreviewTabs();
+                    loadPlatformToEditor(currentPreview);
+                    renderPreview(currentPreview);
+                    showToast('已恢复上次编辑内容', 'info');
+                }
+            }
+        } catch (e) { /* 忽略解析错误 */ }
+    }
     if (selectedAssets.length) {
         const d = generatedContents.douyin || {platform:'douyin',title:'抖音视频',body:'请编辑抖音脚本',hashtags:[],scenes:[]};
         d.selected_asset_ids = Array.from(new Set([...(d.selected_asset_ids||[]), ...selectedAssets])); generatedContents.douyin=d;
         localStorage.removeItem('selectedMediaAssets');
     }
 }
+
+// ==================== 历史记录功能 ====================
+
+const HISTORY_STORAGE_KEY = 'editorHistory';
+const HISTORY_MAX_COUNT = 20;
+
+// 获取历史记录列表
+function getHistoryList() {
+    try {
+        const list = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
+        return Array.isArray(list) ? list : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+// 保存历史记录
+function saveToHistory(source = 'manual') {
+    const contents = Object.values(generatedContents).filter(c => c && (c.title || c.body));
+    if (!contents.length) return;
+
+    const historyItem = {
+        id: Date.now().toString(),
+        timestamp: Date.now(),
+        source: source, // 'ai_generate' | 'manual_save' | 'import'
+        activePlatform: currentPreview,
+        contents: contents.map(c => ({
+            platform: c.platform,
+            title: c.title || '',
+            body: c.body || '',
+            hashtags: Array.isArray(c.hashtags) ? c.hashtags : [],
+            image_pages: Array.isArray(c.image_pages) ? c.image_pages : [],
+            attachments: Array.isArray(c.attachments) ? c.attachments : [],
+            scenes: Array.isArray(c.scenes) ? c.scenes : [],
+            voice: c.voice || null,
+            rendered_video: c.rendered_video || null,
+        }))
+    };
+
+    let history = getHistoryList();
+    // 避免连续重复保存相同内容（5秒内）
+    if (history.length > 0) {
+        const last = history[0];
+        if (last.timestamp > Date.now() - 5000 && JSON.stringify(last.contents) === JSON.stringify(historyItem.contents)) {
+            return;
+        }
+    }
+
+    history.unshift(historyItem);
+
+    // 限制最大数量
+    if (history.length > HISTORY_MAX_COUNT) {
+        history = history.slice(0, HISTORY_MAX_COUNT);
+    }
+
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+}
+
+// 渲染历史记录列表
+function renderHistoryList() {
+    const container = document.getElementById('historyList');
+    if (!container) return;
+
+    const history = getHistoryList();
+
+    if (!history.length) {
+        container.innerHTML = `
+            <div class="history-empty">
+                <iconify-icon icon="mdi:history" style="color:var(--text-muted);"></iconify-icon>
+                <p>暂无历史记录</p>
+                <p style="font-size:11px;margin-top:4px;">AI 生成或手动保存时会自动记录</p>
+            </div>`;
+        return;
+    }
+
+    const sourceLabels = {
+        ai_generate: { text: 'AI 生成', class: 'ai' },
+        manual_save: { text: '手动保存', class: 'manual' },
+        import: { text: 'AI 对话导入', class: 'import' }
+    };
+
+    container.innerHTML = history.map(item => {
+        const date = new Date(item.timestamp);
+        const timeStr = `${date.getMonth()+1}/${date.getDate()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
+        const sourceInfo = sourceLabels[item.source] || { text: '保存', class: 'manual' };
+        const firstContent = item.contents[0] || {};
+        const previewText = firstContent.body || firstContent.title || '无内容';
+        const platforms = item.contents.map(c => platformInfo[c.platform]?.name || c.platform);
+
+        return `
+        <div class="history-item" onclick="restoreFromHistory('${item.id}')">
+            <div class="history-time">
+                <iconify-icon icon="mdi:clock-outline" width="12"></iconify-icon> ${timeStr}
+            </div>
+            <span class="history-source ${sourceInfo.class}">${sourceInfo.text}</span>
+            <div class="history-preview">${escapeHtml(previewText)}</div>
+            <div class="history-platforms">
+                ${platforms.map(p => `<span class="history-platform-tag">${p}</span>`).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// 打开历史记录弹窗
+function openHistoryModal() {
+    renderHistoryList();
+    document.getElementById('historyModal').hidden = false;
+}
+
+// 关闭历史记录弹窗
+function closeHistoryModal() {
+    document.getElementById('historyModal').hidden = true;
+}
+
+// 从历史记录恢复
+function restoreFromHistory(historyId) {
+    const history = getHistoryList();
+    const item = history.find(h => h.id === historyId);
+    if (!item) {
+        showToast('历史记录不存在', 'error');
+        return;
+    }
+
+    // 确认恢复
+    if (!confirm('恢复此历史记录将覆盖当前内容，确定继续？')) {
+        return;
+    }
+
+    // 恢复内容
+    generatedContents = {};
+    item.contents.forEach(c => {
+        generatedContents[c.platform] = c;
+    });
+    currentPreview = item.activePlatform || 'xiaohongshu';
+
+    // 更新 UI
+    loadPlatformToEditor(currentPreview);
+    renderPreview(currentPreview);
+    refreshPreviewTabs();
+    autoSaveDraft();
+
+    closeHistoryModal();
+    showToast('已恢复历史记录', 'success');
+}
+
+// 清空所有历史记录
+function clearAllHistory() {
+    if (!confirm('确定清空所有历史记录？此操作不可撤销。')) {
+        return;
+    }
+    localStorage.removeItem(HISTORY_STORAGE_KEY);
+    renderHistoryList();
+    showToast('历史记录已清空', 'info');
+}
+
+// ==================== 原有功能 ====================
 
 // 渲染"引用企业知识库"勾选 chips
 function renderKbRefs() {
@@ -289,6 +593,24 @@ function syncEditorToContent() {
     const existing = generatedContents[currentPreview] || {};
     generatedContents[currentPreview] = { ...existing, platform: currentPreview, title, body, hashtags };
     renderPreview(currentPreview);
+    autoSaveDraft();   // 自动保存到 localStorage，防页面跳转丢失
+}
+
+// 自动保存草稿（防抖 500ms，避免频繁写入）
+let _autoSaveTimer = null;
+function autoSaveDraft() {
+    clearTimeout(_autoSaveTimer);
+    const status = document.getElementById('saveStatus');
+    if (status) status.innerHTML = '<iconify-icon icon="mdi:loading" class="spin" width="12"></iconify-icon> 保存中…';
+    _autoSaveTimer = setTimeout(() => {
+        const contents = Object.values(generatedContents).filter(c => c && (c.title || c.body));
+        if (contents.length) {
+            localStorage.setItem('editorAutoSave', JSON.stringify({
+                version: 2, source: 'editor', activePlatform: currentPreview, contents,
+            }));
+        }
+        if (status) status.innerHTML = '<iconify-icon icon="mdi:check-circle" width="12" style="color:#22c55e;"></iconify-icon> 已自动保存';
+    }, 500);
 }
 
 // 知识库过滤：按关键词显示/隐藏分类与主题
@@ -336,6 +658,9 @@ function loadDraft() {
     }
     if (draft.source === 'chat' && normalized.valid) {
         localStorage.removeItem('draft');
+        autoSaveDraft();   // 导入内容同步进自动保存，防再次跳转丢失
+        // 保存到历史记录
+        saveToHistory('import');
         showToast('已从 AI 对话导入内容', 'info');
     } else if (draft.source === 'chat') {
         showToast('AI 内容导入失败，草稿已保留，可刷新后重试', 'error');
@@ -515,8 +840,20 @@ function renderPreview(platform) {
             <div style="font-size:11px;line-height:1.5;color:var(--text-muted);background:var(--bg-secondary);border-radius:8px;padding:8px 10px;">这些图片会自动随小红书内容进入审核队列，无需再次上传。</div>
         </div>` : '';
     const douyinScript = platform === 'douyin' ? renderDouyinScript(c) : '';
+    // 抖音成片预览：视频播放器 + 下载/一键发布，独立显示在预览区顶部
+    const douyinVideo = platform === 'douyin' && c.rendered_video
+        ? `<div style="margin-bottom:16px;">
+            <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:8px;display:flex;align-items:center;gap:6px;"><iconify-icon icon="mdi:video" style="color:var(--primary);"></iconify-icon> 成片预览</div>
+            <video src="${escapeHtml(c.rendered_video.url)}" controls style="width:100%;max-height:480px;border-radius:12px;background:#000;"></video>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <a href="${escapeHtml(c.rendered_video.url)}" download class="btn btn-secondary btn-sm"><iconify-icon icon="mdi:download" width="14"></iconify-icon> 下载 MP4</a>
+                <button class="btn btn-primary btn-sm" onclick="publishDouyinVideo()"><iconify-icon icon="mdi:send" width="14"></iconify-icon> 发布到抖音</button>
+            </div>
+           </div>`
+        : '';
     area.innerHTML=`<div class="fade-in">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;"><iconify-icon icon="${p.icon}" style="color:${p.color};font-size:20px;"></iconify-icon><span style="font-size:13px;font-weight:700;">${p.name} 预览</span></div>
+        ${douyinVideo}
         ${carousel}
         ${douyinScript}
         <div class="preview-card ${isDark?'dark':''}" style="padding:20px;">
@@ -545,8 +882,8 @@ function renderDouyinScript(content) {
 }
 
 function updateScene(index,key,value){const c=generatedContents.douyin;if(!c?.scenes?.[index])return;c.scenes[index][key]=value;}
-async function startDouyinRender(){const c=generatedContents.douyin;const voice=document.getElementById('douyinVoice').value;if(!voice){showToast('请选择 MiMo 音色','error');return;}c.voice=voice;try{const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){showToast(e.message,'error');}}
-async function pollRender(id){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/douyin/render/${id}`);const job=await r.json();const box=document.getElementById('renderStatus');if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${escapeHtml(job.stage)} · ${job.progress}%</div><div class="render-progress"><i style="width:${job.progress}%"></i></div>${job.error?`<div style="color:#fca5a5;font-size:10px;">${escapeHtml(job.error)}</div>`:''}`;if(job.status==='succeeded'){clearInterval(renderPoller);generatedContents.douyin.rendered_video=job.rendered_video;generatedContents.douyin.attachments=[...(generatedContents.douyin.attachments||[]).filter(a=>a.type!=='video'),job.rendered_video];renderPreview('douyin');showToast('MP4 渲染完成');}else if(job.status==='failed'){clearInterval(renderPoller);showToast('视频渲染失败','error');}}catch(e){clearInterval(renderPoller);}};await tick();renderPoller=setInterval(tick,2000);}
+let renderingDouyin=false;async function startDouyinRender(){if(renderingDouyin){showToast('正在渲染中，请等待完成','error');return;}const c=generatedContents.douyin;const voice=document.getElementById('douyinVoice').value;if(!voice){showToast('请选择 MiMo 音色','error');return;}c.voice=voice;renderingDouyin=true;try{const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){renderingDouyin=false;showToast(e.message,'error');}}
+async function pollRender(id){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/douyin/render/${id}`);const job=await r.json();const box=document.getElementById('renderStatus');const pending=job.status==='pending';if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${pending?'排队等待中（前面有任务正在渲染）…':escapeHtml(job.stage)+' · '+job.progress+'%'}</div><div class="render-progress"><i style="width:${pending?5:job.progress}%"></i></div>${job.error?`<div style="color:#fca5a5;font-size:10px;">${escapeHtml(job.error)}</div>`:''}`;if(job.status==='succeeded'){clearInterval(renderPoller);renderingDouyin=false;generatedContents.douyin.rendered_video=job.rendered_video;generatedContents.douyin.attachments=[...(generatedContents.douyin.attachments||[]).filter(a=>a.type!=='video'),job.rendered_video];renderPreview('douyin');showToast('MP4 渲染完成');}else if(job.status==='failed'){clearInterval(renderPoller);renderingDouyin=false;showToast('视频渲染失败','error');}}catch(e){clearInterval(renderPoller);}};await tick();renderPoller=setInterval(tick,2000);}
 
 function bindXhsImages(items){lightboxImages=items.map(a=>a.url);document.querySelectorAll('[data-xhs-index]').forEach(img=>img.addEventListener('click',()=>openXhsLightbox(Number(img.dataset.xhsIndex))));}
 function openXhsLightbox(index){lightboxIndex=index;updateLightbox();document.getElementById('xhsLightbox').hidden=false;document.body.style.overflow='hidden';}
@@ -677,6 +1014,9 @@ async function generateContent() {
         // 同步 Tab 高亮到 currentPreview
         refreshPreviewTabs();
         // 区分 AI / 模板模式
+        autoSaveDraft();   // 生成成功立即自动保存
+        // 保存到历史记录
+        saveToHistory('ai_generate');
         if (data.source === 'fallback') {
             showToast('⚠️ 未配置 AI，使用模板生成。请在「设置」配置 MiMo API Key', 'info');
         } else {
@@ -766,13 +1106,41 @@ async function submitToQueue() {
     }
 }
 
-function saveDraft() { syncEditorToContent();localStorage.setItem('draft',JSON.stringify({version:2,source:'editor',activePlatform:currentPreview,contents:Object.values(generatedContents),title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value})); showToast('草稿已保存'); }
+// 抖音一键发布：视频 + 文案一起进审核队列
+async function publishDouyinVideo() {
+    syncEditorToContent();
+    const c = generatedContents.douyin;
+    if (!c?.rendered_video) { showToast('没有可发布的视频', 'error'); return; }
+    try {
+        await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                title: c.title, body: c.body, platforms: ['douyin'],
+                hashtags: c.hashtags || [], status: 'pending_review',
+                attachments: [c.rendered_video, ...(c.attachments || []).filter(a => a.type !== 'video')],
+            }) });
+        showToast('已提交抖音发布队列（视频 + 文案）');
+    } catch (e) { showToast('提交失败：' + e.message, 'error'); }
+}
+
+function saveDraft() { 
+    syncEditorToContent();
+    localStorage.setItem('draft',JSON.stringify({version:2,source:'editor',activePlatform:currentPreview,contents:Object.values(generatedContents),title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value}));
+    // 同时保存到历史记录
+    saveToHistory('manual_save');
+    showToast('草稿已保存'); 
+}
 
 document.getElementById('xhsLightbox').addEventListener('click',e=>{if(e.target.id==='xhsLightbox')closeXhsLightbox();});
 document.querySelector('.lightbox-close').addEventListener('click',closeXhsLightbox);
 document.querySelector('.lightbox-prev').addEventListener('click',()=>{lightboxIndex=(lightboxIndex-1+lightboxImages.length)%lightboxImages.length;updateLightbox();});
 document.querySelector('.lightbox-next').addEventListener('click',()=>{lightboxIndex=(lightboxIndex+1)%lightboxImages.length;updateLightbox();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeXhsLightbox();});
+
+// 关闭历史记录弹窗（点击背景）
+document.getElementById('historyModal').addEventListener('click', e => {
+    if (e.target.id === 'historyModal') closeHistoryModal();
+});
+
 init();
 </script>
 </body>

@@ -38,9 +38,15 @@ from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
 load_dotenv(Path(__file__).with_name(".env"))
 
 # ==================== Logging ====================
+_LOG_DIR = Path(__file__).with_name("logs")
+_LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_LOG_DIR / "app.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,8 @@ async def lifespan(app: FastAPI):
     if key:
         ai_engine.set_api_key(key)
         logger.info("MiMo API key 已加载")
+    # 清理卡住的渲染任务（启动时自动清理超时任务）
+    video_renderer.cleanup_stale_jobs()
     # 启动定时调度器
     sched.start_scheduler()
     logger.info("SA-LogiFlow v3.0 启动完成 | 数据库: %s", db.DB_PATH)
@@ -79,6 +87,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # 扫码登录会话仅用于本机单进程部署；前端据此获得明确的成功/超时/错误状态。
 scan_login_sessions: dict[str, dict] = {}
+# 手动发布会话：有头浏览器自动填好内容停在发布页，等用户人工点「发布」。
+manual_publish_sessions: dict[str, dict] = {}
+# 手动发布会话：弹有头浏览器自动填好内容、停在发布页，等用户人工点「发布」。
+manual_publish_sessions: dict[str, dict] = {}
 video_render_semaphore = asyncio.Semaphore(1)
 
 
@@ -352,7 +364,7 @@ async def _run_scan_login(account: dict, session_id: str):
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            browser = await p.chromium.launch(**browser_launch_options(headless=False))
+            browser = await p.chromium.launch(**browser_launch_options(headless=False, use_proxy=getattr(adapter, "use_proxy", False)))
             try:
                 context = await browser.new_context()
                 page = await context.new_page()
@@ -410,6 +422,32 @@ async def scan_login_status(account_id: int, session_id: str, user=Depends(requi
     if not session or session.get("account_id") != account_id:
         raise HTTPException(404, "扫码登录会话不存在")
     return {"status": session["status"], "error": session.get("error")}
+
+
+@app.post("/api/accounts/{account_id}/test-connection")
+async def test_account_connection(account_id: int, user=Depends(require_role(UserRole.ADMIN))):
+    """测试账号可用性：cookie 平台实际打开浏览器校验登录态；token 平台校验字段完整。"""
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter
+    accounts = [a for a in db.get_accounts() if a["id"] == account_id]
+    if not accounts:
+        raise HTTPException(404, "Account not found")
+    acc = accounts[0]
+    r = publish_readiness.readiness(acc["platform"], acc.get("credentials"))
+    if not r["ready"]:
+        db.update_account_status(account_id, "expired")
+        return {"ok": False, "reason": "缺少凭据，请先连接/填写凭据", "missing": r["missing"]}
+    adapter = get_adapter(acc["platform"])
+    if isinstance(adapter, RpaAdapter):
+        ok = await adapter.check_login(acc)
+        db.update_account_status(account_id, "active" if ok else "expired")
+        db.add_audit_log(user["id"], user["username"], "test_connection",
+                         target=f"{acc['platform']}:{acc['account_id']}", detail="ok" if ok else "expired")
+        return {"ok": ok, "reason": "" if ok else "cookie/登录已失效，请重新扫码登录"}
+    # token 平台：字段完整即视为就绪（真实在线校验依赖各平台 API，暂不请求）
+    db.add_audit_log(user["id"], user["username"], "test_connection",
+                     target=f"{acc['platform']}:{acc['account_id']}")
+    return {"ok": True, "reason": "凭据字段完整（token 平台未做在线校验）"}
 
 
 # ==================== API: Queue ====================
@@ -585,6 +623,202 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
 
     logger.info("批量发布完成: %d 条", len(item_ids))
     return {"results": results}
+
+
+async def _run_manual_publish(item: dict, session_id: str):
+    """弹有头浏览器，自动填好内容并停在发布页，等用户人工点「发布」。检测跳转后标记已发布。"""
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter, browser_launch_options, parse_cookies
+    adapter = get_adapter(item["platform"])
+    if not isinstance(adapter, RpaAdapter) or not hasattr(adapter, "fill_publish_form"):
+        manual_publish_sessions[session_id].update({"status": "error", "error": "该平台不支持手动发布"})
+        return
+    account = next((a for a in db.get_accounts(item["platform"])
+                    if publish_readiness.readiness(item["platform"], a.get("credentials"))["ready"]), None)
+    if not account:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "无可用账号，请先到「账号管理」登录"})
+        return
+    attachments = _json.loads(item.get("attachments") or "[]")
+    attachments = _repair_xhs_queue_media(item, attachments)
+    images = publisher._resolve_uploaded_media([a["path"] for a in attachments if a.get("type") == "image"])
+    video_path = next((a["path"] for a in attachments if a.get("type") == "video"), None)
+    resolved_video = (publisher._resolve_uploaded_media([video_path]) or [None])[0] if video_path else None
+    if item["platform"] == "xiaohongshu" and not images:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "小红书必须配图"})
+        return
+    if item["platform"] == "douyin" and not resolved_video:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "抖音必须有视频素材"})
+        return
+    pw = None
+    browser = None
+    try:
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(**browser_launch_options(headless=False))
+        context = await browser.new_context()
+        cookies = parse_cookies(account.get("credentials"))
+        if cookies:
+            await context.add_cookies(cookies)
+        page = await context.new_page()
+        await adapter.fill_publish_form(
+            page, title=item["title"], content=item["body"],
+            tags=item.get("hashtags") or [], images=images, video=resolved_video,
+        )
+        manual_publish_sessions[session_id].update({"status": "ready"})
+        logger.info("手动发布：已填好内容，等待人工发布 item=%s", item["id"])
+        # 轮询等待用户点「发布」：URL 离开发布页即视为已提交（最多 ~15 分钟）
+        # 用适配器的 publish_url 判断当前是否仍在发布页
+        from urllib.parse import urlparse
+        pub_path = urlparse(adapter.publish_url).path  # e.g. /publish/publish or /creator-micro/content/upload
+        published = False
+        for _ in range(180):
+            await asyncio.sleep(5)
+            try:
+                url = page.url or ""
+            except Exception:
+                break  # 浏览器/页面被用户关闭
+            if pub_path not in url and "login" not in url.lower():
+                published = True
+                break
+        if published:
+            db.update_queue_status(item["id"], "published")
+            db.add_publish_log(item["id"], item["platform"], item["title"], "published", "manual")
+            manual_publish_sessions[session_id].update({"status": "published"})
+            logger.info("手动发布完成 item=%s", item["id"])
+        else:
+            manual_publish_sessions[session_id].update({"status": "closed"})
+    except Exception as exc:
+        logger.exception("手动发布异常")
+        manual_publish_sessions[session_id].update({"status": "error", "error": str(exc)})
+    finally:
+        try:
+            if browser:
+                await browser.close()
+            if pw:
+                await pw.stop()
+        except Exception:
+            pass
+
+
+@app.post("/api/publish/{item_id}/manual")
+async def manual_publish(item_id: int, user=Depends(get_current_user)):
+    item = db.get_queue_item_by_id(item_id)
+    if not item:
+        raise HTTPException(404, "Queue item not found")
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter
+    adapter = get_adapter(item["platform"])
+    if not isinstance(adapter, RpaAdapter) or not hasattr(adapter, "fill_publish_form"):
+        raise HTTPException(400, "该平台不支持手动发布（仅小红书/抖音等浏览器发布平台）")
+    session_id = str(_uuid4())
+    if len(manual_publish_sessions) >= 50:
+        for old_id in list(manual_publish_sessions)[:20]:
+            manual_publish_sessions.pop(old_id, None)
+    manual_publish_sessions[session_id] = {"status": "starting", "item_id": item_id}
+    asyncio.create_task(_run_manual_publish(item, session_id))
+    db.add_audit_log(user["id"], user["username"], "manual_publish", target=str(item_id))
+    return {"started": True, "session_id": session_id}
+
+
+@app.get("/api/publish/manual/{session_id}")
+async def manual_publish_status(session_id: str, user=Depends(get_current_user)):
+    s = manual_publish_sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, "会话不存在")
+    return {"status": s["status"], "error": s.get("error")}
+
+
+async def _run_manual_publish(item: dict, session_id: str):
+    """有头浏览器打开发布页、自动填好内容但不点发布；等用户手动发布后（页面跳离发布页）标记已发布。"""
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter, browser_launch_options, parse_cookies
+    adapter = get_adapter(item["platform"])
+    if not isinstance(adapter, RpaAdapter) or not hasattr(adapter, "fill_publish_form"):
+        manual_publish_sessions[session_id].update({"status": "error", "error": "该平台不支持手动发布"})
+        return
+    account = next((a for a in db.get_accounts(item["platform"])
+                    if publish_readiness.readiness(item["platform"], a.get("credentials"))["ready"]), None)
+    if not account:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "无可用账号，请先在「账号管理」登录"})
+        return
+    attachments = _json.loads(item.get("attachments") or "[]")
+    attachments = _repair_xhs_queue_media(item, attachments)
+    images = publisher._resolve_uploaded_media([a["path"] for a in attachments if a.get("type") == "image"])
+    video_path = next((a["path"] for a in attachments if a.get("type") == "video"), None)
+    resolved_video = (publisher._resolve_uploaded_media([video_path]) or [None])[0] if video_path else None
+    if item["platform"] == "xiaohongshu" and not images:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "小红书必须配图"})
+        return
+    if item["platform"] == "douyin" and not resolved_video:
+        manual_publish_sessions[session_id].update({"status": "error", "error": "抖音必须有视频素材"})
+        return
+    try:
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(**browser_launch_options(headless=False, use_proxy=adapter.use_proxy))
+        try:
+            context = await browser.new_context()
+            cookies = parse_cookies(account.get("credentials"))
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            await adapter.fill_publish_form(
+                page, title=item["title"], content=item["body"],
+                tags=item.get("hashtags") or [], images=images, video=resolved_video,
+            )
+            manual_publish_sessions[session_id].update({"status": "ready"})
+            # 等用户手动点「发布」：轮询 URL 离开发布页视为已发布，最多 ~15 分钟。
+            from urllib.parse import urlparse
+            pub_path = urlparse(adapter.publish_url).path
+            published = False
+            for _ in range(180):
+                await asyncio.sleep(5)
+                try:
+                    url = page.url or ""
+                except Exception:
+                    break  # 浏览器/页面被关闭
+                if pub_path not in url and "login" not in url.lower():
+                    published = True
+                    break
+            if published:
+                db.update_queue_status(item["id"], "published")
+                db.add_publish_log(item["id"], item["platform"], item["title"], "published", "manual")
+                manual_publish_sessions[session_id].update({"status": "published"})
+            else:
+                manual_publish_sessions[session_id].update({"status": "closed"})
+        finally:
+            await browser.close()
+            await pw.stop()
+    except Exception as exc:
+        logger.exception("手动发布异常")
+        manual_publish_sessions[session_id].update({"status": "error", "error": str(exc)})
+
+
+@app.post("/api/publish/{item_id}/manual")
+async def manual_publish(item_id: int, user=Depends(get_current_user)):
+    item = db.get_queue_item_by_id(item_id)
+    if not item:
+        raise HTTPException(404, "Queue item not found")
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter
+    if not isinstance(get_adapter(item["platform"]), RpaAdapter):
+        raise HTTPException(400, "该平台不支持手动发布（仅小红书/抖音等浏览器发布平台）")
+    if len(manual_publish_sessions) >= 50:
+        for old_id in list(manual_publish_sessions)[:20]:
+            manual_publish_sessions.pop(old_id, None)
+    session_id = str(_uuid4())
+    manual_publish_sessions[session_id] = {"status": "starting", "item_id": item_id}
+    asyncio.create_task(_run_manual_publish(item, session_id))
+    db.add_audit_log(user["id"], user["username"], "manual_publish", target=str(item_id))
+    return {"started": True, "session_id": session_id}
+
+
+@app.get("/api/publish/manual/{session_id}")
+async def manual_publish_status(session_id: str, user=Depends(get_current_user)):
+    s = manual_publish_sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, "手动发布会话不存在")
+    return {"status": s["status"], "error": s.get("error")}
 
 
 @app.get("/api/publish/status")
@@ -773,9 +1007,15 @@ async def upload_media_asset(
     temp_path = Path(tempfile.gettempdir()) / f"asset-{_uuid4().hex}{suffix}"
     try:
         temp_path.write_bytes(content)
-        asset = media_assets.ingest_file(temp_path, STATIC_DIR, category, "upload", user["id"])
+        # auto 时按原始文件名猜分类（temp 文件名是 uuid，不含关键词，不能用来猜）
+        original_name = Path(file.filename or "").stem
+        if category == "auto":
+            category = media_assets.guess_category(Path(file.filename or ""))
+        asset = media_assets.ingest_file(temp_path, STATIC_DIR, category, "upload", user["id"], name=original_name or None)
+        is_dedup = bool(asset.get("_dedup"))
+        reactivated = bool(asset.get("_reactivated"))
         db.add_audit_log(user["id"], user["username"], "upload_asset", target=str(asset["id"]))
-        return media_assets.public_asset(asset)
+        return {**media_assets.public_asset(asset), "duplicated": is_dedup, "reactivated": reactivated}
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
@@ -786,13 +1026,17 @@ async def upload_media_asset(
 async def import_media_assets(body: dict = None, user=Depends(require_role(UserRole.ADMIN))):
     import_root = (STATIC_DIR / "assets" / "import").resolve()
     import_root.mkdir(parents=True, exist_ok=True)
-    category = str((body or {}).get("category") or "other")
+    # 默认 auto：按子目录名/文件名关键词自动归类；显式传具体分类则统一用该分类
+    category = str((body or {}).get("category") or "auto")
     results, errors = [], []
     for path in sorted(import_root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in media_assets.IMAGE_EXTS | media_assets.VIDEO_EXTS:
             continue
         try:
-            asset = media_assets.ingest_file(path, STATIC_DIR, category, "directory", user["id"])
+            asset = media_assets.ingest_file(
+                path, STATIC_DIR, category, "directory", user["id"],
+                import_root=import_root,
+            )
             results.append(media_assets.public_asset(asset))
         except Exception as exc:
             errors.append({"file": path.name, "error": str(exc)[:200]})

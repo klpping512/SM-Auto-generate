@@ -16,6 +16,77 @@ import database as db
 MIMO_URL = "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
 VOICES = {"冰糖", "茉莉", "苏打", "白桦"}
 
+# 与 media_assets.CATEGORY_KEYWORDS 保持同步，用于渲染兜底时的场景关键词→分类匹配
+CATEGORY_KEYWORDS = {
+    "warehouse": ("海外仓", "仓库", "仓储", "warehouse", "storage", "stock", "货架", "外景",
+                  "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
+                  "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描", "货物"),
+    "delivery": ("配送", "快递", "物流", "运输", "派送", "卡车", "车辆", "路线",
+                 "delivery", "courier", "shipping", "logistics"),
+    "customs": ("清关", "海关", "报关", "通关", "customs", "clearance", "文件", "单据"),
+    "brand": ("品牌", "商标", "brand", "logo", "标识", "信息卡", "结尾"),
+    "staff": ("工作人员", "员工", "职员", "staff", "团队", "培训", "工人",
+              "办公", "开会", "会议", "面试", "合照", "团建"),
+    "facility": ("设备", "设施", "facility", "叉车", "传送带", "机器", "流水线"),
+    "customer": ("客户", "customer", "案例", "好评", "反馈", "见证", "采访"),
+}
+
+# 分类优先级：平分时按此顺序选择（物流场景仓库优先于人员）
+CATEGORY_PRIORITY = ["warehouse", "delivery", "customs", "facility", "brand", "customer", "staff"]
+
+
+def _match_asset_by_scene(scene_visual: str, available_assets: list[dict],
+                          used_asset_ids: set[int] | None = None,
+                          topic: str = "") -> dict | None:
+    """根据场景画面描述 + 整体话题，从可用素材中匹配最合适的素材。
+
+    匹配规则（优先级从高到低）：
+    1. 素材名称直接命中 visual 中的关键词 → 最精准
+    2. 话题关键词 → 分类匹配（整体主题一致性）
+    3. visual 关键词 → 分类匹配（场景级）
+    4. 同分时按 CATEGORY_PRIORITY 排序（warehouse > delivery > ... > staff）
+    5. 已使用的素材降权（最后一轮才允许重复）
+    """
+    if not available_assets:
+        return None
+    used = used_asset_ids or set()
+
+    visual_lower = (scene_visual or "").lower()
+    topic_lower = (topic or "").lower()
+
+    # 计算每个分类的匹配得分（visual + topic 双重打分）
+    cat_scores: dict[str, float] = {}
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        visual_score = sum(1 for kw in keywords if kw.lower() in visual_lower)
+        topic_score = sum(1.0 for kw in keywords if kw.lower() in topic_lower)
+        total = visual_score + topic_score
+        if total > 0:
+            cat_scores[cat] = total
+
+    if not cat_scores:
+        return None
+
+    # 按得分降序，平分时按 CATEGORY_PRIORITY 排序（index 小的优先）
+    def sort_key(cat):
+        priority_idx = CATEGORY_PRIORITY.index(cat) if cat in CATEGORY_PRIORITY else 99
+        return (-cat_scores[cat], priority_idx)
+
+    ranked_cats = sorted(cat_scores, key=sort_key)
+
+    # 第一轮：分类匹配 + 排除已使用素材
+    for cat in ranked_cats:
+        matches = [a for a in available_assets if a.get("category") == cat and a["id"] not in used]
+        if matches:
+            return matches[0]
+
+    # 第二轮：忽略已使用，允许重复
+    for cat in ranked_cats:
+        matches = [a for a in available_assets if a.get("category") == cat]
+        if matches:
+            return matches[0]
+
+    return None
+
 
 def normalize_script(script: dict, asset_ids: set[int]) -> dict:
     scenes = []
@@ -124,6 +195,37 @@ def _has_audio(ffprobe: str, path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+# 渲染任务超时时间（秒）
+RENDER_TIMEOUT = 300  # 5 分钟
+
+
+def cleanup_stale_jobs():
+    """清理卡住的渲染任务：running 超过 5 分钟的标记为 failed，pending 超过 10 分钟的也清理。"""
+    import time
+    now = time.time()
+    stale_count = 0
+    for job in db.get_unfinished_render_jobs():
+        created = job.get("created_at", "")
+        if not created:
+            continue
+        try:
+            from datetime import datetime
+            job_time = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        age = now - job_time
+        if job["status"] == "running" and age > RENDER_TIMEOUT:
+            db.update_render_job(job["id"], status="failed", stage="超时清理",
+                                 error=f"渲染超过 {RENDER_TIMEOUT} 秒自动终止")
+            stale_count += 1
+        elif job["status"] == "pending" and age > RENDER_TIMEOUT * 2:
+            db.update_render_job(job["id"], status="failed", stage="超时清理",
+                                 error="排队超过 10 分钟自动取消")
+            stale_count += 1
+    if stale_count:
+        print(f"🧹 已清理 {stale_count} 个超时渲染任务")
+
+
 def render_job(job_id: str, static_dir: Path):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -143,6 +245,12 @@ def render_job(job_id: str, static_dir: Path):
     try:
         db.update_render_job(job_id, status="running", stage="生成旁白", progress=5, error=None)
         segments = []
+        used_asset_ids: set[int] = set()  # 跟踪已分配素材，避免重复
+
+        # 从脚本标题或首场景旁白提取整体话题，用于素材匹配时加权
+        topic = job["script"].get("title", "") or ""
+        if not topic and job["script"].get("scenes"):
+            topic = job["script"]["scenes"][0].get("voiceover", "")[:40]
 
         for index, scene in enumerate(job["script"]["scenes"]):
             # 1. 生成 TTS 音频
@@ -156,8 +264,22 @@ def render_job(job_id: str, static_dir: Path):
             if not asset or asset["file_type"] not in ("video", "image"):
                 all_videos = db.list_assets(file_type="video", status="active")
                 if all_videos:
-                    asset = all_videos[index % len(all_videos)]
-                    print(f"⚠️ 场景 {index+1}: 无匹配素材，随机选用 {asset['name']}")
+                    # 优先按场景画面描述匹配素材分类，兜底才用轮询
+                    visual = scene.get("visual", "")
+                    matched = _match_asset_by_scene(visual, all_videos,
+                                                    used_asset_ids=used_asset_ids,
+                                                    topic=topic)
+                    if matched:
+                        asset = matched
+                        used_asset_ids.add(asset["id"])
+                        print(f"✅ 场景 {index+1}: 按画面描述匹配素材 {asset['name']} (category={asset.get('category')})")
+                    else:
+                        # 所有素材都已用过，轮询选一个未用的
+                        unused = [a for a in all_videos if a["id"] not in used_asset_ids]
+                        pool = unused if unused else all_videos
+                        asset = pool[index % len(pool)]
+                        used_asset_ids.add(asset["id"])
+                        print(f"⚠️ 场景 {index+1}: 无分类匹配，轮询选用 {asset['name']}")
                 else:
                     card_path = work_root / f"card-{index}.png"
                     _fallback_card(scene["visual"], card_path)
