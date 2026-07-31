@@ -1,0 +1,7 @@
+# 可选的本地素材理解与 URL 视频能力；FFmpeg/ffprobe 使用系统已有可执行文件。
+# 生成视频已有分镜字幕时不会重复运行 Whisper。
+# 安装：pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-media-ai.txt
+faster-whisper>=1.2,<2
+rapidocr>=3.4,<4
+onnxruntime>=1.22,<2
+yt-dlp>=2025.6
