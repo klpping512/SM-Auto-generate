@@ -1,0 +1,36 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_hotspot_page_uses_topic_pack_structure():
+    page = (ROOT / "static" / "hotspots.html").read_text(encoding="utf-8")
+
+    assert "/api/hotspot-packages" in page
+    assert "热点专题包" in page
+    assert "来源信号" in page
+    assert "视频素材" in page and "图片素材" in page and "纯文本" in page
+    assert "确认并入热点库" in page
+    assert "仅保存链接" in page
+    assert "抓取最新热点" in page
+    assert "选择热点" not in page
+    assert "仅事实信号" in page
+    assert "有素材" in page
+    assert "不会进入热点素材库或视频工作流" in page
+    assert "['admin','editor'].includes" in page
+
+
+def test_video_followup_accepts_a_topic_package_id():
+    page = (ROOT / "static" / "video-followup.html").read_text(encoding="utf-8")
+
+    assert "hotspot_id" in page
+    assert "/api/hotspot-packages/" in page
+
+
+def test_topic_package_selection_preserves_list_position_and_ignores_stale_requests():
+    page = (ROOT / "static" / "hotspots.html").read_text(encoding="utf-8")
+
+    assert "topicPackageListScrollTop" in page
+    assert "restoreTopicPackageListScroll" in page
+    assert "packageSelectionRequest" in page

@@ -1,0 +1,274 @@
+import pytest
+import httpx
+import json
+
+
+def test_router_reads_key_from_environment_and_never_returns_secret(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "do-not-return-this-secret")
+    route = model_router.get_route("vision_tagger")
+
+    assert route["api_key_env"] == "DASHSCOPE_API_KEY"
+    assert route["model"] == "qwen-vl-plus"
+    assert "do-not-return-this-secret" not in str(route)
+    assert "api_key" not in route
+
+
+def test_reasoning_routes_default_to_qwen37_plus_with_bounded_thinking(tmp_db):
+    import model_router
+
+    planner = model_router.get_route("planner_text")
+    critic = model_router.get_route("critic")
+
+    assert planner["model"] == "qwen3.7-plus"
+    assert planner["request_options"] == {"enable_thinking": True, "thinking_budget": 3000}
+    assert critic["model"] == "qwen3.7-plus"
+    assert critic["request_options"]["enable_thinking"] is True
+    assert model_router.required_output_budget("planner_text", 1000) == 4000
+
+
+def test_reasoning_split_is_sent_for_compatible_text_route(tmp_db):
+    import model_router
+
+    model_router.save_route("planner_text", {
+        "provider": "openai_compatible", "base_url": "https://example.com/v1",
+        "api_key_env": "MINIMAX_API_KEY", "model": "MiniMax-M2.7-highspeed",
+        "capabilities": ["text"], "timeout": 60, "max_tokens": 1200,
+        "cost_profile": "medium", "request_options": {"reasoning_split": True}, "enabled": True,
+    })
+
+    assert model_router._safe_request_options(model_router.get_route("planner_text")) == {"reasoning_split": True}
+
+
+def test_visible_text_content_removes_only_leading_legacy_thinking_block():
+    import model_router
+
+    payload = {"choices": [{"message": {"content": "<think>reasoning</think>\n{\"approved\":true}"}}]}
+    assert model_router._visible_text_content(payload) == '{"approved":true}'
+
+
+@pytest.mark.asyncio
+async def test_text_json_mode_is_part_of_request_and_cache_identity(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": '{"approved":true}'}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 8},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await model_router.call_text(
+            "text-json-mode", "planner_text", [{"role": "user", "content": "返回 JSON"}],
+            prompt_version="text-json-mode-v1", json_mode=True, client=client,
+        )
+    finally:
+        await client.aclose()
+
+    body = json.loads(requests[0].content)
+    assert body["response_format"] == {"type": "json_object"}
+    assert result["content"] == '{"approved":true}'
+
+
+def test_route_scoped_job_id_changes_when_text_model_route_changes(tmp_db):
+    import model_router
+
+    initial = model_router.route_scoped_job_id("hotspot-intake", "planner_text")
+    model_router.save_route("planner_text", {
+        "provider": "openai_compatible", "base_url": "https://example.com/v1",
+        "api_key_env": "DASHSCOPE_API_KEY", "model": "another-model", "capabilities": ["text"],
+        "timeout": 30, "max_tokens": 1000, "cost_profile": "medium",
+        "request_options": {"enable_thinking": False}, "enabled": True,
+    })
+    changed = model_router.route_scoped_job_id("hotspot-intake", "planner_text")
+
+    assert initial != changed
+    assert changed.startswith("hotspot-intake-route-")
+
+
+def test_cached_call_does_not_consume_budget_twice(tmp_db):
+    import model_router
+
+    job_id = "sample-budget-cache"
+    model_router.create_budget(job_id)
+
+    first = model_router.record_call(
+        job_id,
+        "planner_text",
+        cache_key="same-input",
+        input_tokens=100,
+        output_tokens=20,
+        response={"content": "draft"},
+    )
+    second = model_router.record_call(
+        job_id,
+        "planner_text",
+        cache_key="same-input",
+        input_tokens=100,
+        output_tokens=20,
+        response={"content": "ignored"},
+    )
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    budget = tmp_db.get_model_budget(job_id)
+    assert budget["calls_used"] == 1
+    assert budget["input_tokens_used"] == 100
+    assert budget["output_tokens_used"] == 20
+
+
+def test_budget_limit_stops_remote_call(tmp_db):
+    import model_router
+
+    job_id = "sample-budget-stop"
+    model_router.create_budget(
+        job_id,
+        max_calls=1,
+        max_input_tokens=100,
+        max_output_tokens=50,
+    )
+    model_router.record_call(
+        job_id,
+        "planner_text",
+        cache_key="first",
+        input_tokens=80,
+        output_tokens=20,
+        response={"content": "first"},
+    )
+
+    with pytest.raises(model_router.BudgetExceeded, match="预算"):
+        model_router.reserve_call(job_id, estimated_input_tokens=30, estimated_output_tokens=10)
+
+
+def test_model_route_admin_api_never_exposes_environment_secret(tmp_db, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app, auth
+
+    monkeypatch.setenv("CUSTOM_PLANNER_KEY", "hidden-secret")
+    tmp_db.create_user("route-admin", auth.hash_password("pw12345"), "admin", "Admin")
+    client = TestClient(app.app)
+    token = client.post(
+        "/api/auth/login", json={"username": "route-admin", "password": "pw12345"}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    updated = client.put("/api/model-routes/planner_text", headers=headers, json={
+        "provider": "openai_compatible",
+        "base_url": "https://model.example.com/v1",
+        "api_key_env": "CUSTOM_PLANNER_KEY",
+        "model": "planner-small",
+        "capabilities": ["text"],
+        "timeout": 20,
+        "max_tokens": 1200,
+        "cost_profile": "low",
+        "request_options": {"enable_thinking": True, "thinking_budget": 1800},
+        "enabled": True,
+    })
+    assert updated.status_code == 200
+    route = client.get("/api/model-routes/planner_text", headers=headers).json()
+    assert route["model"] == "planner-small"
+    assert route["api_key_env"] == "CUSTOM_PLANNER_KEY"
+    assert route["request_options"] == {"enable_thinking": True, "thinking_budget": 1800}
+    assert "hidden-secret" not in str(route)
+
+
+@pytest.mark.asyncio
+async def test_text_call_uses_compatible_endpoint_and_cache(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": "evidence-bound draft"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first = await model_router.call_text(
+            "sample-call",
+            "planner_text",
+            [{"role": "user", "content": "Use claim C1 only"}],
+            prompt_version="sample-v1",
+            client=client,
+        )
+        second = await model_router.call_text(
+            "sample-call",
+            "planner_text",
+            [{"role": "user", "content": "Use claim C1 only"}],
+            prompt_version="sample-v1",
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert first["content"] == "evidence-bound draft"
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert len(requests) == 1
+    assert requests[0].url.path == "/compatible-mode/v1/chat/completions"
+    body = json.loads(requests[0].content)
+    assert body["enable_thinking"] is True
+    assert body["thinking_budget"] == 3000
+    assert tmp_db.get_model_budget("sample-call")["calls_used"] == 1
+
+
+def test_video_evaluator_route_is_multimodal_and_swappable(tmp_db):
+    import model_router
+
+    route = model_router.get_route("video_evaluator")
+
+    assert route["model"] == "qwen-vl-plus"
+    assert {"text", "vision"}.issubset(route["capabilities"])
+    assert route["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_multimodal_json_call_uses_image_content_and_json_mode(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": '{"passed":true}'}}],
+            "usage": {"prompt_tokens": 220, "completion_tokens": 12},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    messages = [
+        {"role": "system", "content": "Return JSON"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "FRAME_0001@1.50s"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,eA=="}},
+        ]},
+    ]
+    try:
+        result = await model_router.call_multimodal_json(
+            "video-eval-call",
+            "video_evaluator",
+            messages,
+            prompt_version="video-qa-v1",
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    body = json.loads(requests[0].content)
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["messages"][1]["content"][1]["type"] == "image_url"
+    assert body["max_tokens"] == model_router.get_route("video_evaluator")["max_tokens"]
+    assert "max_completion_tokens" not in body
+    assert result["content"] == '{"passed":true}'
+    assert tmp_db.get_model_budget("video-eval-call")["calls_used"] == 1
