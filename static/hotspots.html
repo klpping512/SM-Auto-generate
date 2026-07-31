@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>热点选题 - SA-LogiFlow</title>
+  <link rel="stylesheet" href="/static/design-system.css?v=6"/>
+</head>
+<body>
+  <div class="app-layout" id="app"></div>
+  <div id="toastContainer" class="toast-container"></div>
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden onclick="closeDrawers()"></div>
+  <aside id="collectionDrawer" class="workbench-drawer" aria-label="热点采集说明" hidden></aside>
+  <aside id="sourceDrawer" class="workbench-drawer" aria-label="信源管理" hidden></aside>
+  <aside id="brandDrawer" class="workbench-drawer" aria-label="品牌证据管理" hidden></aside>
+
+  <script src="/static/common.js?v=8"></script>
+  <script>
+const PAGE_ID='hotspots';
+let hotspots=[],sources=[],brandEvidence=[],assets=[],hotspotMedia=[],hotspotMediaIndex=[],fetchRun=null;
+const params=new URLSearchParams(location.search);
+let selectedHotspotId=Number(params.get('hotspot_id')||sessionStorage.getItem('selectedHotspotId')||0);
+let selectedHotspot=null,evidencePackage=null,sampleBundle=null,outputTab='video';
+let query='',publisherFilter='',mediaTypeFilter='all',timeFilter='all',busyAction='';
+
+const sourcePurpose={
+  'SAnews':'综合政务、社会事件、交通与公共服务热点',
+  'SARS':'海关、边境、税务与跨境履约风险',
+  'Department of Transport':'道路、港口、货运与交通运行信息',
+  'South African Government':'政府声明、部门公告和政策信息',
+  'South African Reserve Bank':'汇率、利率、支付与宏观金融背景',
+  'YouTube · SA Today':'南非公开视频热点发现，只读取最近单视频元数据',
+  'YouTube · South Africa Now':'南非公开视频热点发现，只读取最近单视频元数据',
+  'YouTube · SABC Digital News':'南非公开视频热点发现，只读取最近单视频元数据'
+};
+
+function icon(path){return `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;}
+function formatDate(value){if(!value)return '未记录';const date=new Date(value);return Number.isNaN(date.getTime())?value:date.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function statusLabel(status){return {running:'抓取中',succeeded:'成功',partial:'部分失败',failed:'失败'}[status]||'尚未抓取';}
+function sourceHealth(){return fetchRun?.result?.source_health||[];}
+function healthByName(name){return sourceHealth().find(item=>item.name===name);}
+
+async function init(){
+  const user=getCurrentUser();
+  const jobs=[loadHotspots(),loadFetchStatus(),loadBrandEvidence(),loadAssets(),loadHotspotMediaIndex()];
+  if(user.role==='admin')jobs.push(loadSources());
+  await Promise.all(jobs);
+  chooseInitialHotspot();
+  await loadSelectedHotspotMedia();
+  render();
+  ensureHotspotTranslation();
+  await loadSelectedHistory();
+  if(fetchRun?.status==='running')setTimeout(pollFetchStatus,1600);
+}
+
+async function loadHotspots(){const r=await apiFetch('/api/hotspots?limit=200');hotspots=await r.json();}
+async function loadFetchStatus(){const r=await apiFetch('/api/hotspots/fetch-status');fetchRun=(await r.json()).run;}
+async function loadSources(){try{const r=await apiFetch('/api/hotspot-sources');sources=await r.json();}catch{sources=[];}}
+async function loadBrandEvidence(){const r=await apiFetch('/api/brand-evidence');brandEvidence=await r.json();}
+async function loadAssets(){const r=await apiFetch('/api/assets');assets=await r.json();}
+async function loadHotspotMediaIndex(){try{const r=await apiFetch('/api/hotspot-media?limit=1000');hotspotMediaIndex=await r.json();}catch{hotspotMediaIndex=[];}}
+async function loadSelectedHotspotMedia(){if(!selectedHotspotId){hotspotMedia=[];return;}const r=await apiFetch(`/api/hotspot-media?hotspot_id=${selectedHotspotId}`);hotspotMedia=await r.json();}
+
+async function ensureHotspotTranslation(){const requestedId=selectedHotspotId,item=selectedHotspot;if(!item||item.translation_status==='translating'||(item.translation_status==='ready'&&item.translation_snapshot_sha256===item.snapshot_sha256&&item.title_zh&&item.summary_zh))return;item.translation_status='translating';render();try{const r=await apiFetch(`/api/hotspots/${requestedId}/translate`,{method:'POST'});const translated=await r.json();if(requestedId!==selectedHotspotId)return;const index=hotspots.findIndex(value=>value.id===requestedId);if(index>=0)hotspots[index]=translated;selectedHotspot=translated;render();}catch(error){if(requestedId!==selectedHotspotId)return;item.translation_status='failed';render();showToast('中文翻译失败，可继续使用英文原文','error');}}
+
+function chooseInitialHotspot(){
+  selectedHotspot=hotspots.find(item=>item.id===selectedHotspotId)||hotspots[0]||null;
+  selectedHotspotId=selectedHotspot?.id||0;
+  if(selectedHotspotId)sessionStorage.setItem('selectedHotspotId',String(selectedHotspotId));
+}
+
+async function loadSelectedHistory(){
+  const requestedHotspotId=selectedHotspotId;
+  if(!requestedHotspotId)return;
+  try{
+    const r=await apiFetch(`/api/hotspots/${requestedHotspotId}/sample-bundles?limit=10`);
+    const history=await r.json();
+    if(requestedHotspotId!==selectedHotspotId||!history.length)return;
+    const restoredBundle=history[0];
+    const packageResponse=await apiFetch(`/api/evidence-packages/${restoredBundle.evidence_package_id}`);
+    const restoredPackage=await packageResponse.json();
+    if(requestedHotspotId!==selectedHotspotId)return;
+    sampleBundle=restoredBundle;evidencePackage=restoredPackage;render();
+  }catch{}
+}
+
+function filteredHotspots(){
+  const now=Date.now();
+  return hotspots.filter(item=>{
+    const haystack=`${item.title_zh||''} ${item.summary_zh||''} ${item.title} ${item.summary} ${item.publisher}`.toLowerCase();
+    if(query&&!haystack.includes(query.toLowerCase()))return false;
+    if(publisherFilter&&item.publisher!==publisherFilter)return false;
+    if(mediaTypeFilter!=='all'&&hotspotContentForm(item)!==mediaTypeFilter)return false;
+    if(timeFilter!=='all'){
+      const time=new Date(item.published_at||item.retrieved_at).getTime();
+      const hours=timeFilter==='24h'?24:timeFilter==='7d'?168:720;
+      if(!time||now-time>hours*3600000)return false;
+    }
+    return true;
+  });
+}
+
+function hotspotContentForm(item){
+  const kinds=hotspotMediaIndex.filter(media=>Number(media.hotspot_id)===Number(item.id)).map(media=>media.media_kind);
+  if(kinds.some(kind=>kind==='video_link'||kind==='video_file'))return 'video';
+  if(kinds.includes('image'))return 'image';
+  return 'text';
+}
+
+function contentFormLabel(form){return {video:'视频',image:'图片',text:'纯文本'}[form]||'纯文本';}
+function contentFormMeta(form){return {video:'视频候选',image:'图片候选',text:'纯文本事实来源'}[form]||'纯文本事实来源';}
+function renderContentFormTag(item){const form=hotspotContentForm(item);return `<span class="content-form-tag ${form}">${contentFormLabel(form)}</span>`;}
+
+function render(){
+  const admin=getCurrentUser().role==='admin';
+  document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content hotspot-page">
+    <header class="page-header hotspot-header">
+      <div><p class="eyebrow">SOUTH AFRICA CONTENT SIGNALS</p><h1 class="page-title">热点选题</h1><p class="page-subtitle">先锁定可信事实，再用真实素材生成视频、图文和公众号内部样本。</p></div>
+      <div class="header-actions">
+        <button class="btn btn-ghost" type="button" onclick="openCollectionGuide()">系统如何采集？</button>
+        ${admin?'<button class="btn btn-secondary" type="button" onclick="openSourceManager()">信源管理</button>':''}
+        <button class="btn btn-primary" type="button" onclick="fetchLatest()" ${busyAction==='fetch'||fetchRun?.status==='running'?'disabled':''}>${icon('M12 4V1L8 5l4 4V6a6 6 0 11-5.65 8H4.26A8 8 0 1012 4z')}<span>${fetchRun?.status==='running'?'正在抓取':'抓取最新热点'}</span></button>
+      </div>
+    </header>
+    <div class="page-body hotspot-body">
+      ${renderFetchSummary()}
+      <section class="workbench-grid">
+        <div class="hotspot-list-panel">${renderHotspotList()}</div>
+        <div class="hotspot-workspace">${renderWorkspace()}</div>
+      </section>
+    </div>
+  </main>`;
+}
+
+function renderFetchSummary(){
+  const result=fetchRun?.result||{};
+  const healthy=sourceHealth().filter(item=>item.status==='ok').length;
+  const total=sourceHealth().length||sources.filter(item=>item.enabled).length;
+  return `<section class="fetch-summary" aria-live="polite">
+    <div><span>上次抓取</span><strong>${fetchRun?formatDate(fetchRun.finished_at||fetchRun.started_at):'尚未运行'}</strong><small class="run-state ${escapeHtml(fetchRun?.status||'idle')}">${statusLabel(fetchRun?.status)}</small></div>
+    <div><span>信源状态</span><strong>${total?`${healthy}/${total} 正常`:'等待首次检测'}</strong><button type="button" onclick="openSourceManager()">查看明细</button></div>
+    <div><span>本次结果</span><strong>${fetchRun?`新增 ${Number(result.new||0)+Number(result.video_new||0)} · 更新 ${Number(result.updated||0)+Number(result.video_updated||0)}`:'暂无结果'}</strong><small>视频候选 ${Number(result.video_media||0)} · 可用配图 ${Number(result.assets||0)} · 配图失败 ${Number(result.media_errors?.length||0)}</small></div>
+  </section>`;
+}
+
+function renderHotspotList(){
+  const publishers=[...new Set(hotspots.map(item=>item.publisher).filter(Boolean))];
+  const items=filteredHotspots();
+  return `<div class="list-toolbar"><h2>热点池 <span>${items.length}</span></h2><div class="filter-row"><input class="input" aria-label="搜索热点" placeholder="搜索标题或摘要" value="${escapeHtml(query)}" oninput="query=this.value;render()"/><select class="select" aria-label="筛选内容形式" onchange="mediaTypeFilter=this.value;render()"><option value="all">全部形式</option><option value="video" ${mediaTypeFilter==='video'?'selected':''}>视频</option><option value="image" ${mediaTypeFilter==='image'?'selected':''}>图片</option><option value="text" ${mediaTypeFilter==='text'?'selected':''}>纯文本</option></select><select class="select" aria-label="筛选来源" onchange="publisherFilter=this.value;render()"><option value="">全部来源</option>${publishers.map(name=>`<option value="${escapeHtml(name)}" ${publisherFilter===name?'selected':''}>${escapeHtml(name)}</option>`).join('')}</select><select class="select" aria-label="筛选时间" onchange="timeFilter=this.value;render()"><option value="all">全部时间</option><option value="24h" ${timeFilter==='24h'?'selected':''}>24 小时</option><option value="7d" ${timeFilter==='7d'?'selected':''}>7 天</option><option value="30d" ${timeFilter==='30d'?'selected':''}>30 天</option></select></div></div>
+    <div class="hotspot-list">${items.map(hotspotCard).join('')||`<div class="list-empty"><strong>没有符合条件的热点</strong><p>${hotspots.length?'调整筛选条件后再试。':'点击“抓取最新热点”，系统会读取官方 Feed 和已确认的公开视频频道。'}</p></div>`}</div>`;
+}
+
+function hotspotCard(item){
+  const selected=item.id===selectedHotspotId;
+  const translationState=item.translation_status==='translating'?' · 翻译中':item.translation_status==='failed'?' · 中文翻译失败':'';
+  const form=hotspotContentForm(item);
+  return `<button class="hotspot-card ${selected?'selected':''}" type="button" onclick="selectHotspot(${item.id})"><span class="card-source">${escapeHtml(item.publisher)}${translationState}</span><span class="card-title-row"><strong>${escapeHtml(item.title_zh||item.title)}</strong>${renderContentFormTag(item)}</span>${item.title_zh?`<span class="original-title">${escapeHtml(item.title)}</span>`:''}<p>${escapeHtml(item.summary_zh||item.summary||'暂无摘要')}</p><span class="card-meta">${formatDate(item.published_at||item.retrieved_at)} · ${contentFormMeta(form)}</span></button>`;
+}
+
+function renderWorkspace(){
+  if(!selectedHotspot)return `<div class="workspace-empty">${icon('M4 4h16v16H4zM7 8h10V6H7v2zm0 4h10v-2H7v2zm0 4h7v-2H7v2z')}<strong>先从左侧选择一个热点</strong><p>系统不会只凭标题直接生成内容。</p></div>`;
+  const admin=getCurrentUser().role==='admin';
+  const confirmed=brandEvidence.filter(item=>item.status==='confirmed'&&item.disclosure_level==='public');
+  const usable=assets.filter(item=>item.status==='active'&&['ready','review_required'].includes(item.processing_status||''));
+  const videos=usable.filter(item=>item.file_type==='video').length;
+  const images=usable.filter(item=>item.file_type==='image').length;
+  const hotspotVideos=hotspotMedia.filter(item=>item.media_kind==='video_link'||item.media_kind==='video_file').length;
+  const hotspotImages=hotspotMedia.filter(item=>item.media_kind==='image').length;
+  const green=hotspotMedia.filter(item=>item.rights_tier==='green').length,yellow=hotspotMedia.filter(item=>item.rights_tier==='yellow').length,red=hotspotMedia.filter(item=>item.rights_tier==='red').length;
+  return `<div class="workflow-head"><div><span>当前选题</span><div class="workflow-title-row"><h2>${escapeHtml(selectedHotspot.title_zh||selectedHotspot.title)}</h2>${renderContentFormTag(selectedHotspot)}</div>${selectedHotspot.title_zh?`<p class="workspace-original">${escapeHtml(selectedHotspot.title)}</p>`:''}</div><a href="${escapeHtml(selectedHotspot.source_url)}" target="_blank" rel="noopener noreferrer">打开原始来源</a></div>
+    <section class="workflow-section"><div class="section-heading"><div><span>当前记录</span><h3>热点详情</h3></div><span class="status-chip ok">已选中</span></div><dl class="fact-grid"><div><dt>发布机构</dt><dd>${escapeHtml(selectedHotspot.publisher)}</dd></div><div><dt>发布时间</dt><dd>${formatDate(selectedHotspot.published_at)}</dd></div><div><dt>抓取时间</dt><dd>${formatDate(selectedHotspot.retrieved_at)}</dd></div><div><dt>中文状态</dt><dd>${selectedHotspot.translation_status==='ready'?'已缓存':selectedHotspot.translation_status==='translating'?'翻译中':selectedHotspot.translation_status==='failed'?'<button class="translation-retry" onclick="ensureHotspotTranslation()">翻译失败，点击重试</button>':'等待翻译'}</dd></div></dl><p class="source-summary">${escapeHtml(selectedHotspot.summary_zh||selectedHotspot.summary||'原始来源没有提供摘要，请打开原文人工核对。')}</p>${selectedHotspot.summary_zh?`<details class="source-original"><summary>查看英文原文摘要</summary><p>${escapeHtml(selectedHotspot.summary||'')}</p></details>`:''}</section>
+    <section class="workflow-section"><div class="section-heading"><div><span>步骤 2</span><h3>核验证据</h3></div><span class="status-chip ${evidencePackage?'ok':'pending'}">${evidencePackage?'已锁定':'待执行'}</span></div><p class="section-help">外部事实只来自当前原文；Buffalo 能力表述只允许引用已人工确认的品牌证据。</p>${confirmed.length?`<div class="brand-evidence-list">${confirmed.map(item=>`<label><input type="checkbox" class="brand-evidence-check" value="${item.id}" checked/><span><strong>${escapeHtml(item.claim)}</strong><small>${escapeHtml(item.evidence_note)}</small></span></label>`).join('')}</div>`:'<div class="notice-box"><strong>没有已确认的品牌证据</strong><p>仍可生成不含品牌能力承诺的内部样本；不会写具体时效、覆盖率或业绩。</p></div>'}<div class="section-actions">${admin?'<button class="btn btn-secondary" type="button" onclick="openBrandManager()">管理品牌证据</button>':''}${evidencePackage?'':`<button class="btn btn-primary" type="button" onclick="buildEvidencePackage()" ${busyAction?'disabled':''}>核验并锁定证据</button>`}</div>${evidencePackage?renderEvidencePackage():''}</section>
+    <section class="workflow-section"><div class="section-heading"><div><span>步骤 3</span><h3>检查素材</h3></div><span class="status-chip ${usable.length||hotspotMedia.length?'ok':'warning'}">${usable.length||hotspotMedia.length?'可检查':'需补充'}</span></div><div class="material-summary dual-library-summary"><div><strong>${hotspotVideos}</strong><span>热点视频候选</span></div><div><strong>${hotspotImages}</strong><span>热点图片候选</span></div><div><strong>${videos}</strong><span>原本库视频</span></div><div><strong>${images}</strong><span>原本库图片</span></div></div><p class="rights-counts"><span class="green">绿色 ${green}</span><span class="yellow">黄色 ${yellow}</span><span class="red">红色 ${red}</span></p><p class="section-help">热点钩子只匹配当前热点库；品牌证明只匹配原本素材库。视频必须下载并完成分段后才能进入 Top 3。</p>${sampleBundle?renderMaterialReview():''}<a class="btn btn-secondary" href="/assets.html?library=hotspot&hotspot_id=${selectedHotspot.id}">查看热点素材</a></section>
+    <section class="workflow-section output-section"><div class="section-heading"><div><span>步骤 4</span><h3>生成样本</h3></div><span class="status-chip ${sampleBundle?'warning':'pending'}">${sampleBundle?'内部预览':'未生成'}</span></div>${sampleBundle?renderOutputs():`<p class="section-help">三种形式共用同一份事实和品牌证据，结构分别生成；默认不可发布。</p><button class="btn btn-primary" type="button" onclick="generateSamples()" ${!evidencePackage||busyAction?'disabled':''}>${busyAction==='sample'?'正在生成':'生成视频、图文和公众号样本'}</button>`}</section>
+    ${renderTechnicalDetails()}`;
+}
+
+function renderEvidencePackage(){
+  const facts=evidencePackage.fact_claims||[];
+  const brands=evidencePackage.brand_claims||[];
+  return `<div class="evidence-result"><strong>已锁定 ${facts.length} 条事实、${brands.length} 条品牌证据</strong><p>状态：${escapeHtml(evidencePackage.status)}。后续三种样本只能使用这些 claim。</p></div>`;
+}
+
+function renderMaterialReview(){
+  const scenes=sampleBundle?.video?.scenes||[];
+  return `<div class="scene-review-list">${scenes.map((scene,index)=>{const candidates=scene.candidates||[];const best=candidates[0];return `<article class="scene-review ${scene.match_review_required?'weak':''}"><div class="scene-review-head"><strong>镜头 ${index+1} · ${escapeHtml(scene.business_role||'待定义')}</strong><span>${scene.match_review_required?'需人工换镜头':best?'候选可复核':'缺少素材'}</span></div><p>${escapeHtml(scene.visual||scene.voiceover||'')}</p>${best?`<div class="best-candidate">最佳候选：素材 ${best.asset_id||scene.asset_id||'未知'} · ${formatSegmentRange(best.start_ms,best.end_ms)} · 匹配分 ${Number(best.match_score||0).toFixed(2)}</div><details><summary>查看 Top ${candidates.length} 匹配依据</summary>${candidates.map((candidate,rank)=>`<div class="candidate-detail"><strong>${rank+1}. 素材 ${candidate.asset_id||'未知'} · ${formatSegmentRange(candidate.start_ms,candidate.end_ms)}</strong><span>匹配分 ${Number(candidate.match_score||0).toFixed(2)}${candidate.review_required?' · 低于质量门槛':''}</span><p>${escapeHtml(candidate.description||'暂无镜头描述')}</p><small>${(candidate.reasons||[]).map(reason=>escapeHtml(reason)).join('；')||'没有足够的直接匹配依据'}</small></div>`).join('')}</details>`:'<div class="material-gap">缺少与该段口播相关的本地镜头，请补充对应场景、动作或主体素材。</div>'}</article>`;}).join('')}</div>`;
+}
+
+function formatSegmentRange(startMs,endMs){
+  if(startMs==null||endMs==null)return '时间范围待确认';
+  return `${(Number(startMs)/1000).toFixed(1)}–${(Number(endMs)/1000).toFixed(1)} 秒`;
+}
+
+function renderTechnicalDetails(){
+  const manifest=sampleBundle?.manifest||{};
+  const usage=manifest.model_usage||{};
+  const claimIds=manifest.claim_ids||sampleBundle?.video?.claim_ids||[];
+  return `<details class="technical-details"><summary>技术明细</summary><div>热点 ID：${selectedHotspot.id}</div><div>证据包：${escapeHtml(evidencePackage?.id||sampleBundle?.evidence_package_id||'尚未创建')}</div><div>样本包：${escapeHtml(sampleBundle?.id||'尚未创建')}</div><div>输出目录：${escapeHtml(sampleBundle?.output_dir||'尚未生成')}</div><div>Claim IDs：${claimIds.length?claimIds.map(id=>escapeHtml(id)).join('、'):'尚未生成'}</div><div>模型预算：调用 ${Number(usage.calls_used||0)}/${Number(usage.max_calls||0)}，输入 ${Number(usage.input_tokens_used||0)}，输出 ${Number(usage.output_tokens_used||0)}</div><div>素材策略：自有素材优先；许可媒体仅作补充；来源不明不下载。</div></details>`;
+}
+
+function renderOutputs(){
+  const issues=sampleBundle.quality_issues||[];
+  return `<div class="internal-warning"><strong>内部测试，不可发布</strong><span>必须人工检查事实、品牌表述与画面匹配后，才能进入正式生产。</span></div><div class="output-tabs"><button class="${outputTab==='video'?'active':''}" onclick="outputTab='video';render()">视频</button><button class="${outputTab==='carousel'?'active':''}" onclick="outputTab='carousel';render()">图文</button><button class="${outputTab==='wechat'?'active':''}" onclick="outputTab='wechat';render()">公众号</button></div>${renderOutputContent()}<div class="quality-panel"><strong>质量检查</strong><ul>${issues.map(item=>`<li>${escapeHtml(item)}</li>`).join('')||'<li>暂无自动阻断项，仍需人工复核。</li>'}</ul></div><button class="btn btn-secondary" onclick="sampleBundle=null;render()">重新生成前检查证据</button>`;
+}
+
+function renderOutputContent(){
+  if(outputTab==='video'){
+    const video=sampleBundle.video||{};
+    const previewUrl=samplePreviewUrl();
+    const previewStatus=sampleBundle.manifest?.video_preview?.quality_report?.status;
+    const materialBlocked=video.material_status==='blocked';
+    const gaps=video.material_gaps||[];
+    const blockTitle=gaps.some(item=>item.includes('热点素材'))?'热点素材未就绪，暂不可成片':'原本素材未就绪，暂不可成片';
+    const preview=materialBlocked
+      ?`<div class="material-gap"><strong>${blockTitle}</strong><p>${gaps.map(item=>escapeHtml(item)).join('；')}</p></div>`
+      :previewUrl
+        ?`<video controls src="${escapeHtml(previewUrl)}"></video><p class="preview-state">本地 MP4 预览：${escapeHtml(previewStatus||'已生成，待人工检查')}</p>`
+        :'<div class="preview-empty">本地 MP4 预览尚未生成；当前先检查脚本和镜头匹配。</div>';
+    return `<div class="output-content"><h4>${escapeHtml(video.title||'视频脚本')}</h4>${preview}<ol class="scene-list">${(video.scenes||[]).map(scene=>`<li class="${scene.match_review_required?'weak-match':''}"><div><strong>${escapeHtml(scene.business_role||`镜头 ${scene.scene}`)}</strong><span>${Number(scene.duration||0)} 秒</span></div><p>${escapeHtml(scene.voiceover||'')}</p><small>${scene.asset_id?`素材 ${scene.asset_id} · ${formatSegmentRange(scene.asset_start_ms,scene.asset_end_ms)} · 匹配分 ${Number(scene.match_score||0).toFixed(2)}${scene.match_review_required?' · 需人工换镜头':''}`:'未找到足够相关的本地镜头'}</small></li>`).join('')}</ol></div>`;
+  }
+  if(outputTab==='carousel'){
+    const carousel=sampleBundle.carousel||{};
+    return `<div class="output-content"><h4>${escapeHtml(carousel.title||'图文方案')}</h4><div class="carousel-pages">${(carousel.pages||[]).map(page=>`<article><span>第 ${page.page} 页</span><strong>${escapeHtml(page.title||'')}</strong><p>${escapeHtml(page.body||'')}</p></article>`).join('')}</div></div>`;
+  }
+  const wechat=sampleBundle.wechat||{};
+  return `<div class="output-content"><h4>${escapeHtml(wechat.title||'公众号软文')}</h4><div class="wechat-body">${escapeHtml(wechat.body||'')}</div><div class="wechat-sources"><strong>事实来源</strong>${(wechat.source_refs||[]).map(ref=>`<a href="${escapeHtml(ref.url||'#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(ref.publisher||'原始来源')}｜${escapeHtml(ref.source_title||ref.claim||'查看原文')}</a>`).join('')||'<span>当前样本没有可展示的来源链接</span>'}</div></div>`;
+}
+
+function samplePreviewUrl(){
+  const raw=sampleBundle?.preview_path||sampleBundle?.manifest?.video_preview?.path||sampleBundle?.video?.preview_path||'';
+  if(!raw)return '';
+  if(/^https?:\/\//i.test(raw)||raw.startsWith('/static/'))return raw;
+  const marker='/static/';const index=raw.indexOf(marker);
+  return index>=0?raw.slice(index):'/static/'+raw.replace(/^\/+/, '');
+}
+
+async function selectHotspot(id){
+  if(id===selectedHotspotId)return;
+  selectedHotspotId=id;sessionStorage.setItem('selectedHotspotId',String(id));
+  selectedHotspot=hotspots.find(item=>item.id===id)||null;
+  evidencePackage=null;sampleBundle=null;hotspotMedia=[];outputTab='video';render();
+  await loadSelectedHotspotMedia();render();ensureHotspotTranslation();
+  await loadSelectedHistory();
+}
+
+async function buildEvidencePackage(){
+  if(!selectedHotspot)return;
+  const brand_evidence_ids=[...document.querySelectorAll('.brand-evidence-check:checked')].map(input=>Number(input.value));
+  busyAction='evidence';render();
+  try{
+    const r=await apiFetch(`/api/hotspots/${selectedHotspot.id}/evidence-package`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand_evidence_ids})});
+    evidencePackage=await r.json();showToast('事实与品牌证据已锁定');
+  }catch(error){showToast(error.message,'error');}
+  busyAction='';render();
+}
+
+async function generateSamples(){
+  if(!evidencePackage)return;
+  busyAction='sample';render();
+  try{
+    const r=await apiFetch(`/api/evidence-packages/${evidencePackage.id}/sample-bundle`,{method:'POST'});
+    sampleBundle=await r.json();outputTab='video';showToast('三类内部样本已生成');
+  }catch(error){showToast(error.message,'error');}
+  busyAction='';render();
+}
+
+async function fetchLatest(){
+  busyAction='fetch';
+  fetchRun={status:'running',started_at:new Date().toISOString(),result:{source_health:[]}};
+  render();
+  try{
+    const r=await apiFetch('/api/hotspots/fetch',{method:'POST'});
+    const result=await r.json();fetchRun=result.run;
+    await Promise.all([loadHotspots(),loadAssets(),loadHotspotMediaIndex()]);chooseInitialHotspot();await loadSelectedHotspotMedia();
+    const message=fetchRun?.status==='failed'?'抓取结束，全部信源失败':fetchRun?.status==='partial'?'抓取完成，部分信源失败':'热点抓取完成';
+    showToast(message,fetchRun?.status==='succeeded'?'success':'error');
+  }catch(error){await loadFetchStatus();showToast(error.message,'error');}
+  busyAction='';render();
+}
+
+async function pollFetchStatus(){
+  await loadFetchStatus();render();
+  if(fetchRun?.status==='running')setTimeout(pollFetchStatus,1600);
+  else{await Promise.all([loadHotspots(),loadHotspotMediaIndex()]);chooseInitialHotspot();await loadSelectedHotspotMedia();render();}
+}
+
+function openCollectionGuide(){
+  document.getElementById('collectionDrawer').innerHTML=`<header><div><span>采集规则</span><h2>系统如何抓取热点</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content"><ol class="collection-steps"><li><strong>1. 读取官方 Feed 与公开视频频道</strong><p>官方新闻最多启用 5 个 HTTPS 信源；三个 YouTube 频道各读取最近 3 条单视频元数据，不下载频道。</p></li><li><strong>2. 用固定关键词筛选南非物流相关条目</strong><p>匹配南非、港口、海关、货运、仓库等词；抓取不调用文本大模型。</p></li><li><strong>3. 打开原文并发现正文媒体</strong><p>保存证据快照，并从文章主体发现图片、网页视频和 YouTube 嵌入；Logo、广告和头像会被过滤。</p></li><li><strong>4. 媒体与事实分开处理</strong><p>版权不明确的媒体不会自动下载。图片和视频都要完成权利确认，下载分析后才能进入成片。</p></li></ol><div class="rule-note"><strong>为什么这样做</strong><p>热点负责提供真实语境，自有素材负责展示 Buffalo 的日常履约流程。两者不会被拼成虚假的“新闻现场”。</p></div></div>`;
+  openDrawer('collectionDrawer');
+}
+
+function openSourceManager(){renderSourceManager();openDrawer('sourceDrawer');}
+function renderSourceManager(){
+  const admin=getCurrentUser().role==='admin';
+  const configured=sources.length?sources:[];
+  const configuredNames=new Set(configured.map(item=>item.name));
+  const videoHealthSources=sourceHealth().filter(item=>!configuredNames.has(item.name)).map((item,index)=>({id:`health-${index}`,name:item.name,enabled:true,feed_url:'公开视频频道',allowed_domains:[]}));
+  const displaySources=[...configured,...videoHealthSources];
+  const hasFailures=sourceHealth().some(item=>item.status==='error');
+  const mediaFailures=fetchRun?.result?.media_errors||[];
+  document.getElementById('sourceDrawer').innerHTML=`<header><div><span>最多启用 5 个</span><h2>可信信源与健康状态</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content">${hasFailures&&admin?'<button class="btn btn-primary source-retry" type="button" onclick="closeDrawers();fetchLatest()">重新抓取全部启用信源</button>':''}<div class="source-list">${displaySources.map(source=>{const health=healthByName(source.name);return `<article><div><strong>${escapeHtml(source.name)}</strong><span class="health-dot ${health?.status==='ok'?'ok':health?.status==='error'?'error':'idle'}">${health?.status==='ok'?'正常':health?.status==='error'?'失败':'未检测'}</span></div><p>${escapeHtml(sourcePurpose[source.name]||'管理员配置的公开可信来源')}</p><small>${escapeHtml(source.feed_url||'等待下一次抓取检测')}</small>${health?.error?`<p class="source-error">失败原因：${escapeHtml(health.error)}</p>`:''}${admin&&source.feed_url?`<label class="source-toggle"><input type="checkbox" ${source.enabled?'checked':''} onchange="toggleSource(${source.id},this.checked)"/><span>${source.enabled?'已启用':'已停用'}</span></label>`:''}</article>`;}).join('')||'<p class="drawer-empty">尚未配置可信源。</p>'}</div>${mediaFailures.length?`<div class="media-failure-note"><strong>可选配图失败 ${mediaFailures.length} 项</strong><p>事实来源仍然有效，只是开放许可补充配图没有成功下载。</p></div>`:''}${admin?`<form class="source-form" onsubmit="addSource(event)"><h3>添加信源</h3><label>名称<input class="input" id="sourceName" required maxlength="100"/></label><label>RSS / Atom HTTPS 地址<input class="input" id="sourceUrl" type="url" required placeholder="https://example.org/feed.xml"/></label><label>允许的原文域名<input class="input" id="sourceDomains" placeholder="example.org，多个用逗号分隔"/></label><button class="btn btn-primary" type="submit">添加并启用</button></form>`:''}<div class="rule-note"><strong>判定口径</strong><p>“正常”只代表 Feed 能读取并完成解析，不代表每次都一定有符合关键词的新热点。</p></div></div>`;
+}
+
+async function addSource(event){
+  event.preventDefault();
+  const name=document.getElementById('sourceName').value.trim();
+  const feed_url=document.getElementById('sourceUrl').value.trim();
+  const host=new URL(feed_url).hostname;
+  const allowed_domains=(document.getElementById('sourceDomains').value||host).split(/[,，]/).map(item=>item.trim()).filter(Boolean);
+  try{await apiFetch('/api/hotspot-sources',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,feed_url,allowed_domains,enabled:true})});await loadSources();renderSourceManager();showToast('可信源已添加');}catch(error){showToast(error.message,'error');}
+}
+
+async function toggleSource(id,enabled){
+  const source=sources.find(item=>item.id===id);if(!source)return;
+  try{await apiFetch(`/api/hotspot-sources/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:source.name,feed_url:source.feed_url,allowed_domains:source.allowed_domains,enabled})});await loadSources();renderSourceManager();showToast(enabled?'信源已启用':'信源已停用');}catch(error){showToast(error.message,'error');renderSourceManager();}
+}
+
+function openBrandManager(){renderBrandManager();openDrawer('brandDrawer');}
+function renderBrandManager(){
+  document.getElementById('brandDrawer').innerHTML=`<header><div><span>品牌表述白名单</span><h2>品牌证据管理</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content"><div class="source-list">${brandEvidence.map(item=>`<article><div><strong>${escapeHtml(item.claim)}</strong><span class="health-dot ${item.status==='confirmed'?'ok':'idle'}">${item.status==='confirmed'?'已确认':'待确认'}</span></div><p>${escapeHtml(item.evidence_note)}</p><small>公开级别：${escapeHtml(item.disclosure_level)}</small>${item.status==='draft'?`<button class="btn btn-primary btn-sm evidence-confirm" type="button" onclick="confirmBrandEvidence(${item.id})">人工确认可公开使用</button>`:''}</article>`).join('')||'<p class="drawer-empty">尚无品牌证据。样本将自动去掉时效、覆盖率和业绩承诺。</p>'}</div><form class="source-form" onsubmit="addBrandEvidence(event)"><h3>新增待确认表述</h3><label>允许公开引用的品牌事实<textarea class="input" id="brandClaim" rows="3" required placeholder="只填写能够由内部资料证明的事实"></textarea></label><label>证据位置与适用边界<textarea class="input" id="brandEvidenceNote" rows="4" required placeholder="依据在哪里、由谁核验、不能推导出什么"></textarea></label><button class="btn btn-primary" type="submit">保存为待确认</button></form><div class="rule-note"><strong>确认原则</strong><p>不能因为素材里出现仓库或车辆，就推导出具体时效、覆盖范围或某次热点事件中的履约结果。</p></div></div>`;
+}
+
+async function addBrandEvidence(event){
+  event.preventDefault();
+  const claim=document.getElementById('brandClaim').value.trim();
+  const evidence_note=document.getElementById('brandEvidenceNote').value.trim();
+  try{await apiFetch('/api/brand-evidence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim,evidence_note,disclosure_level:'public'})});await loadBrandEvidence();render();renderBrandManager();showToast('品牌证据已保存，确认后才能用于样本');}catch(error){showToast(error.message,'error');}
+}
+
+async function confirmBrandEvidence(id){
+  try{await apiFetch(`/api/brand-evidence/${id}/confirm`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'confirmed'})});await loadBrandEvidence();render();renderBrandManager();showToast('品牌证据已确认');}catch(error){showToast(error.message,'error');}
+}
+
+function openDrawer(id){closeDrawers();document.getElementById('drawerBackdrop').hidden=false;document.getElementById(id).hidden=false;requestAnimationFrame(()=>document.getElementById(id).classList.add('open'));}
+function closeDrawers(){document.getElementById('drawerBackdrop').hidden=true;for(const id of ['collectionDrawer','sourceDrawer','brandDrawer']){const el=document.getElementById(id);el.classList.remove('open');el.hidden=true;}}
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closeDrawers();});
+init();
+  </script>
+  <script>
+/* Event-level topic package workspace. This overrides the legacy single-news workbench. */
+let packages=[], selectedPackage=null;
+let topicPackageListScrollTop=0, packageSelectionRequest=0;
+let packageFilters={query:'',source:'',event_type:'',heat_state:'',media_form:'',since:''};
+
+async function loadPackages(){
+  const search=new URLSearchParams(Object.entries(packageFilters).filter(([,value])=>value));
+  const response=await apiFetch(`/api/hotspot-packages?${search}`);
+  packages=await response.json();
+}
+async function loadPackageDetail(id){
+  const response=await apiFetch(`/api/hotspot-packages/${id}`);
+  selectedPackage=await response.json();
+  sessionStorage.setItem('selectedHotspotId',String(id));
+}
+async function topicPackInit(){
+  await Promise.all([loadPackages(),loadFetchStatus()]);
+  const requested=Number(params.get('hotspot_id')||sessionStorage.getItem('selectedHotspotId')||0);
+  const initial=packages.find(item=>item.id===requested)||packages[0];
+  if(initial)await loadPackageDetail(initial.id);
+  renderTopicPackages();
+}
+function packageMediaTab(label, items){
+  return `<section class="workflow-section"><div class="section-heading"><div><span>${label}</span><h3>${items.length} 项</h3></div></div>${items.map(item=>`<article class="scene-review"><div class="scene-review-head"><strong>${escapeHtml(item.publisher||item.platform||'来源未注明')}</strong><span>${formatDate(item.published_at)}</span></div><p>${escapeHtml(item.rights_tier||'unknown')} · ${escapeHtml(item.download_status||'link_only')}</p><div class="section-actions"><a class="btn btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.source_page_url||item.original_media_url||'#')}">打开原文</a>${getCurrentUser().role==='admin'?`<button class="btn btn-secondary" onclick="preparePackageMedia(${item.id})">准备分析</button>`:''}</div></article>`).join('')||'<p class="section-help">暂无候选素材；外部内容默认仅保存链接。</p>'}</section>`;
+}
+function rememberTopicPackageListScroll(){const list=document.querySelector('.hotspot-list');if(list)topicPackageListScrollTop=list.scrollTop;}
+function restoreTopicPackageListScroll(){requestAnimationFrame(()=>{const list=document.querySelector('.hotspot-list');if(list)list.scrollTop=topicPackageListScrollTop;});}
+function packageMaterialLabel(item){return Number(item.video_count||0)+Number(item.image_count||0)>0?'有素材':'仅事实信号';}
+function renderTopicPackages(){
+  rememberTopicPackageListScroll();
+  const admin=getCurrentUser().role==='admin';
+  const selected=selectedPackage;
+  document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content hotspot-page"><header class="page-header hotspot-header"><div><p class="eyebrow">SOUTH AFRICA CONTENT SIGNALS</p><h1 class="page-title">热点专题包</h1><p class="page-subtitle">按事件汇总可信来源、媒体候选和物流角度；确认专题包不会自动下载外部媒体。</p></div><div class="header-actions">${admin?'<button class="btn btn-secondary" onclick="openSourceManager()">信源管理</button><button class="btn btn-primary" onclick="fetchTopicPackages()">'+icon('M12 4V1L8 5l4 4V6a6 6 0 11-5.65 8H4.26A8 8 0 1012 4z')+'<span>抓取最新热点</span></button>':''}</div></header><div class="page-body hotspot-body"><section class="workbench-grid"><aside class="hotspot-list-panel"><div class="list-toolbar"><h2>专题包 <span>${packages.length}</span></h2><div class="filter-row"><input class="input" placeholder="搜索专题包" value="${escapeHtml(packageFilters.query)}" oninput="setPackageFilter('query',this.value)"/><select class="select" onchange="setPackageFilter('event_type',this.value)"><option value="">事件类型</option><option value="strike">罢工/抗议</option><option value="risk">风险</option><option value="infrastructure">基础设施</option><option value="ecommerce_growth">电商增长</option></select><select class="select" onchange="setPackageFilter('heat_state',this.value)"><option value="">升温状态</option><option value="rising">正在升温</option><option value="unconfirmed">待确认</option></select><select class="select" onchange="setPackageFilter('media_form',this.value)"><option value="">全部专题包</option><option value="has_media">有素材</option><option value="none">仅事实信号</option><option value="video">视频</option><option value="image">图片</option></select></div></div><div class="hotspot-list">${packages.map(item=>`<button class="hotspot-card ${selected?.id===item.id?'selected':''}" onclick="selectPackage(${item.id})"><span class="card-source">${escapeHtml(item.event_type||'unknown')} · ${Number(item.heat_score||0).toFixed(0)} 分 · ${packageMaterialLabel(item)}</span><strong>${escapeHtml(item.title_zh||item.title)}</strong><p>${escapeHtml(item.summary_zh||item.summary||'暂无摘要')}</p><span class="card-meta">${escapeHtml((item.locations||[]).join('、')||'地点待确认')} · 视频 ${item.video_count||0} · 图片 ${item.image_count||0} · 纯文本 ${item.text_count||0}</span></button>`).join('')||'<div class="list-empty"><strong>暂无专题包</strong><p>运行抓取后会在这里显示事件级专题包。</p></div>'}</div></aside><section class="hotspot-workspace">${selected?renderTopicPackageDetail(selected):'<div class="workspace-empty"><strong>暂无可查看的专题包</strong></div>'}</section></section></div></main>`;
+  restoreTopicPackageListScroll();
+}
+function renderTopicPackageDetail(item){
+  const groups=item.media_groups||{video:[],image:[],text:[]};
+  const confirmed=item.package_status==='confirmed';
+  const canEdit=['admin','editor'].includes(getCurrentUser().role);
+  const mediaSections=(groups.video.length||groups.image.length)
+    ? packageMediaTab('视频素材',groups.video)+packageMediaTab('图片素材',groups.image)
+    : `<section class="workflow-section"><div class="section-heading"><div><span>素材状态</span><h3>仅事实信号</h3></div></div><p class="section-help">该专题包保存来源、标题和事实摘要，不包含图片或视频候选，因此不会进入热点素材库或视频工作流。</p></section>`;
+  return `<div class="workflow-head"><div><span>${escapeHtml(item.heat_state||'unconfirmed')} · 热度 ${Number(item.heat_score||0).toFixed(0)}</span><h2>${escapeHtml(item.title_zh||item.title)}</h2><p class="workspace-original">${escapeHtml(item.title||'')}</p></div><a target="_blank" rel="noopener" href="${escapeHtml(item.source_url||'#')}">打开原文</a></div><section class="workflow-section"><div class="section-heading"><div><span>事件摘要</span><h3>专题包概览</h3></div><span class="status-chip ${confirmed?'ok':'pending'}">${confirmed?'已确认':'待确认'}</span></div><p class="source-summary">${escapeHtml(item.summary_zh||item.summary||'暂无摘要')}</p><dl class="fact-grid"><div><dt>来源信号</dt><dd>${item.signal_count||0}</dd></div><div><dt>物流相关度</dt><dd>${Number(item.logistics_relevance||0).toFixed(0)}</dd></div><div><dt>事件类型</dt><dd>${escapeHtml(item.event_type||'unknown')}</dd></div><div><dt>城市</dt><dd>${escapeHtml((item.locations||[]).join('、')||'待确认')}</dd></div></dl></section><section class="workflow-section"><div class="section-heading"><div><span>来源信号</span><h3>信号时间线</h3></div></div><div class="scene-review-list">${(item.signals||[]).map(signal=>`<article class="scene-review"><div class="scene-review-head"><strong>${escapeHtml(signal.source_name)}</strong><span>${formatDate(signal.published_at||signal.retrieved_at)}</span></div><p>${escapeHtml(signal.title)}</p><a href="${escapeHtml(signal.source_url)}" target="_blank" rel="noopener">打开原文</a></article>`).join('')}</div></section>${mediaSections}${packageMediaTab('纯文本',groups.text)}<section class="workflow-section"><div class="section-heading"><div><span>权利汇总</span><h3>外部媒体默认仅保存链接</h3></div></div><p class="section-help">${Object.entries(item.rights_summary||{}).map(([key,value])=>`${key}: ${value}`).join(' · ')||'暂无媒体权利记录'}</p><div class="section-actions">${!confirmed&&canEdit?`<button class="btn btn-primary" onclick="confirmTopicPackage(${item.id})">确认并入热点库</button>`:''}<button class="btn btn-secondary" onclick="showToast('当前专题包仅保存链接，不会批量下载媒体')">仅保存链接</button><a class="btn btn-secondary" href="/video-followup.html?hotspot_id=${item.id}">生成视频跟进</a></div></section>`;
+}
+async function setPackageFilter(key,value){packageFilters[key]=value;await loadPackages();renderTopicPackages();}
+async function selectPackage(id){
+  rememberTopicPackageListScroll();
+  const request=++packageSelectionRequest;
+  try{
+    const response=await apiFetch(`/api/hotspot-packages/${id}`);
+    const detail=await response.json();
+    if(request!==packageSelectionRequest)return;
+    selectedPackage=detail;
+    sessionStorage.setItem('selectedHotspotId',String(id));
+    renderTopicPackages();
+  }catch(error){if(request===packageSelectionRequest)showToast(error.message,'error');}
+}
+async function confirmTopicPackage(id){try{await apiFetch(`/api/hotspot-packages/${id}/confirm`,{method:'POST'});await loadPackageDetail(id);await loadPackages();renderTopicPackages();showToast('专题包已确认，外部媒体仍保持链接状态');}catch(error){showToast(error.message,'error');}}
+async function preparePackageMedia(id){try{await apiFetch(`/api/hotspot-media/${id}/prepare`,{method:'POST'});showToast('媒体已进入准备分析队列');await loadPackageDetail(selectedPackage.id);renderTopicPackages();}catch(error){showToast(error.message,'error');}}
+async function fetchTopicPackages(){try{await apiFetch('/api/hotspots/fetch',{method:'POST'});await loadPackages();const next=packages[0];if(next)await loadPackageDetail(next.id);renderTopicPackages();showToast('热点抓取完成');}catch(error){showToast(error.message,'error');}}
+topicPackInit();
+  </script>
+  <style>
+.hotspot-page{min-width:0;--content-video-bg:#eef2ff;--content-video-text:#3730a3;--content-image-bg:#ecfdf5;--content-image-text:#166534;--content-text-bg:#f3f4f6;--content-text-color:#4b5563}.hotspot-header{align-items:flex-end;gap:24px}.eyebrow{margin:0 0 7px;color:#a36d2c;font-size:10px;font-weight:800;letter-spacing:.18em}.page-subtitle{margin:5px 0 0;color:var(--text-muted);font-size:13px}.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.header-actions .btn{gap:7px}.hotspot-body{padding-top:18px}.fetch-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:#fff;border:1px solid var(--border);border-radius:14px;margin-bottom:16px;overflow:hidden}.fetch-summary>div{position:relative;display:grid;gap:4px;padding:14px 18px}.fetch-summary>div+div{border-left:1px solid var(--border)}.fetch-summary span,.fetch-summary small{color:var(--text-muted);font-size:10px}.fetch-summary strong{font-size:13px}.fetch-summary button{position:absolute;right:16px;bottom:13px;border:0;background:none;color:#9a672b;font-size:10px;cursor:pointer}.run-state{width:max-content;padding:2px 7px;border-radius:99px;background:#f3f4f6}.run-state.succeeded{background:#ecfdf5;color:#15803d}.run-state.partial{background:#fff7ed;color:#c2410c}.run-state.failed{background:#fef2f2;color:#b91c1c}.run-state.running{background:#eff6ff;color:#1d4ed8}.workbench-grid{display:grid;grid-template-columns:minmax(300px,36%) minmax(0,1fr);gap:16px;align-items:start}.hotspot-list-panel,.hotspot-workspace{background:#fff;border:1px solid var(--border);border-radius:16px;min-width:0}.hotspot-list-panel{position:sticky;top:16px;max-height:calc(100vh - 160px);overflow:hidden;display:flex;flex-direction:column}.list-toolbar{padding:17px;border-bottom:1px solid var(--border)}.list-toolbar h2{font-size:15px;margin:0 0 12px}.list-toolbar h2 span{color:var(--text-muted);font-size:11px;font-weight:500}.filter-row{display:grid;grid-template-columns:minmax(130px,1fr) 86px 112px 90px;gap:7px}.filter-row .input,.filter-row .select{min-width:0;font-size:11px;padding:8px}.hotspot-list{overflow-y:auto;padding:8px}.hotspot-card{display:block;width:100%;border:1px solid transparent;border-radius:11px;background:none;padding:12px;text-align:left;color:var(--text-primary);cursor:pointer}.hotspot-card:hover{background:#faf8f4}.hotspot-card.selected{border-color:#c8954f;background:#fffaf2;box-shadow:0 0 0 1px rgba(200,149,79,.12)}.hotspot-card+.hotspot-card{margin-top:5px}.card-title-row,.workflow-title-row{display:flex;align-items:flex-start;gap:8px}.card-title-row strong{flex:1;min-width:0}.hotspot-card strong{display:block;font-size:12px;line-height:1.45;margin:5px 0}.content-form-tag{display:inline-flex;align-items:center;flex:0 0 auto;margin-top:5px;padding:2px 7px;border-radius:999px;font-size:9px;font-weight:700;line-height:1.5}.content-form-tag.video{background:var(--content-video-bg);color:var(--content-video-text)}.content-form-tag.image{background:var(--content-image-bg);color:var(--content-image-text)}.content-form-tag.text{background:var(--content-text-bg);color:var(--content-text-color)}.hotspot-card p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:0 0 7px;color:var(--text-secondary);font-size:10px;line-height:1.5}.card-source{color:#9a672b;font-size:9px;font-weight:700}.card-meta{color:var(--text-muted);font-size:9px}.list-empty,.workspace-empty{display:grid;place-items:center;text-align:center;padding:52px 24px;color:var(--text-muted)}.list-empty strong,.workspace-empty strong{color:var(--text-primary);font-size:13px}.list-empty p,.workspace-empty p{font-size:11px}.workspace-empty svg{margin-bottom:12px}.hotspot-workspace{padding:20px}.workflow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding-bottom:18px;border-bottom:1px solid var(--border)}.workflow-head span{color:var(--text-muted);font-size:10px}.workflow-title-row{margin-top:5px}.workflow-title-row h2{flex:1;min-width:0;margin:0}.workflow-title-row .content-form-tag{margin-top:3px}.workflow-head h2{max-width:720px;font-size:18px;line-height:1.4}.workflow-head a{white-space:nowrap;color:#9a672b;font-size:11px}.workflow-steps{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;list-style:none;padding:16px 0;margin:0}.workflow-steps li{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:10px}.workflow-steps li:after{content:"";height:1px;background:var(--border);flex:1}.workflow-steps li:last-child:after{display:none}.workflow-steps span{display:grid;place-items:center;width:20px;height:20px;border:1px solid var(--border);border-radius:50%;font-size:9px}.workflow-steps .active{color:#9a672b;font-weight:700}.workflow-steps .active span{border-color:#c8954f;background:#fff7e8}.workflow-steps .done{color:#166534}.workflow-steps .done span{border-color:#86efac;background:#ecfdf5}.workflow-section{border:1px solid var(--border);border-radius:13px;padding:16px;margin-bottom:12px}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.section-heading>div>span{display:block;color:#a36d2c;font-size:9px;font-weight:700;text-transform:uppercase}.section-heading h3{font-size:14px;margin:3px 0 0}.status-chip{padding:3px 8px;border-radius:99px;background:#f3f4f6;color:#6b7280;font-size:9px}.status-chip.ok{background:#ecfdf5;color:#15803d}.status-chip.warning{background:#fff7ed;color:#c2410c}.fact-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.fact-grid>div{background:#fafafa;border-radius:8px;padding:9px}.fact-grid dt{color:var(--text-muted);font-size:9px}.fact-grid dd{margin:3px 0 0;font-size:11px}.source-summary,.section-help{color:var(--text-secondary);font-size:11px;line-height:1.65}.brand-evidence-list{display:grid;gap:7px;margin:10px 0}.brand-evidence-list label{display:flex;align-items:flex-start;gap:8px;padding:9px;border:1px solid var(--border);border-radius:8px}.brand-evidence-list input{margin-top:2px}.brand-evidence-list strong,.brand-evidence-list small{display:block;font-size:10px}.brand-evidence-list small{color:var(--text-muted);margin-top:3px}.section-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.notice-box,.evidence-result,.rule-note{border:1px solid #f0d7a9;background:#fffaf0;border-radius:9px;padding:11px 12px;margin:10px 0}.notice-box strong,.evidence-result strong,.rule-note strong{font-size:11px}.notice-box p,.evidence-result p,.rule-note p{margin:4px 0 0;color:var(--text-secondary);font-size:10px;line-height:1.55}.material-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.material-summary>div{background:#fafafa;border-radius:9px;padding:11px}.material-summary strong,.material-summary span{display:block}.material-summary strong{font-size:18px}.material-summary span{color:var(--text-muted);font-size:9px}.internal-warning{display:flex;gap:10px;align-items:center;border:1px solid #efc46f;background:#fff8e8;border-radius:9px;padding:10px 12px}.internal-warning strong{color:#8a5914;font-size:11px;white-space:nowrap}.internal-warning span{color:var(--text-secondary);font-size:10px}.output-tabs{display:flex;gap:18px;border-bottom:1px solid var(--border);margin:13px 0}.output-tabs button{border:0;border-bottom:2px solid transparent;background:none;padding:8px 1px;color:var(--text-muted);font-size:11px;cursor:pointer}.output-tabs button.active{border-bottom-color:#b77b36;color:var(--text-primary);font-weight:700}.output-content h4{font-size:14px;margin:0 0 10px}.output-content video{width:100%;max-height:420px;border-radius:10px;background:#111}.scene-list{padding-left:20px}.scene-list li{margin:9px 0;padding-left:3px}.scene-list li>div{display:flex;justify-content:space-between;gap:12px}.scene-list strong{font-size:11px}.scene-list span,.scene-list small{color:var(--text-muted);font-size:9px}.scene-list p{margin:4px 0;color:var(--text-secondary);font-size:10px}.carousel-pages{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.carousel-pages article{border:1px solid var(--border);border-radius:9px;padding:11px}.carousel-pages span,.carousel-pages strong{display:block}.carousel-pages span{color:var(--text-muted);font-size:9px}.carousel-pages strong{font-size:11px;margin:4px 0}.carousel-pages p{font-size:10px;color:var(--text-secondary);line-height:1.5}.wechat-body{max-height:420px;overflow:auto;white-space:pre-wrap;background:#fafafa;border-radius:9px;padding:14px;font-size:11px;line-height:1.75}.quality-panel{margin:12px 0;background:#fafafa;border-radius:9px;padding:11px}.quality-panel strong{font-size:11px}.quality-panel ul{margin:6px 0 0;padding-left:18px;color:var(--text-secondary);font-size:10px;line-height:1.6}.technical-details{border-top:1px solid var(--border);padding-top:12px;color:var(--text-muted);font-size:10px}.technical-details summary{cursor:pointer;color:var(--text-secondary);font-weight:600}.technical-details div{margin-top:5px}.drawer-backdrop{position:fixed;inset:0;z-index:10000;background:rgba(17,24,39,.35)}.drawer-backdrop[hidden],.workbench-drawer[hidden]{display:none}.workbench-drawer{position:fixed;right:0;top:0;bottom:0;z-index:10001;width:min(460px,92vw);background:#fff;box-shadow:-18px 0 45px rgba(17,24,39,.16);transform:translateX(100%);transition:transform .2s ease}.workbench-drawer.open{transform:translateX(0)}.workbench-drawer>header{display:flex;align-items:center;justify-content:space-between;padding:20px;border-bottom:1px solid var(--border)}.workbench-drawer header span{color:#a36d2c;font-size:9px;font-weight:700}.workbench-drawer header h2{font-size:17px;margin:4px 0 0}.workbench-drawer header button{border:0;background:none;font-size:24px;color:var(--text-muted);cursor:pointer}.drawer-content{height:calc(100% - 82px);overflow:auto;padding:18px}.collection-steps{list-style:none;padding:0;margin:0}.collection-steps li{padding:12px 0;border-bottom:1px solid var(--border)}.collection-steps strong{font-size:12px}.collection-steps p{margin:5px 0 0;color:var(--text-secondary);font-size:10px;line-height:1.6}.source-list{display:grid;gap:8px}.source-list article{position:relative;border:1px solid var(--border);border-radius:10px;padding:12px}.source-list article>div{display:flex;align-items:center;justify-content:space-between;gap:8px}.source-list strong{font-size:11px}.source-list p{margin:5px 0;color:var(--text-secondary);font-size:10px}.source-list small{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted);font-size:9px}.health-dot{padding:2px 7px;border-radius:99px;background:#f3f4f6;color:#6b7280;font-size:9px}.health-dot.ok{background:#ecfdf5;color:#15803d}.health-dot.error{background:#fef2f2;color:#b91c1c}.source-toggle{display:flex;align-items:center;gap:5px;margin-top:8px;font-size:9px;color:var(--text-secondary)}.source-form{display:grid;gap:10px;border-top:1px solid var(--border);margin-top:18px;padding-top:18px}.source-form h3{font-size:13px;margin:0}.source-form label{font-size:10px;color:var(--text-secondary)}.source-form .input{display:block;width:100%;margin-top:4px}.source-form textarea{resize:vertical}.evidence-confirm{margin-top:9px}.drawer-empty{color:var(--text-muted);font-size:11px}
+.scene-review-list{display:grid;gap:8px;margin:12px 0}.scene-review{border:1px solid var(--border);border-radius:9px;padding:11px}.scene-review.weak{border-color:#efc46f;background:#fffaf0}.scene-review-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.scene-review-head strong{font-size:11px}.scene-review-head span{font-size:9px;color:var(--text-muted)}.scene-review.weak .scene-review-head span{color:#b45309;font-weight:700}.scene-review>p{margin:5px 0;color:var(--text-secondary);font-size:10px}.best-candidate{font-size:10px;color:var(--text-primary)}.scene-review details{margin-top:8px}.scene-review summary{cursor:pointer;color:#9a672b;font-size:10px}.candidate-detail{border-top:1px solid var(--border);padding:8px 0}.candidate-detail strong,.candidate-detail span,.candidate-detail small{display:block;font-size:9px}.candidate-detail span{color:#b45309;margin-top:2px}.candidate-detail p{margin:4px 0;color:var(--text-secondary);font-size:9px}.candidate-detail small{color:var(--text-muted);line-height:1.5}.material-gap{border:1px dashed #efc46f;border-radius:7px;padding:9px;color:#b45309;font-size:10px}.preview-empty{border:1px dashed var(--border);border-radius:9px;padding:12px;color:var(--text-muted);font-size:10px}.preview-state{color:var(--text-muted);font-size:9px}.wechat-sources{display:grid;gap:5px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}.wechat-sources strong{font-size:10px}.wechat-sources a,.wechat-sources span{color:#9a672b;font-size:9px}.source-error{color:#b91c1c!important;background:#fef2f2;border-radius:6px;padding:7px;margin-top:7px!important}.source-retry{width:100%;margin-bottom:12px}.media-failure-note{border:1px solid #f0d7a9;background:#fffaf0;border-radius:9px;padding:10px;margin-top:12px}.media-failure-note strong{font-size:10px}.media-failure-note p{margin:4px 0 0;color:var(--text-secondary);font-size:9px}.scene-list li.weak-match{border-left:2px solid #dc8a2c;background:#fff8ed;border-radius:5px;padding:7px 9px}.scene-list li.weak-match small{color:#b45309}
+.filter-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.filter-row .input{grid-column:1/-1}
+.hotspot-card .original-title{display:block;margin:-2px 0 6px;color:var(--text-muted);font-size:9px;line-height:1.45}.material-summary.dual-library-summary{grid-template-columns:repeat(4,1fr)}.rights-counts{display:flex;gap:7px;margin:9px 0}.rights-counts span{padding:3px 7px;border-radius:99px;font-size:9px}.rights-counts .green{background:#ecfdf5;color:#15803d}.rights-counts .yellow{background:#fff7ed;color:#c2410c}.rights-counts .red{background:#fef2f2;color:#b91c1c}.workspace-original{margin:5px 0 0;color:var(--text-muted);font-size:10px}.source-original{margin-top:8px;color:var(--text-muted);font-size:10px}.source-original summary{cursor:pointer}.source-original p{line-height:1.6}.translation-retry{border:0;background:none;padding:0;color:#9a672b;font:inherit;font-size:10px;cursor:pointer}
+@media(max-width:1100px){.hotspot-header{align-items:flex-start;flex-direction:column}.header-actions{justify-content:flex-start}.workbench-grid{grid-template-columns:1fr}.hotspot-list-panel{position:static;max-height:460px}.filter-row{grid-template-columns:repeat(3,minmax(0,1fr))}.material-summary.dual-library-summary{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:700px){.fetch-summary{grid-template-columns:1fr}.fetch-summary>div+div{border-left:0;border-top:1px solid var(--border)}.filter-row{grid-template-columns:1fr}.workflow-steps{grid-template-columns:repeat(2,1fr)}.fact-grid,.material-summary,.carousel-pages{grid-template-columns:1fr}.workflow-head{display:block}.workflow-head a{display:inline-block;margin-top:8px}.internal-warning{align-items:flex-start;flex-direction:column}}
+  </style>
+</body>
+</html>

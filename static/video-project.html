@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>视频项目 - SA-LogiFlow</title>
+<link rel="stylesheet" href="/static/design-system.css?v=7"/>
+<style>
+.project-main{overflow:auto}.project-head{align-items:flex-start}.project-subtitle{font-size:12px;color:var(--text-muted);margin-top:5px}.project-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(320px,.8fr);gap:16px}.project-card{border:1px solid var(--border-line);border-radius:10px;background:#fff;overflow:hidden}.project-card>header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border-light)}.project-card>header h2{font-size:15px}.project-card-body{padding:16px}.stage-line{display:flex;justify-content:space-between;font-size:12px}.project-progress{height:8px;margin:10px 0 14px;background:#ece7df;border-radius:4px;overflow:hidden}.project-progress i{display:block;height:100%;background:var(--primary);transition:width .25s}.project-actions{display:flex;gap:8px;flex-wrap:wrap}.issue-list{display:grid;gap:8px;margin-top:12px}.issue{padding:10px;border-left:3px solid #b86d2d;background:#fff7ea;border-radius:5px;font-size:12px;color:#704417}.match-score-note{padding:10px;border-radius:5px;background:#fef2f2;color:#991b1b;font-size:12px}.adjustment-note{padding:10px;border:1px solid #b7dfc5;border-radius:5px;background:#f0f9f3;color:#25613a;font-size:12px;line-height:1.55}.adjustment-note+*{margin-top:10px}.empty-note{padding:22px;text-align:center;color:var(--text-muted);font-size:12px}.scene-editor{display:grid;gap:10px}.scene-row{padding:12px;border:1px solid var(--border-light);border-radius:7px;background:var(--bg-subcard)}.scene-row header{display:flex;justify-content:space-between;margin-bottom:8px;font-size:12px;font-weight:800}.scene-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px}.scene-fields label,.voice-row label{font-size:11px;color:var(--text-muted)}.scene-fields textarea{min-height:68px;margin-top:4px}.voice-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}.voice-row select{width:140px}.media-box{margin-top:14px}.media-box video{width:100%;max-height:480px;background:#151515;border-radius:7px}.quality-table{display:grid;gap:7px;margin-top:10px}.quality-check{display:flex;justify-content:space-between;padding:7px 9px;background:var(--bg-subcard);border-radius:5px;font-size:11px}.quality-check .pass{color:#287a45}.quality-check .fail{color:#a33}.manual-review{display:grid;gap:10px;margin-top:14px;padding:12px;border:1px solid #c8d9eb;border-radius:7px;background:#f6faff}.manual-review h3{font-size:13px}.manual-review p{margin:0;font-size:12px;line-height:1.55;color:var(--text-muted)}.manual-review-checks{display:grid;gap:8px}.manual-review-checks label{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.45;color:var(--text-main)}.manual-review textarea{min-height:62px}.manual-review-status{padding:10px;border-radius:5px;background:#f0f9f3;color:#25613a;font-size:12px;line-height:1.55}.manual-review-status.rejected{background:#fef2f2;color:#991b1b}@media(max-width:980px){.project-grid{grid-template-columns:1fr}.scene-fields{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js?v=8"></script>
+<script>
+const PAGE_ID='video-project';
+const projectId=new URLSearchParams(location.search).get('id');
+let project=null;
+let job=null;
+let projectPoller=null;
+let projectPollFailures=0;
+const MANUAL_PREVIEW_CHECKS=[
+  ['hook_authentic','开头 Hook 有吸引力，且画面与热点事件相符'],
+  ['no_repeat','没有重复使用同一来源或同一时间段的镜头'],
+  ['image_transitions','图片过渡自然，没有造成突兀停顿'],
+  ['subtitle_visibility','字幕位置合适，没有遮挡主体或关键信息'],
+  ['audio_video_sync','TTS、字幕与画面节奏同步'],
+  ['cta_natural','结尾 CTA 自然，不突兀、不误导']
+];
+
+function projectShell(){
+  document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content project-main">
+    <header class="page-header project-head"><div><h1 class="page-title" id="projectTitle">视频项目</h1><p class="project-subtitle">热点/自有素材 → 自动编排 → 预览检查 → 高清成片</p></div><div class="project-actions"><a class="btn btn-secondary btn-sm" id="editorLink" href="#">内容编辑器</a><a class="btn btn-secondary btn-sm" id="matcherLink" href="#">视频精确调整</a></div></header>
+    <section class="project-grid">
+      <div class="project-card"><header><h2>分镜与音色</h2><button class="btn btn-primary btn-sm" onclick="saveRevision()">保存修改</button></header><div class="project-card-body"><div class="voice-row"><label for="projectVoice">Qwen TTS 音色</label><select class="select" id="projectVoice"><option>Cherry</option></select></div><div class="scene-editor" id="sceneEditor"></div></div></div>
+      <aside>
+        <div class="project-card"><header><h2>成片时长预算</h2><span id="budgetPlatform">平台</span></header><div class="project-card-body"><div class="stage-line"><strong id="budgetUsed">已用 0 秒</strong><span id="budgetRemaining">剩余 0 秒</span></div><div class="project-progress"><i id="budgetProgress" style="width:0"></i></div><div class="project-subtitle" id="budgetHint">热点事件片段和 Buffalo 原有素材共用此预算，母片不会绕过限制。</div></div></div>
+        <div class="project-card"><header><h2>生成进度</h2><span id="jobStatus">未开始</span></header><div class="project-card-body"><div class="stage-line"><strong id="jobStage">等待生成</strong><span id="jobProgressText">0%</span></div><div class="project-progress"><i id="jobProgress" style="width:0"></i></div><div class="project-actions" id="jobActions"></div></div></div>
+        <div class="project-card" style="margin-top:16px"><header><h2>待确认问题</h2><span>质量检查</span></header><div class="project-card-body" id="issuePanel"><div class="empty-note">质量检查尚未开始</div></div></div>
+        <div class="project-card media-box"><header><h2>视频结果</h2></header><div class="project-card-body" id="mediaPanel"><div class="empty-note">通过质量检查后会显示预览和成片</div></div></div>
+      </aside>
+    </section></main>`;
+}
+
+function currentPayload(){
+  const base=project?.current_revision?.payload||{};
+  const scenes=[...document.querySelectorAll('.scene-row')].map((row,index)=>({
+    ...(base.scenes?.[index]||{}), scene:index+1,
+    visual:row.querySelector('[data-field="visual"]').value.trim(),
+    voiceover:row.querySelector('[data-field="voiceover"]').value.trim()
+  }));
+  return {...base,title:document.getElementById('projectTitle').textContent,voice:document.getElementById('projectVoice').value,scenes};
+}
+
+function renderProject(){
+  document.getElementById('projectTitle').textContent=project.title||'视频项目';
+  document.getElementById('editorLink').href=`/editor.html?project_id=${encodeURIComponent(project.id)}`;
+  document.getElementById('matcherLink').href=`/video-workbench.html?project_id=${encodeURIComponent(project.id)}`;
+  const payload=project.current_revision?.payload||{};
+  const target=Number(project.target_duration_ms||30000);const used=Number(payload.duration_used_ms||((payload.scenes||[]).reduce((sum,scene)=>sum+Number(scene.duration_ms||scene.duration*1000||0),0)));const remaining=Math.max(0,target-used);document.getElementById('budgetPlatform').textContent=project.platform||'douyin';document.getElementById('budgetUsed').textContent=`已用 ${(used/1000).toFixed(1)} 秒`;document.getElementById('budgetRemaining').textContent=`剩余 ${(remaining/1000).toFixed(1)} 秒`;document.getElementById('budgetProgress').style.width=`${Math.min(100,Math.round(used/target*100))}%`;
+  document.getElementById('projectVoice').value='Cherry';
+  const scenes=payload.scenes||[];
+  const brief=payload.brief||{};if(brief.angle){document.querySelector('.project-subtitle').textContent=`动态选题：${brief.angle}`;}
+  document.getElementById('sceneEditor').innerHTML=scenes.length?scenes.map((scene,index)=>`<article class="scene-row"><header><span>分镜 ${index+1}｜${escapeHtml(scene.scene_role||scene.evidence_type||'待匹配')}</span><span>${escapeHtml(scene.duration||5)} 秒</span></header><div class="scene-fields"><label>目标画面<textarea class="input" data-field="visual">${escapeHtml(scene.visual||'')}</textarea></label><label>旁白与字幕<textarea class="input" data-field="voiceover">${escapeHtml(scene.voiceover||'')}</textarea></label></div></article>`).join(''):'<div class="empty-note">当前修订没有分镜，请先回内容编辑器补充。</div>';
+}
+
+async function saveRevision(){
+  try{
+    const response=await apiFetch(`/api/video-projects/${project.id}/revision`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload:currentPayload()})});
+    const revision=await response.json();project.current_revision=revision;project.current_revision_id=revision.id;showToast('分镜修改已保存');
+  }catch(error){showToast(error.message,'error');}
+}
+
+async function startGeneration(){
+  try{const response=await apiFetch(`/api/video-projects/${project.id}/generate`,{method:'POST'});const result=await response.json();job=result.job;project.active_job_id=job.id;renderJob();startPolling();refreshVideoTaskCenter();}catch(error){showToast(error.message,'error');}
+}
+
+async function continueGeneration(){
+  try{const response=await apiFetch(`/api/video-generation/jobs/${job.id}/resume`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload:currentPayload()})});const result=await response.json();job=result.job;project.active_job_id=job.id;project.current_revision=result.revision;renderJob();startPolling();refreshVideoTaskCenter();}catch(error){showToast(error.message,'error');}
+}
+
+async function retryGeneration(){
+  try{const response=await apiFetch(`/api/video-generation/jobs/${job.id}/retry`,{method:'POST'});const result=await response.json();job=result.job;project.active_job_id=job.id;renderJob();startPolling();refreshVideoTaskCenter();}catch(error){showToast(error.message,'error');}
+}
+
+async function cancelFromProject(){await cancelVideoGeneration(job.id);await loadJob();}
+
+async function regenerateFromManualReview(){
+  await saveRevision();
+  await startGeneration();
+}
+
+async function finalizeManualReview(){
+  try{
+    const response=await apiFetch(`/api/video-generation/jobs/${job.id}/manual-finalize`,{method:'POST'});const result=await response.json();job=result.job;renderJob();startPolling();refreshVideoTaskCenter();showToast('已进入高清成片渲染，不会发布');
+  }catch(error){showToast(error.message,'error');}
+}
+
+function renderManualPreviewReview(manualReview){
+  if(!isManualReviewEligible())return '';
+  if(manualReview?.status==='accepted'){
+    const reviewer=manualReview.reviewer?.username||'当前用户';
+    return `<section class="manual-review-status"><strong>人工验收已记录</strong><div>${escapeHtml(manualReview.reviewed_at||'')}｜${escapeHtml(reviewer)}</div><div>该结论仅适用于内部预览；系统仍保持不可发布。</div></section>`;
+  }
+  if(manualReview?.status==='rejected'){
+    return `<section class="manual-review-status rejected"><strong>人工验收未通过</strong><div>${escapeHtml(manualReview.reviewed_at||'')}｜${escapeHtml(manualReview.note||'未填写原因')}</div><div>请修改分镜后重新生成，旧预览不会发布。</div></section>`;
+  }
+  return `<section class="manual-review"><h3>人工验收</h3><p>语义质检未能给出可用结论。请完整观看预览后逐项确认；确认只会记录内部验收，不会发布或进入发布队列。</p><div class="manual-review-checks">${MANUAL_PREVIEW_CHECKS.map(([key,label])=>`<label><input type="checkbox" data-manual-review="${key}"> <span>${label}</span></label>`).join('')}</div><label class="project-subtitle" for="manualReviewNote">验收备注（可选）</label><textarea class="input" id="manualReviewNote" placeholder="例如：第二段图片转场自然，CTA 表述可接受"></textarea><div class="project-actions"><button class="btn btn-primary btn-sm" onclick="submitManualPreviewReview('accept')">确认人工验收（不发布）</button><button class="btn btn-secondary btn-sm" onclick="submitManualPreviewReview('reject')">记录为未通过</button></div></section>`;
+}
+
+function isManualReviewEligible(){
+  const report=job?.quality_report||{};const publication=report.publication||{};const technical=report.preview_quality||{};const checks=technical.checks||{};
+  const required=['expected_resolution','has_audio','duration_aligned','has_timed_subtitles','no_repeated_source_or_range','final_subtitle_timeline_aligned','transition_audio_video_sync'];
+  const technicalPassed=technical.status==='passed'&&required.every(name=>checks[name]===true);
+  return (job?.status==='succeeded'&&publication.review_mode==='manual_preview')||(job?.status==='needs_review'&&job?.stage==='preview_quality_check'&&technicalPassed)||Boolean(report.manual_review);
+}
+
+async function submitManualPreviewReview(action){
+  const checklist=Object.fromEntries(MANUAL_PREVIEW_CHECKS.map(([key])=>[key,document.querySelector(`[data-manual-review="${key}"]`)?.checked===true]));
+  if(action==='accept'&&Object.values(checklist).some(checked=>!checked)){showToast('请先逐项完成预览验收','error');return;}
+  const note=document.getElementById('manualReviewNote')?.value.trim()||'';
+  try{
+    const response=await apiFetch(`/api/video-generation/jobs/${job.id}/manual-review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,checklist,note})});
+    const result=await response.json();job=result.job;renderJob();showToast(action==='accept'?'人工验收已记录，未触发发布':'已记录未通过，请修改分镜后重新生成');
+  }catch(error){showToast(error.message,'error');}
+}
+
+function renderQuality(report){
+  const checks=report?.checks||{};return Object.keys(checks).length?`<div class="quality-table">${Object.entries(checks).map(([name,passed])=>`<div class="quality-check"><span>${escapeHtml(name)}</span><strong class="${passed?'pass':'fail'}">${passed?'通过':'未通过'}</strong></div>`).join('')}</div>`:'';
+}
+
+function renderJob(){
+  const status=job?.status||'draft';const progress=Number(job?.progress||0);const pausedMatch=status==='needs_review'&&job?.stage==='match_quality_check';const manuallyAccepted=job?.quality_report?.manual_review?.status==='accepted';const renderProgress=job?.quality_report?.render_progress;const stage=manuallyAccepted?'人工验收已记录（未发布）':(pausedMatch?'匹配质量不足，等待人工处理':(renderProgress?.stage||VIDEO_STAGE_LABELS[job?.stage]||job?.stage||'等待生成'));
+  const publication=job?.quality_report?.publication;const manualReview=job?.quality_report?.manual_review;const internalPreview=publication?.tier==='internal_preview';const publishAllowed=publication?.publish_allowed===true;
+  document.getElementById('jobStatus').textContent=status;document.getElementById('jobStage').textContent=stage;document.getElementById('jobProgressText').textContent=`${progress}%`;document.getElementById('jobProgress').style.width=`${progress}%`;
+  const actions=[];
+  if(!job)actions.push('<button class="btn btn-primary btn-sm" onclick="startGeneration()">开始生成</button>');
+  else if(['pending','running','cancel_requested'].includes(status)){actions.push(`<button class="btn btn-secondary btn-sm" onclick="cancelFromProject()" ${status==='cancel_requested'?'disabled':''}>取消生成</button>`);}
+  else if(status==='needs_review'&&manualReview?.status==='accepted'){actions.push('<button class="btn btn-primary btn-sm" onclick="finalizeManualReview()">生成高清成片（不发布）</button>','<span class="project-subtitle">人工验收已记录，未进入发布队列</span>');}
+  else if(status==='needs_review'&&job?.quality_report?.publication?.review_mode==='manual_preview'){actions.push('<button class="btn btn-secondary btn-sm" onclick="cancelFromProject()">结束任务</button>');}
+  else if(status==='needs_review'){actions.push('<button class="btn btn-primary btn-sm" onclick="continueGeneration()">按当前规则重新生成</button>','<button class="btn btn-secondary btn-sm" onclick="cancelFromProject()">取消任务</button>');}
+  else if(status==='succeeded'&&publication?.review_mode==='manual_preview'&&manualReview?.status==='rejected'){actions.push('<button class="btn btn-primary btn-sm" onclick="regenerateFromManualReview()">修改后重新生成</button>');}
+  else if(['failed','canceled'].includes(status))actions.push('<button class="btn btn-primary btn-sm" onclick="retryGeneration()">重新生成</button>');
+  document.getElementById('jobActions').innerHTML=actions.join('');
+  const issues=[...new Set(job?.quality_report?.gate?.issues||[])];const adjustments=job?.quality_report?.automatic_adjustments||[];const gateScore=job?.quality_report?.gate?.score;const evidenceGate=job?.quality_report?.evidence_gate;const evaluation=job?.quality_report?.video_evaluation;const adjustmentNote=adjustments.length?`<div class="adjustment-note"><strong>系统已自动调整</strong><div>${adjustments.map(item=>escapeHtml(item)).join('；')}</div></div>`:'';const scoreNote=pausedMatch&&gateScore!==undefined?`<div class="match-score-note">当前最低匹配分：${escapeHtml(gateScore)}。请补充或重新选择更贴合的镜头。</div>`:'';const evidenceNote=evidenceGate&&!evidenceGate.passed?`<div class="match-score-note"><strong>动态证据不足</strong>：${(evidenceGate.issues||[]).map(escapeHtml).join('；')}</div>`:'';const evaluationNote=evaluation?.evaluation_status==='unavailable'?`<div class="match-score-note"><strong>语义质检未完成</strong>：${escapeHtml(evaluation.error||'外部质检服务不可用')}。已保留本地技术检查通过的预览，仅供人工检查，不可发布。</div>`:(evaluation?.evaluation_status==='completed'&&evaluation?.passed===false?`<div class="match-score-note"><strong>语义质检需要人工判断</strong>：模型评分 ${escapeHtml(evaluation.overall_score??'—')}，本地技术检查已通过。请完整观看预览后作出验收结论；不会自动发布。</div>`:'');const issueList=issues.length?`<div class="issue-list">${issues.slice(0,3).map(issue=>`<div class="issue">${escapeHtml(issue)}</div>`).join('')}${issues.length>3?`<details><summary>查看其余 ${issues.length-3} 项</summary><div>${issues.slice(3).map(escapeHtml).join('；')}</div></details>`:''}</div>`:'<div class="empty-note">当前没有需要人工处理的问题</div>';document.getElementById('issuePanel').innerHTML=adjustmentNote+scoreNote+evidenceNote+evaluationNote+issueList;
+  const tierNotice=!publishAllowed&&(internalPreview||manualReview)?'<div class="match-score-note"><strong>内部验收文件</strong>：不可进入发布队列；只有通过最终技术检查的高清文件才可下载。</div>':'';
+  const preview=job?.preview_url&&job.preview_url!==job.output_url?`<h3>低清预览</h3><video src="${escapeHtml(job.preview_url)}" controls></video>${renderQuality(job.quality_report?.preview_quality)}`:'';
+  const outputLabel=internalPreview?'内部测试预览':(publishAllowed?'高清成片':'高清内部验收成片');const outputDownload=internalPreview?'下载内部预览':(publishAllowed?'下载 MP4':'下载内部验收成片');const output=job?.output_url?`<h3 style="margin-top:14px">${outputLabel}</h3><video src="${escapeHtml(job.output_url)}" controls></video><a class="btn btn-primary btn-sm" style="margin-top:10px" href="${escapeHtml(job.output_url)}" download>${outputDownload}</a>${renderQuality(internalPreview?job.quality_report?.preview_quality:job.quality_report?.final_quality)}`:'';
+  document.getElementById('mediaPanel').innerHTML=tierNotice+(preview+output||'<div class="empty-note">通过质量检查后会显示预览和成片</div>')+renderManualPreviewReview(manualReview);
+}
+
+async function loadJob(){
+  if(!project.active_job_id){job=null;renderJob();return;}
+  try{const response=await apiFetch(`/api/video-generation/jobs/${project.active_job_id}`);job=await response.json();projectPollFailures=0;renderJob();if(['pending','running','cancel_requested'].includes(job.status))startPolling();}catch(error){projectPollFailures++;if(projectPollFailures>=3){if(projectPoller)clearInterval(projectPoller);projectPoller=null;document.getElementById('jobStatus').textContent='连接中断';document.getElementById('jobStage').textContent='本地服务已断开，请重启 8080 后刷新页面';}return false;}
+}
+function startPolling(){if(projectPoller)clearInterval(projectPoller);projectPoller=setInterval(async()=>{await loadJob();if(!job||!['pending','running','cancel_requested'].includes(job.status)){clearInterval(projectPoller);projectPoller=null;}},2000);}
+
+async function init(){projectShell();if(!projectId){showToast('缺少视频项目 ID','error');return;}try{const response=await apiFetch(`/api/video-projects/${projectId}`);project=await response.json();renderProject();await loadJob();}catch(error){showToast(error.message,'error');}}
+init();
+</script>
+</body>
+</html>
