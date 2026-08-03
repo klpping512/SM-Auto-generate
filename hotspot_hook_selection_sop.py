@@ -8,7 +8,7 @@ from __future__ import annotations
 
 
 SOP_ID = "buffalo-hotspot-hook-selection"
-SOP_VERSION = "v2"
+SOP_VERSION = "v3"
 
 # These are only deterministic reject signals for *obviously* non-event scenes.
 # The model and critic still make the semantic decision for all other footage.
@@ -23,21 +23,28 @@ def policy_contract() -> dict:
     return {
         "sop_id": SOP_ID,
         "sop_version": SOP_VERSION,
-        "goal": "只保留能用真实画面说明一个已核验外部事件、并自然引出谨慎物流问题的可复用 Hook。",
+        "goal": (
+            "保留可核验、可复用的新闻现场短片段；优先物流向画面，"
+            "社会/体育/政务等现场只要画面事实清楚也可入库，物流切入用软桥接。"
+        ),
         "selection_rules": [
             "必须选择连续的真实画面，时长 4–14 秒；每段都要有可见事件、动作或明确现场状态。",
             "what_happened 只能复述选中镜头、母片标题和本轮获准事件范围共同支持的事实；不确定就拒绝。",
             "不得把未知袋子、车辆、路人或道路臆断成包裹、货物、订单、Buffalo 资产或服务结果。",
             "不得选择主播/演播室、标题页、地图、信息图、纯文字、Logo 墙、泛空镜，或只靠旁白才成立的画面。",
-            "logistics_question 只能提出条件式核对问题或解释可能影响；不得承诺时效、清关、查单、优先处理或 Buffalo 已解决热点。",
-            "同一母片有两段以上独立且充分证据时，优先返回两段不重叠 Hook 以支持双 Hook 成片；证据不足时允许只保留一段，禁止凑数。",
+            "优先选择道路、港口、仓储、清关、配送等物流向现场；若母片是体育、综合日更或政务现场，"
+            "只要画面可核验也可保留，并用谨慎的 logistics_question 作弱关联（条件式提问或解释可能影响），"
+            "不得声称 Buffalo 已介入或已解决热点。",
+            "logistics_question 只能提出条件式核对问题或解释可能影响；不得承诺时效、清关、查单、优先处理。",
+            "同一母片最多返回 3 条不重叠 Hook；新闻合集允许最多 3 条不同 event_identity，"
+            "优先覆盖标题范围内独立且证据充分的现场，禁止凑数。",
             "每个候选镜头都带 edge_risk 标记：渲染会把镜头居中裁切成 9:16，只保留正中约三分之一宽度。"
             "同等事实支撑下优先选 edge_risk=none 的镜头；只有没有更好候选时，才允许选 left/right/both，"
             "不得只因画面冲击力更强就无视 edge_risk 选一段关键信息会被裁掉的镜头。",
         ],
         "required_output": [
             "start_segment_index", "end_segment_index", "title_zh", "what_happened",
-            "hook_reason", "logistics_question", "confidence",
+            "hook_reason", "logistics_question", "confidence", "event_identity",
         ],
     }
 

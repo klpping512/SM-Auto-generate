@@ -243,9 +243,16 @@ def test_pending_asset_batch_excludes_running_jobs(tmp_db):
     asset_id = _create_parent_asset(tmp_db)
     assert [item["id"] for item in tmp_db.list_assets_needing_processing()] == [asset_id]
 
-    tmp_db.create_asset_processing_job(asset_id)
+    job_id = tmp_db.create_asset_processing_job(asset_id)
 
     assert tmp_db.list_assets_needing_processing() == []
+    assert tmp_db.list_pending_asset_processing_job_ids() == [job_id]
 
+    # pending 任务重启后应保留并重新派发；只有 running 才标成 interrupted。
+    assert tmp_db.recover_interrupted_asset_processing_jobs() == 0
+    assert tmp_db.list_pending_asset_processing_job_ids() == [job_id]
+
+    tmp_db.update_asset_processing_job(job_id, status="running", stage="asr_ocr", progress=40)
     assert tmp_db.recover_interrupted_asset_processing_jobs() == 1
+    assert tmp_db.list_pending_asset_processing_job_ids() == []
     assert [item["id"] for item in tmp_db.list_assets_needing_processing()] == [asset_id]

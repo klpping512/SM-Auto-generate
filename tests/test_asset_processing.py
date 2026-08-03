@@ -135,6 +135,7 @@ def test_long_video_budget_covers_every_planned_segment_up_to_48(tmp_db, tmp_pat
     captured = {}
     monkeypatch.setattr(asset_processing, "detect_scene_boundaries", lambda *_args: [0])
     monkeypatch.setattr(asset_processing, "build_processing_plan", lambda *_args: plan)
+    monkeypatch.setattr(asset_processing, "load_reusable_segment_plan", lambda *_args: None)
     monkeypatch.setattr(asset_processing, "_make_video_preview", lambda *_args: (None, None))
     monkeypatch.setattr(asset_processing, "_transcribe", lambda *_args: "")
     monkeypatch.setattr(asset_processing, "_ocr", lambda *_args: "")
@@ -151,6 +152,60 @@ def test_long_video_budget_covers_every_planned_segment_up_to_48(tmp_db, tmp_pat
 
     assert result["segments"] == 35
     assert captured["max_calls"] == 35
+
+
+def test_process_asset_job_reuses_existing_thumbnails_without_ffmpeg(tmp_db, tmp_path, monkeypatch):
+    import asset_processing
+
+    static_dir = tmp_path / "static"
+    source = static_dir / "assets/library/video/reuse.mp4"
+    thumb = static_dir / "assets/segments/9/old/segment-0000.jpg"
+    source.parent.mkdir(parents=True)
+    thumb.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    thumb.write_bytes(b"jpeg")
+    asset_id = tmp_db.create_asset({
+        "name": "可复用母片", "filepath": "assets/library/video/reuse.mp4", "file_type": "video",
+        "category": "other", "duration": 8, "width": 1080, "height": 1920,
+        "size": 5, "thumbnail": None, "sha256": "reuse-video", "source": "upload", "status": "active",
+    })
+    tmp_db.create_asset_segment({
+        "asset_id": asset_id, "segment_index": 0, "start_ms": 0, "end_ms": 8_000,
+        "preview_path": None,
+        "thumbnail_path": "assets/segments/9/old/segment-0000.jpg",
+        "transcript": "旧字幕", "ocr_text": "旧OCR",
+        "description": "旧描述", "primary_category": "other",
+        "status": "active", "processing_version": "semantic-v3",
+    })
+    job_id = tmp_db.create_asset_processing_job(asset_id, processing_version=asset_processing.PROCESSING_VERSION)
+
+    def fail_ffmpeg(*_args, **_kwargs):
+        raise AssertionError("taxonomy refresh must not remux when thumbnails exist")
+
+    monkeypatch.setattr(asset_processing, "_make_video_preview", fail_ffmpeg)
+    monkeypatch.setattr(asset_processing, "_transcribe", fail_ffmpeg)
+    monkeypatch.setattr(asset_processing, "_ocr", fail_ffmpeg)
+    monkeypatch.setattr(
+        asset_processing,
+        "_visual_analysis",
+        lambda *_args, **_kwargs: {
+            "primary_category": "warehouse",
+            "confidence": 0.93,
+            "description": "货架分拣",
+            "tags": {"brand": [], "scene": ["仓库作业"], "object": ["货架"], "action": ["分拣"], "composition": []},
+        },
+    )
+
+    result = asset_processing.process_asset_job(job_id, static_dir)
+
+    assert result["status"] == "succeeded"
+    assert result["primary_category"] == "warehouse"
+    segments = tmp_db.list_asset_segments(asset_id=asset_id)
+    assert len(segments) == 1
+    assert segments[0]["processing_version"] == asset_processing.PROCESSING_VERSION
+    assert segments[0]["transcript"] == "旧字幕"
+    assert segments[0]["thumbnail_path"] == "assets/segments/9/old/segment-0000.jpg"
+    assert {tag["value"] for tag in segments[0]["tags"]} >= {"仓库作业", "货架", "分拣"}
 
 
 def test_visual_segment_indexes_cover_both_ends_without_exceeding_remote_budget():

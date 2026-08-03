@@ -8,7 +8,7 @@ def test_hotspot_page_uses_topic_pack_structure():
     page = (ROOT / "static" / "hotspots.html").read_text(encoding="utf-8")
 
     assert "/api/hotspot-packages" in page
-    assert "热点专题包" in page
+    assert "热点审核台" in page
     assert "来源信号" in page
     assert "视频素材" in page and "图片素材" in page and "纯文本" in page
     assert "确认并入热点库" in page
@@ -17,7 +17,8 @@ def test_hotspot_page_uses_topic_pack_structure():
     assert "选择热点" not in page
     assert "仅事实信号" in page
     assert "有素材" in page
-    assert "不会进入热点素材库或视频工作流" in page
+    assert "尚未形成可入库媒体候选" in page
+    assert "heat_state:'unconfirmed'" in page
     assert "['admin','editor'].includes" in page
 
 

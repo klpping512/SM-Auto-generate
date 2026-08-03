@@ -254,6 +254,7 @@ async function init() {
                 <button class="btn btn-primary btn-sm" onclick="submitToQueue()"><iconify-icon icon="mdi:send" width="16"></iconify-icon> 提交发布</button>
             </div>
         </div>
+        <div id="evidenceGateBanner" hidden style="margin:0 0 12px;padding:10px 12px;border-radius:8px;background:#fff3dc;color:#9a5b00;font-size:12px;">当前内容证据不足（对比框架）。可继续编辑，但在资料确认前不能提交发布。</div>
         <div class="workspace-grid">
             <!-- 左栏：知识库 -->
             <div class="col-knowledge">
@@ -667,12 +668,14 @@ function filterKnowledgeBase(keyword) {
 }
 
 // 加载本地草稿到编辑器
+let draftEvidenceInsufficient = false;
 function loadDraft() {
     let draft;
     try { draft = JSON.parse(localStorage.getItem('draft')); } catch(e) { draft = null; }
     if (!draft) return;
     const normalized = EditorTransfer.normalizeDraft(draft,Object.keys(platformInfo),currentPreview);
     importedFromChat = normalized.importedFromChat && normalized.valid;
+    draftEvidenceInsufficient = normalized.evidence_status === 'insufficient';
     normalized.contents.forEach(item => { generatedContents[item.platform] = item; });
     currentPreview = normalized.activePlatform;
     refreshPreviewTabs();
@@ -685,7 +688,13 @@ function loadDraft() {
         autoSaveDraft();   // 导入内容同步进自动保存，防再次跳转丢失
         // 保存到历史记录
         saveToHistory('import');
-        showToast('已从 AI 对话导入内容', 'info');
+        if (draftEvidenceInsufficient) {
+            showToast('已导入对比框架：证据不足，确认资料前不可发布', 'info');
+            const banner = document.getElementById('evidenceGateBanner');
+            if (banner) banner.hidden = false;
+        } else {
+            showToast('已从 AI 对话导入内容', 'info');
+        }
     } else if (draft.source === 'chat') {
         showToast('AI 内容导入失败，草稿已保留，可刷新后重试', 'error');
     }
@@ -1169,6 +1178,10 @@ function removeAttachment(index) {
 async function submitToQueue() {
     // 提交前先把编辑器最新内容写回当前平台
     syncEditorToContent();
+    if (draftEvidenceInsufficient || localStorage.getItem('evidence_status') === 'insufficient') {
+        showToast('证据不足的对比框架不可发布，请先补充带来源的评测资料', 'error');
+        return;
+    }
     const entries = Object.entries(generatedContents).filter(([, c]) => c && c.title && c.body);
     if (!entries.length) { showToast('请先生成或输入内容', 'error'); return; }
 
@@ -1206,6 +1219,10 @@ async function submitToQueue() {
 // 抖音一键发布：视频 + 文案一起进审核队列
 async function publishDouyinVideo() {
     syncEditorToContent();
+    if (draftEvidenceInsufficient) {
+        showToast('证据不足的对比框架不可发布', 'error');
+        return;
+    }
     const c = generatedContents.douyin;
     if (!c?.rendered_video) { showToast('没有可发布的视频', 'error'); return; }
     if (c.rendered_video.preview_only) { showToast('当前是预览视频，完成发布级质检后才能发布', 'error'); return; }

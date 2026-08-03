@@ -1,0 +1,17 @@
+---
+description: 任务收尾必须同步 Obsidian 改进日志并完成本地 Git 提交
+alwaysApply: true
+---
+
+# Obsidian + Git 收尾（强制）
+
+完成任何会修改本项目代码、配置、测试或产品行为的任务后，必须按顺序：
+
+1. 追加 Obsidian `改进日志.md`（精确到秒的 CST 标题），并同步月度日志与 `docs/改进日志/YYYY-MM.md`
+2. 需要时同步产品说明到知识库目录
+3. `git add` + `git commit` 本次相关改动（不要提交密钥）
+4. 回写改进日志里的「Git 提交和推送状态」
+
+未经用户明确要求，不要 `git push`；但本地提交不得省略。
+
+详见根目录 `AGENTS.md`。

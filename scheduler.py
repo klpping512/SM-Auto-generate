@@ -2,6 +2,7 @@
 import asyncio
 import json as _json
 import logging
+import re
 import smtplib
 import os
 from email.mime.text import MIMEText
@@ -224,9 +225,6 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
         hook_count = 0
         if refreshed.get("asset_id"):
             hook_count = len(db.list_hotspot_event_clips(asset_id=int(refreshed["asset_id"])))
-        request_ids = []
-        if hook_count and request_ids:
-            db.mark_hotspot_discovery_request_matched(request_ids, int(item["id"]))
         materialized.append({
             "media_id": int(item["id"]), "asset_id": refreshed.get("asset_id"),
             "download_status": refreshed.get("download_status"),
@@ -262,7 +260,21 @@ async def refresh_targeted_hotspot_hooks() -> dict:
     chat topic into an unlicensed web download.  The normal scheduler is still
     responsible for maintaining the library between requests.
     """
+    import chat_intent
+
     admin = db.get_user_by_username("admin")
+    pending = [
+        item for item in db.list_hotspot_discovery_requests(status="pending", limit=100)
+        if chat_intent.should_request_hotspot_retrieval(
+            chat_intent.classify_content_mode(item.get("topic") or "")
+        )
+    ]
+    # Archive comparison topics that should never have entered this queue.
+    cancelled = db.cancel_misrouted_comparison_discovery_requests()
+    for item in pending:
+        db.update_hotspot_discovery_request(
+            int(item["id"]), status="processing", stage="fetch_sources", error_message=None,
+        )
     try:
         fetched = await hotspot_fetcher.fetch_hotspots(
             static_dir=Path(__file__).with_name("static"),
@@ -270,16 +282,82 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             video_channels=hotspot_fetcher.configured_video_channels(),
             video_limit=hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT,
         )
+        for item in pending:
+            db.update_hotspot_discovery_request(int(item["id"]), stage="analyze_media")
         intake = await prewarm_authorized_hotspot_media()
-        report = {"status": "completed", "fetch": fetched, "intake": intake}
+        outcomes = []
+        for item in pending:
+            topic = str(item.get("topic") or "")
+            matched_media_id = _discovery_match_media_id_for_topic(topic)
+            if matched_media_id:
+                db.mark_hotspot_discovery_request_matched([int(item["id"])], matched_media_id)
+                outcomes.append({"request_id": int(item["id"]), "status": "matched", "matched_media_id": matched_media_id})
+            else:
+                db.update_hotspot_discovery_request(
+                    int(item["id"]),
+                    status="unmatched",
+                    stage="done",
+                    error_message="复扫完成，暂无与该主题强相关的已确认 Hook；可换更具体的时效事件后重试",
+                )
+                outcomes.append({"request_id": int(item["id"]), "status": "unmatched"})
+        report = {
+            "status": "completed",
+            "fetch": fetched,
+            "intake": intake,
+            "cancelled_misrouted": len(cancelled),
+            "outcomes": outcomes,
+        }
         logger.info(
-            "聊天定向热点复扫完成：新增=%s，视频候选=%s，入库=%s",
+            "聊天定向热点复扫完成：新增=%s，视频候选=%s，入库=%s，匹配=%s",
             fetched.get("new", 0), fetched.get("video_media", 0), intake.get("status"),
+            sum(1 for row in outcomes if row["status"] == "matched"),
         )
         return report
     except Exception as exc:
         logger.exception("聊天定向热点复扫失败")
-        return {"status": "failed", "error": str(exc)[:300]}
+        for item in pending:
+            db.update_hotspot_discovery_request(
+                int(item["id"]),
+                status="failed",
+                stage="done",
+                error_message=f"补采失败：{str(exc)[:180]}",
+            )
+        return {"status": "failed", "error": str(exc)[:300], "cancelled_misrouted": len(cancelled)}
+
+
+def _discovery_match_media_id_for_topic(topic: str) -> int | None:
+    """Best-effort link from a discovery topic to a mother asset that already has Hooks."""
+    tokens = [token for token in re.findall(r"[A-Za-z0-9\u4e00-\u9fff]{2,}", str(topic or "").casefold()) if token]
+    if not tokens:
+        return None
+    with db.get_conn() as conn:
+        for event in conn.execute(
+            """SELECT e.asset_id, e.title_zh, e.title_en, e.evidence_json, e.keywords_json
+               FROM hotspot_event_clips e
+               WHERE e.review_status='confirmed'
+               ORDER BY e.id DESC LIMIT 300"""
+        ).fetchall():
+            try:
+                evidence = _json.loads(event["evidence_json"] or "{}")
+            except Exception:
+                evidence = {}
+            try:
+                keywords = _json.loads(event["keywords_json"] or "[]")
+            except Exception:
+                keywords = []
+            blob = " ".join([
+                str(event["title_zh"] or ""), str(event["title_en"] or ""),
+                str(evidence.get("what_happened") or ""), str(evidence.get("event_identity") or ""),
+                " ".join(str(item) for item in keywords),
+            ]).casefold()
+            if sum(1 for token in tokens if token in blob) >= max(1, min(2, len(tokens))):
+                media = conn.execute(
+                    "SELECT id FROM hotspot_media WHERE asset_id=? ORDER BY id DESC LIMIT 1",
+                    (event["asset_id"],),
+                ).fetchone()
+                if media:
+                    return int(media["id"])
+    return None
 
 
 def request_targeted_hotspot_refresh() -> bool:

@@ -25,7 +25,7 @@ import model_router
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="重建素材主场景、物流标签和 Buffalo 品牌标签")
     parser.add_argument("--asset-id", type=int, action="append", dest="asset_ids", default=[])
-    parser.add_argument("--limit", type=int, default=5, help="未指定 asset-id 时选择的旧素材数量，最大 30")
+    parser.add_argument("--limit", type=int, default=5, help="未指定 asset-id 时选择的旧素材数量，最大 100")
     return parser.parse_args()
 
 
@@ -43,7 +43,7 @@ def main() -> None:
             assets.append(asset)
     else:
         assets = db.list_assets_needing_taxonomy_rebuild(
-            asset_processing.PROCESSING_VERSION, min(max(args.limit, 1), 30)
+            asset_processing.PROCESSING_VERSION, min(max(args.limit, 1), 100)
         )
     results = []
     for asset in assets:

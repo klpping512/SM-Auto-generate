@@ -375,6 +375,8 @@ def init_db():
                 topic_key TEXT NOT NULL UNIQUE,
                 requested_by INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending',
+                stage TEXT,
+                error_message TEXT,
                 matched_media_id INTEGER,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
@@ -857,6 +859,8 @@ def init_db():
         _ensure_column(conn, "hotspot_media", "intake_metadata_checked_at", "TEXT")
         _ensure_column(conn, "hotspot_media", "intake_decision_json", "TEXT")
         _ensure_column(conn, "hotspot_media", "authorization_status", "TEXT NOT NULL DEFAULT 'pending_review'")
+        _ensure_column(conn, "hotspot_discovery_requests", "stage", "TEXT")
+        _ensure_column(conn, "hotspot_discovery_requests", "error_message", "TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_hotspot_media_authorization "
             "ON hotspot_media(authorization_status,lifecycle_status,created_at)"
@@ -3839,15 +3843,70 @@ def enqueue_hotspot_discovery_request(topic: str, requested_by: int | None = Non
         ).fetchone()
         if row:
             conn.execute(
-                "UPDATE hotspot_discovery_requests SET status='pending',requested_by=?,updated_at=datetime('now') WHERE id=?",
+                "UPDATE hotspot_discovery_requests SET status='pending',requested_by=?,error_message=NULL,stage='queued',updated_at=datetime('now') WHERE id=?",
                 (requested_by, row["id"]),
             )
             return dict(conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (row["id"],)).fetchone())
         cur = conn.execute(
-            "INSERT INTO hotspot_discovery_requests(topic,topic_key,requested_by,status) VALUES(?,?,?,'pending')",
+            "INSERT INTO hotspot_discovery_requests(topic,topic_key,requested_by,status,stage) VALUES(?,?,?,'pending','queued')",
             (normalized, topic_key, requested_by),
         )
         return dict(conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (cur.lastrowid,)).fetchone())
+
+
+def get_hotspot_discovery_request(request_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (int(request_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_hotspot_discovery_request(
+    request_id: int,
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    error_message: str | None = None,
+    matched_media_id: int | None = None,
+) -> dict | None:
+    fields: dict = {}
+    if status is not None:
+        fields["status"] = status
+    if stage is not None:
+        fields["stage"] = stage
+    if error_message is not None:
+        fields["error_message"] = error_message
+    if matched_media_id is not None:
+        fields["matched_media_id"] = int(matched_media_id)
+    if not fields:
+        return get_hotspot_discovery_request(request_id)
+    fields["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE hotspot_discovery_requests SET {','.join(f'{key}=?' for key in fields)} WHERE id=?",
+            (*fields.values(), int(request_id)),
+        )
+        row = conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (int(request_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def cancel_misrouted_comparison_discovery_requests(limit: int = 200) -> list[dict]:
+    """Archive pending discovery rows whose topic is comparison/evergreen, not hotspot news."""
+    import chat_intent
+
+    cancelled = []
+    for item in list_hotspot_discovery_requests(status="pending", limit=limit):
+        mode = chat_intent.classify_content_mode(item.get("topic") or "")
+        if mode != "comparison_research":
+            continue
+        updated = update_hotspot_discovery_request(
+            int(item["id"]),
+            status="cancelled_misrouted",
+            stage="archived",
+            error_message="对比评测类主题不应进入热点补采，已归档误路由请求",
+        )
+        if updated:
+            cancelled.append(updated)
+    return cancelled
 
 
 def list_hotspot_discovery_requests(status: str | None = None, limit: int = 50) -> list[dict]:
@@ -3874,7 +3933,9 @@ def mark_hotspot_discovery_request_matched(request_ids: list[int], media_id: int
     marks = ",".join("?" for _ in ids)
     with get_conn() as conn:
         conn.execute(
-            f"UPDATE hotspot_discovery_requests SET status='matched',matched_media_id=?,updated_at=datetime('now') WHERE id IN ({marks})",
+            f"""UPDATE hotspot_discovery_requests
+                 SET status='matched',stage='hooks_ready',matched_media_id=?,error_message=NULL,updated_at=datetime('now')
+                 WHERE id IN ({marks})""",
             (int(media_id), *ids),
         )
 
@@ -3990,7 +4051,7 @@ def list_assets_needing_processing(limit: int = 100) -> list[dict]:
         return [dict(row) for row in rows]
 
 
-def list_assets_needing_taxonomy_rebuild(processing_version: str, limit: int = 30) -> list[dict]:
+def list_assets_needing_taxonomy_rebuild(processing_version: str, limit: int = 100) -> list[dict]:
     """选择尚未使用当前 taxonomy 的素材；人工确认素材不自动覆盖。"""
     with get_conn() as conn:
         rows = conn.execute(
@@ -4003,28 +4064,41 @@ def list_assets_needing_taxonomy_rebuild(processing_version: str, limit: int = 3
                    WHERE j.asset_id=a.id AND j.status IN ('pending','running')
                  )
                ORDER BY a.id LIMIT ?""",
-            (processing_version, max(1, min(int(limit), 30))),
+            (processing_version, max(1, min(int(limit), 100))),
         ).fetchall()
         return [dict(row) for row in rows]
 
 
 def recover_interrupted_asset_processing_jobs() -> int:
-    """进程启动时标记上次未完成任务，允许管理员批量重试。"""
+    """进程启动时只标记正在执行的任务为中断；排队中的 pending 由启动逻辑重新派发。"""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id,asset_id FROM asset_processing_jobs WHERE status IN ('pending','running')"
+            "SELECT id,asset_id FROM asset_processing_jobs WHERE status='running'"
         ).fetchall()
         if rows:
             conn.execute(
                 """UPDATE asset_processing_jobs SET status='failed',stage='interrupted',
                    error='服务重启导致任务中断，可批量重新分析',updated_at=datetime('now')
-                   WHERE status IN ('pending','running')"""
+                   WHERE status='running'"""
             )
             conn.execute(
                 """UPDATE assets SET processing_status='pending'
                    WHERE id IN (SELECT asset_id FROM asset_processing_jobs WHERE stage='interrupted')"""
             )
         return len(rows)
+
+
+def list_pending_asset_processing_job_ids(limit: int = 1_000) -> list[str]:
+    """返回待派发的素材分析任务，供服务启动或管理员批量续跑。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id FROM asset_processing_jobs
+               WHERE status='pending'
+               ORDER BY created_at, id
+               LIMIT ?""",
+            (max(1, min(int(limit), 5_000)),),
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
 
 
 _ACTIVE_LOCAL_IMPORT_STATUSES = {

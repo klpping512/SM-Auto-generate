@@ -26,9 +26,11 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;" in page
     assert "deliveryReadiness?.delivery_ready??true" in page
     assert "const videoBlocked=!videoReady;" in page
-    assert "正在补采热点素材" in page
+    assert "等待热点 Hook" in page
     assert "补充 Buffalo 素材" in page
+    assert "文案草稿已生成 · 视频素材补采中" in page
     assert "正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能生成视频" in page
+    assert "resultStateCard" in page
     assert "source_type: 'chat'" not in page
 
 

@@ -19,10 +19,11 @@ import hotspot_lexicon
 MIN_HOOK_MS = 4_000
 MAX_HOOK_MS = 14_000
 MAX_HOOKS_PER_SOURCE = 3
+MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
-PROMPT_VERSION = "hotspot-hook-curation-v6"
-AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v3"
+PROMPT_VERSION = "hotspot-hook-curation-v7"
+AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v4"
 
 
 def _derive_hook_keywords(fact_text: str) -> list[str]:
@@ -71,17 +72,19 @@ def _prompt(source_title: str, source_context: str, segments: list[dict]) -> str
     evidence = json.dumps([_compact_segment(item) for item in segments], ensure_ascii=False)
     sop = hotspot_hook_selection_sop.policy_contract()
     return (
-        "你是热点视频 Hook 素材策展模型。只从给定的已分析镜头中选择 1–3 段，"
-        "为之后的物流短视频提供开场注意力钩子。不要决定最终选题、不要替 Buffalo 编造服务能力，"
+        "你是热点视频 Hook 素材策展模型。只从给定的已分析镜头中选择 1–3 段可复用现场画面，"
+        "优先物流向（道路、港口、仓储、清关、配送）；若母片是体育、综合日更或政务现场，"
+        "只要画面事实可核验也可保留。不要决定最终选题、不要替 Buffalo 编造服务能力，"
         "不要选择主播空镜、标题页、泛泛地图或无法说明发生何事的镜头。\n"
-        "所有返回的 Hook 必须属于同一个具体事件、同一地点/事故/处置过程，绝不能从新闻合集拼接两个不同事件。"
         "每个 Hook 必须：1) 由连续镜头组成；2) 总时长 4–14 秒；3) 用证据描述画面里发生的事；"
-        "4) 说明它为何能吸引停留；5) 给出一个谨慎的“物流切入问题”，只能提问或解释影响，不能声称 Buffalo 已解决。\n"
-        "母片标题和本轮获准的事件范围优先级高于镜头猜测；若母片是多事件合集，只能选择能直接对应"
-        "本轮事件范围的镜头，不能因为另一段也有道路、车辆或冲击力就混入。若镜头描述与事件范围冲突，"
-        "或不能确定画面正在呈现该事件，必须返回空数组。不得把垃圾、路人或普通物品说成包裹、货物或订单。"
+        "4) 说明它为何能吸引停留；5) 给出谨慎的 logistics_question（物流向画面给直接切入，"
+        "非物流现场可用弱关联条件式问题），不能声称 Buffalo 已解决或已介入。\n"
+        "母片标题和本轮获准的事件范围优先级高于镜头猜测。新闻合集（多事件合集）允许最多 3 条"
+        "不同 event_identity，每条仍须对应标题范围内可核验的独立现场，镜头不重叠。"
+        "若镜头描述与事件范围冲突，或不能确定画面正在呈现该事件，跳过该候选。"
+        "不得把垃圾、路人或普通物品说成包裹、货物或订单。"
         "若没有满足条件的 Hook，返回空数组。严格返回单行 JSON："
-        "{\"hooks\":[{\"event_identity\":\"不超过48字、同一事件的稳定标识\",\"start_segment_index\":0,\"end_segment_index\":1,"
+        "{\"hooks\":[{\"event_identity\":\"不超过48字、该候选事件的稳定标识\",\"start_segment_index\":0,\"end_segment_index\":1,"
         "\"title_zh\":\"不超过32字\",\"what_happened\":\"不超过120字的可核验画面事实\","
         "\"hook_reason\":\"不超过100字\",\"logistics_question\":\"不超过100字\","
         "\"confidence\":0到1}]}。\n"
@@ -141,12 +144,13 @@ def _audit_prompt(source_title: str, source_context: str, hooks: list[dict]) -> 
         for hook in hooks
     ]
     return (
-        "你是物流热点素材库的事实核验模型，不负责补救或润色。母片标题是已验证事件事实："
+        "你是热点素材库的事实核验模型，不负责补救或润色。母片标题是已验证事件事实："
         f"{source_title[:240] or '未提供'}。逐条核验候选 Hook：仅在以下全部成立时才接受："
-        "（1）候选的画面说明与母片事件不矛盾；（2）画面说明可由给出的镜头证据直接支持；"
+        "（1）候选的画面说明与母片标题/获准范围不矛盾；（2）画面说明可由给出的镜头证据直接支持；"
         "（3）没有把垃圾、普通袋子、路人或未知物品臆断为包裹、货物、订单或物流作业；"
-        "（4）对于合集母片，候选必须属于本轮获准事件范围，不能混用同一视频的其他独立新闻事件。"
-        "任何不确定、矛盾、依赖猜测或只是主播/字幕画面的候选都必须拒绝。"
+        "（4）不是主播/字幕/标题页空镜。社会、体育、政务等非物流现场只要画面可核验也应接受，"
+        "不要仅因缺少物流视觉就拒绝。新闻合集允许不同独立事件各保留一条，互不要求同一 identity。"
+        "不确定、矛盾、依赖猜测的候选必须拒绝。"
         "严格返回单行 JSON：{\"accepted\":[{\"candidate_index\":1,\"reason\":\"不超过80字\"}]}。"
         f"本轮获准事件范围：{source_context[:1200] or '仅可使用与母片标题直接一致的镜头'}\n"
         f"后端 Hook 选择 SOP：{json.dumps(hotspot_hook_selection_sop.policy_contract(), ensure_ascii=False)}\n"
@@ -166,7 +170,10 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
         job_id,
         "critic",
         [
-            {"role": "system", "content": "严格返回 JSON。宁可拒绝，也不能依据镜头外推断接受候选。"},
+            {
+                "role": "system",
+                "content": "严格返回 JSON。拒绝臆断与无画面支撑的候选，但接受与标题一致的非物流现场。",
+            },
             {"role": "user", "content": _audit_prompt(source_title, source_context, hooks)},
         ],
         prompt_version=AUDIT_PROMPT_VERSION,
@@ -224,7 +231,6 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
     by_index = {int(item.get("segment_index") or 0): item for item in segments}
     result: list[dict] = []
     occupied: set[int] = set()
-    event_identity = ""
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -250,11 +256,9 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
         question = str(row.get("logistics_question") or "").strip()[:100]
         if not (MIN_HOOK_MS <= duration_ms <= MAX_HOOK_MS and title and candidate_identity and happened and reason and question):
             continue
-        if not 0.45 <= confidence <= 1:
+        if not MIN_HOOK_CONFIDENCE <= confidence <= 1:
             continue
-        if event_identity and candidate_identity.casefold() != event_identity.casefold():
-            continue
-        event_identity = candidate_identity
+        # 合集允许不同 event_identity；仅禁止镜头重叠，总量仍受 MAX_HOOKS_PER_SOURCE 约束。
         occupied.update(indexes)
         result.append({
             "event_index": len(result) + 1,
@@ -275,7 +279,7 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
                 "curator": "planner_text",
                 "hook_sop_id": hotspot_hook_selection_sop.SOP_ID,
                 "hook_sop_version": hotspot_hook_selection_sop.SOP_VERSION,
-                "event_identity": event_identity,
+                "event_identity": candidate_identity,
                 "selected_segment_indexes": indexes,
             },
         })

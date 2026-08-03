@@ -159,15 +159,18 @@ def test_chat_queues_targeted_collection_when_confirmed_hook_library_has_no_matc
         return [{"platform": "xiaohongshu", "title": "测试", "body": "测试正文", "hashtags": [], "image_pages": [], "attachments": []}]
 
     monkeypatch.setattr(ai_engine, "chat_platforms", generated)
+    topic = "德班港拥堵最新情况会影响交期吗？"
     response = client.post("/api/ai/chat", headers=headers, json={
-        "messages": [{"role": "user", "content": "帮我生成一个关于南非海外仓的介绍视频"}],
+        "messages": [{"role": "user", "content": topic}],
         "platforms": ["xiaohongshu"],
+        "topic": topic,
     })
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["content_mode"] == "hotspot"
     assert payload["hotspot_retrieval"]["status"] == "queued"
-    assert tmp_db.list_hotspot_discovery_requests(status="pending")[0]["topic"] == "帮我生成一个关于南非海外仓的介绍视频"
+    assert tmp_db.list_hotspot_discovery_requests(status="pending")[0]["topic"] == topic
     assert refresh_calls == [True]
 
 

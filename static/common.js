@@ -79,7 +79,7 @@ function showToast(message, type = 'success') {
 const NAV_ITEMS = [
     { section: '核心' },
     { id: 'chat', label: 'AI 对话', href: '/chat.html' },
-    { id: 'hotspots', label: '热点选题', href: '/hotspots.html' },
+    { id: 'hotspots', label: '热点审核台', href: '/hotspots.html' },
     { id: 'assets', label: '内容资产', href: '/assets.html' },
     { id: 'editor', label: '内容编辑器', href: '/editor.html' },
     { id: 'queue', label: '发布队列', href: '/queue.html' },
@@ -98,7 +98,7 @@ const NAV_ITEMS = [
 // 内联 SVG 路径（24x24 viewBox, fill="currentColor"）— 不再依赖 iconify CDN
 const NAV_ICONS = {
     'AI 对话':     '<path d="M4 3h16a2 2 0 012 2v11a2 2 0 01-2 2H9l-5 4v-4a2 2 0 01-2-2V5a2 2 0 012-2zm3 6h10V7H7v2zm0 4h7v-2H7v2z"/>',
-    '热点选题':    '<path d="M12 2a7 7 0 00-4 12.74V18h8v-3.26A7 7 0 0012 2zm2 11.5-.9.52V16h-2.2v-1.98l-.9-.52A5 5 0 1114 13.5zM9 20h6v2H9v-2z"/>',
+    '热点审核台':  '<path d="M12 2a7 7 0 00-4 12.74V18h8v-3.26A7 7 0 0012 2zm2 11.5-.9.52V16h-2.2v-1.98l-.9-.52A5 5 0 1114 13.5zM9 20h6v2H9v-2z"/>',
     '经营驾驶舱': '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
     '内容编辑器':  '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
     '内容资产':    '<path d="M6 2a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6zm0 2h7v5h5v11H6V4z"/>',

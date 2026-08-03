@@ -690,7 +690,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         assignments = semantic_matching.assign_candidates(
             atoms,
             segments,
-            top_k=3,
+            top_k=10,
             required_file_type="video",
         )
         assignment_by_scene = {

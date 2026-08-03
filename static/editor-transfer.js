@@ -42,11 +42,16 @@
             body: selected.body,
             hashtags: selected.hashtags,
             platforms: contents.map(item => item.platform),
+            evidence_status: (
+                result && (result.result_state === 'framework_pending_evidence' || result.result_state === 'authenticity_blocked')
+            ) ? 'insufficient' : (result && result.evidence_state && result.evidence_state.evidence_state) || 'unknown',
+            result_state: result && result.result_state || null,
+            content_mode: result && result.content_mode || null,
         };
     }
 
     function normalizeDraft(draft, validPlatforms, fallbackPlatform) {
-        if (!draft || typeof draft !== 'object') return { valid: false, contents: [], activePlatform: fallbackPlatform, importedFromChat: false };
+        if (!draft || typeof draft !== 'object') return { valid: false, contents: [], activePlatform: fallbackPlatform, importedFromChat: false, evidence_status: null };
         const allowed = new Set(validPlatforms || []);
         let contents = Array.isArray(draft.contents)
             ? draft.contents.map(item => content(item)).filter(item => item && allowed.has(item.platform))
@@ -61,7 +66,15 @@
         const activePlatform = available.includes(draft.activePlatform)
             ? draft.activePlatform
             : (available.includes(fallbackPlatform) ? fallbackPlatform : (available[0] || fallbackPlatform));
-        return { valid: contents.length > 0, contents, activePlatform, importedFromChat: draft.source === 'chat' };
+        return {
+            valid: contents.length > 0,
+            contents,
+            activePlatform,
+            importedFromChat: draft.source === 'chat',
+            evidence_status: draft.evidence_status || null,
+            result_state: draft.result_state || null,
+            content_mode: draft.content_mode || null,
+        };
     }
 
     return { buildDraft, normalizeDraft };

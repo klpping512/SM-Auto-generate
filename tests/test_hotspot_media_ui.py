@@ -61,6 +61,17 @@ def test_hotspot_media_ui_uses_explicit_authorization_status_not_traffic_light_l
     assert "rights_tier==='red'" not in page
 
 
+def test_hotspot_library_hides_compose_button_when_no_hooks_curated():
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "function hotspotHasCuratedHooks(item)" in page
+    assert "筛出\\s*\\d+\\s*条" in page
+    assert "已分析无 Hook" in page
+    assert "镜头已入库，暂无策展 Hook" in page
+    assert "hotspotHasCuratedHooks(item)&&item.asset_id" in page
+    assert "item.processing_status==='ready'&&item.asset_id?`<button class=\"btn btn-primary btn-sm\" onclick=\"viewHotspotEvents(${item.asset_id})\">选择 Hook 后成片</button>`" not in page
+
+
 def test_hotspot_download_shows_stage_progress_and_keeps_polling():
     page = PAGE.read_text(encoding="utf-8")
 
@@ -110,7 +121,8 @@ def test_hotspot_library_exposes_admin_single_and_bulk_delete_actions():
 def test_hotspot_events_are_owned_by_hotspot_library_and_can_delete_source_asset():
     page = PAGE.read_text(encoding="utf-8")
 
-    assert "const visibleEvents=hotspotEvents.filter" in page
+    assert "function filteredHotspotEvents()" in page
+    assert "const visibleEvents=filteredHotspotEvents()" in page
     assert "const eventBody=visibleEvents.length" in page
     assert "assets=allAssets.filter(asset=>asset.library_origin!=='hotspot'&&!asset.hotspot_id)" in page
     assert "deleteHotspotEvent(eventId)" in page
@@ -118,10 +130,34 @@ def test_hotspot_events_are_owned_by_hotspot_library_and_can_delete_source_asset
     assert "/api/hotspot-event-assets/" in page
 
 
+def test_hotspot_library_defaults_to_all_hotspots_without_auto_select():
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "if(!selectedHotspotId&&hotspots.length)selectedHotspotId=String(hotspots[0].id);" not in page
+    assert "async function clearHotspotFilter()" in page
+    assert "当前正在查看：" in page
+    assert "清除筛选 / 返回全部热点" in page
+    assert "最新入库" in page
+    assert "全部素材" in page
+    assert "groupHotspotLibraryItems" in page
+    assert "hotspotIntakeAt" in page
+
+
+def test_hotspot_library_mixed_cards_share_top_media_layout():
+    """Hook 与媒体混排时共用上图下文，避免一列横屏一列竖屏。"""
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "grid-template-columns:150px 1fr" not in page
+    assert ".hotspot-media-thumb{position:relative;width:100%;height:180px" in page
+    assert ".hotspot-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))" in page
+    assert ".asset-media{position:relative;width:100%;height:180px" in page
+
+
 def test_hotspot_library_can_bind_video_to_specific_hotspot():
     page = PAGE.read_text(encoding="utf-8")
 
     assert "添加视频链接" in page
+    assert "添加素材" in page
     assert "/media/attach" in page
     assert "selectedHotspotId" in page
     assert "频道或播放列表不能直接加入" in page

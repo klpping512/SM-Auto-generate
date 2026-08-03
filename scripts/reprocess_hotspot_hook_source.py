@@ -51,6 +51,19 @@ def _needs_legacy_event_identity(media: dict) -> bool:
     )
 
 
+def _needs_zero_hook_ready(media: dict) -> bool:
+    """Select ready mother videos whose last curation returned zero reusable Hooks."""
+    if media.get("download_status") != "downloaded" or media.get("processing_status") != "ready":
+        return False
+    if not media.get("asset_id"):
+        return False
+    detail = str(media.get("progress_detail") or "")
+    error = str(media.get("error_message") or "")
+    if "暂时不可用" in detail or "暂时不可用" in error:
+        return False
+    return "未筛出可复用 Hook" in detail
+
+
 def _reprocess_media(media_id: int, *, skip_analysis: bool, refresh_intake_decision: bool) -> dict:
     """Run one fully model-governed re-curation and return its audit summary."""
     media = db.get_hotspot_media(media_id)
@@ -135,6 +148,11 @@ def main() -> int:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--media-id", type=int, help="单条已下载热点媒体 ID")
     selection.add_argument("--all-legacy-ready", action="store_true", help="重策展所有缺少事件身份的历史已确认 Hook 母片")
+    selection.add_argument(
+        "--zero-hook-ready",
+        action="store_true",
+        help="重策展所有 ready 且上次未筛出可复用 Hook 的母片（跳过暂时不可用）",
+    )
     parser.add_argument("--skip-analysis", action="store_true", help="复用已完成的镜头分析，仅重新进行 Hook 策展")
     parser.add_argument("--refresh-intake-decision", action="store_true", help="让内置 Qwen 重新确认本母片的获准事件范围")
     parser.add_argument("--max-media", type=int, default=0, help="批量模式最多处理多少条；0 表示全部")
@@ -149,15 +167,21 @@ def main() -> int:
             and media.get("processing_status") == "ready"
             and _needs_legacy_event_identity(media)
         ]
+    elif args.zero_hook_ready:
+        media_ids = [
+            int(media["id"])
+            for media in db.list_hotspot_media(lifecycle_status="active", authorization_status="authorized", limit=500)
+            if _needs_zero_hook_ready(media)
+        ]
     else:
         media_ids = [int(args.media_id)]
     if args.max_media > 0:
-        media_ids = media_ids[:args.max_media]
+        media_ids = media_ids[: args.max_media]
     if args.dry_run:
         print(json.dumps({"status": "dry_run", "media_ids": media_ids}, ensure_ascii=False))
         return 0
     if not media_ids:
-        print(json.dumps({"status": "no_legacy_ready_media", "media_ids": []}, ensure_ascii=False))
+        print(json.dumps({"status": "no_matching_media", "media_ids": []}, ensure_ascii=False))
         return 0
 
     completed, failed = [], []

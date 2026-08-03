@@ -108,6 +108,8 @@ def test_assets_page_exposes_brand_tags_and_safe_taxonomy_rebuild_actions():
     assert "补全 Buffalo 品牌标签" in page
     assert "重建视觉与物流标签" in page
     assert "/api/assets/backfill-buffalo-brand-tags" in page
+    assert "limit:100" in page
+    assert "最多 100 条" in page
 
 
 def test_render_rejects_missing_capability(tmp_db, monkeypatch):

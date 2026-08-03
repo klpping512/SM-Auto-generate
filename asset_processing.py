@@ -20,13 +20,75 @@ import database as db
 import model_router
 
 
-# v3 将「画面主功能」和「可见品牌露出」拆开：一辆印有 Buffalo 标识的配送车
-# 仍然是 delivery，同时带 brand:Buffalo 标签，供模型按职责检索。
-PROCESSING_VERSION = "semantic-v3-qwen-vl-brand"
+# v4：扩大语义覆盖与画幅风险标签，驱动存量素材重新进入 taxonomy 重建队列。
+PROCESSING_VERSION = "semantic-v4-coverage"
 MIN_SEGMENT_MS = 2_000
 MAX_SEGMENT_MS = 8_000
 MAX_REMOTE_VISUAL_SEGMENTS = max(12, min(120, int(os.environ.get("ASSET_MAX_REMOTE_VISUAL_SEGMENTS", "96"))))
 BUFFALO_BRAND_MARKERS = ("buffalo", "buffalo logistics", "we deliver hope")
+
+
+def taxonomy_reuse_enabled() -> bool:
+    """存量 taxonomy 重建默认复用已有预览/字幕，只重跑视觉打标。"""
+    return os.environ.get("ASSET_TAXONOMY_REUSE_MEDIA", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _media_file_exists(static_dir: Path, relative: str | None) -> bool:
+    if not relative:
+        return False
+    path = (Path(static_dir) / relative).resolve()
+    static_root = Path(static_dir).resolve()
+    return static_root in path.parents and path.is_file()
+
+
+def load_reusable_segment_plan(asset: dict, static_dir: Path) -> list[dict] | None:
+    """若旧版本分段的关键帧都还在盘上，直接复用时间轴与本地证据。
+
+    全量重建最慢的部分是逐镜 ffmpeg 切预览 + ASR/OCR；匹配治理需要的是新的
+    分类/标签/edge_risk。有可复用媒体时跳过本地重编码，只刷新视觉标注。
+    """
+    if not taxonomy_reuse_enabled():
+        return None
+    rows = db.list_asset_segments(asset_id=int(asset["id"]), status="", limit=2_000)
+    if not rows:
+        return None
+    by_version: dict[str, list[dict]] = {}
+    for row in rows:
+        by_version.setdefault(str(row.get("processing_version") or "v1"), []).append(row)
+    best: list[dict] | None = None
+    best_score = -1
+    for segments in by_version.values():
+        ordered = sorted(segments, key=lambda item: int(item.get("segment_index") or 0))
+        reusable: list[dict] = []
+        for item in ordered:
+            thumbnail = item.get("thumbnail_path") or ""
+            if not _media_file_exists(static_dir, thumbnail):
+                if asset.get("file_type") == "image":
+                    thumbnail = asset.get("thumbnail") or asset.get("filepath") or ""
+                    if not _media_file_exists(static_dir, thumbnail):
+                        break
+                else:
+                    break
+            preview = item.get("preview_path") or None
+            if preview and not _media_file_exists(static_dir, preview):
+                preview = None
+            reusable.append({
+                "segment_index": int(item.get("segment_index") or 0),
+                "start_ms": int(item.get("start_ms") or 0),
+                "end_ms": int(item.get("end_ms") or 0),
+                "orientation": item.get("orientation") or "unknown",
+                "preview_path": preview,
+                "thumbnail_path": thumbnail,
+                "transcript": item.get("transcript") or "",
+                "ocr_text": item.get("ocr_text") or "",
+            })
+        else:
+            if len(reusable) > best_score:
+                best = reusable
+                best_score = len(reusable)
+    return best if best_score > 0 else None
 
 PRIMARY_CATEGORIES = {
     "warehouse", "delivery", "customs", "brand", "staff", "facility", "customer", "other",
@@ -508,9 +570,14 @@ def process_asset_job(job_id: str, static_dir: Path) -> dict:
         db.update_asset_processing_job(job_id, status="running", stage="scene_detection", progress=10,
                                        attempts=int(job.get("attempts") or 0) + 1,
                                        started_at=datetime_now())
-        duration_ms = round(float(asset.get("duration") or 0) * 1_000)
-        boundaries = detect_scene_boundaries(source, duration_ms) if asset["file_type"] == "video" else []
-        plan = build_processing_plan(asset, boundaries)
+        reused_plan = load_reusable_segment_plan(asset, static_root)
+        if reused_plan:
+            plan = reused_plan
+            db.update_asset_processing_job(job_id, stage="taxonomy_refresh", progress=15)
+        else:
+            duration_ms = round(float(asset.get("duration") or 0) * 1_000)
+            boundaries = detect_scene_boundaries(source, duration_ms) if asset["file_type"] == "video" else []
+            plan = build_processing_plan(asset, boundaries)
         primary_results = []
         visual_errors: list[str] = []
         # 对常见的 3–10 分钟母片，默认 96 个视觉调用覆盖全部镜头。更长合集
@@ -522,19 +589,31 @@ def process_asset_job(job_id: str, static_dir: Path) -> dict:
             max_output_tokens=max(6_000, len(visual_indexes) * 400),
         )
         for index, segment in enumerate(plan):
-            db.update_asset_processing_job(job_id, stage="asr_ocr", progress=20 + round(60 * index / max(1, len(plan))))
+            stage_name = "taxonomy_refresh" if reused_plan else "asr_ocr"
+            db.update_asset_processing_job(
+                job_id, stage=stage_name, progress=20 + round(60 * index / max(1, len(plan))),
+            )
             preview_path = thumbnail_path = None
+            transcript = ocr_text = ""
             analysis_path = source
-            if asset["file_type"] == "video":
-                try:
-                    preview_path, thumbnail_path = _make_video_preview(source, static_root, asset["id"], segment)
-                    if preview_path:
-                        analysis_path = static_root / preview_path
-                except (subprocess.SubprocessError, OSError):
-                    preview_path = thumbnail_path = None
-            transcript = _transcribe(analysis_path) if asset["file_type"] == "video" else ""
-            ocr_target = static_root / thumbnail_path if thumbnail_path else source
-            ocr_text = _ocr(ocr_target)
+            if reused_plan:
+                preview_path = segment.get("preview_path")
+                thumbnail_path = segment.get("thumbnail_path")
+                transcript = segment.get("transcript") or ""
+                ocr_text = segment.get("ocr_text") or ""
+            else:
+                if asset["file_type"] == "video":
+                    try:
+                        preview_path, thumbnail_path = _make_video_preview(
+                            source, static_root, asset["id"], segment,
+                        )
+                        if preview_path:
+                            analysis_path = static_root / preview_path
+                    except (subprocess.SubprocessError, OSError):
+                        preview_path = thumbnail_path = None
+                transcript = _transcribe(analysis_path) if asset["file_type"] == "video" else ""
+                ocr_target = static_root / thumbnail_path if thumbnail_path else source
+                ocr_text = _ocr(ocr_target)
             # 视频缩略图生成失败时不把整个 MP4 Base64 上传给视觉模型；这既会
             # 触发无意义的大额调用，也可能超出接口请求限制。
             visual_target = (
@@ -557,7 +636,12 @@ def process_asset_job(job_id: str, static_dir: Path) -> dict:
                 model_confidence=visual.get("confidence"), model_tags=visual.get("tags"), manual=manual,
             )
             segment_id = db.create_asset_segment({
-                **segment, "asset_id": asset["id"], "preview_path": preview_path,
+                "asset_id": asset["id"],
+                "segment_index": segment["segment_index"],
+                "start_ms": segment["start_ms"],
+                "end_ms": segment["end_ms"],
+                "orientation": segment.get("orientation") or "unknown",
+                "preview_path": preview_path,
                 "thumbnail_path": thumbnail_path or asset.get("thumbnail"),
                 "transcript": transcript, "ocr_text": ocr_text,
                 "description": " ".join(value for value in (asset["name"], visual.get("description", ""), transcript, ocr_text) if value)[:4_000],

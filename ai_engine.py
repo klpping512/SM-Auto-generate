@@ -465,6 +465,125 @@ def _safe_chat_fallback(platform: str, topic: str, messages: list[dict] | None =
     }
 
 
+COMPARISON_DIMENSIONS = (
+    ("覆盖范围", "哪些城市/乡镇可服务，偏远点是否可达"),
+    ("偏远地区附加费", "附加费规则与计费方式（待填，需来源）"),
+    ("揽收方式", "上门揽收 / 服务点投寄 / 预约窗口"),
+    ("签收证明", "电子签收、拍照签收、纸质回单能力"),
+    ("异常件处理", "破损、丢失、拒收的处理时效与责任边界"),
+    ("轨迹能力", "节点更新频率、是否可对外查询"),
+    ("客服响应", "渠道、工作时间、升级路径"),
+)
+
+COMPARISON_CHECKLIST = (
+    "候选服务商名单",
+    "服务区域说明",
+    "价格来源（官网/报价单/截图链接）",
+    "时效来源与取样条件",
+    "测试日期与路线",
+    "异常案例与处理记录",
+)
+
+
+def _comparison_framework_title(topic: str) -> str:
+    raw = " ".join(str(topic or "").split())
+    if "南非" in raw and ("快递" in raw or "本地" in raw):
+        return "南非本地快递怎么选？先比较这几个关键维度"
+    subject = raw[:24] or "物流服务"
+    return f"{subject}怎么选？先比较这几个关键维度"
+
+
+def build_comparison_framework(
+    topic: str,
+    platforms: list[str] | None = None,
+    evidence_state: dict | None = None,
+) -> list[dict]:
+    """Deterministic comparison outline with blank matrix — no rankings or fake tests."""
+    evidence_state = evidence_state or {}
+    title = _comparison_framework_title(topic)
+    dimension_lines = "\n".join(
+        f"{index}. {name}：{hint}" for index, (name, hint) in enumerate(COMPARISON_DIMENSIONS, 1)
+    )
+    checklist = "\n".join(f"- {item}" for item in COMPARISON_CHECKLIST)
+    candidate_note = (
+        "已记录候选服务商名称，价格/时效/排名仍留空，待带来源的资料补齐后再填。"
+        if evidence_state.get("has_candidates")
+        else "候选服务商尚未提供，矩阵先留空，请补充名单与来源。"
+    )
+    body = (
+        "当前没有真实评测数据，因此未生成服务商排名和推荐结论。\n\n"
+        f"{candidate_note}\n\n"
+        "建议先按下列维度收集资料，再做正式对比：\n"
+        f"{dimension_lines}\n\n"
+        "资料清单：\n"
+        f"{checklist}\n\n"
+        "在资料确认前，请勿使用「实测、4家、最稳、最好、排名第一」等结论性表述。"
+    )
+    hashtags = ["对比框架", "待补资料", "南非物流"]
+    platform_list = list(dict.fromkeys(platforms or ["xiaohongshu"]))
+    outputs = []
+    for platform in platform_list:
+        scenes = []
+        if platform == "douyin":
+            scenes = [
+                {"scene": 1, "duration": 5, "visual": "对比维度信息卡", "voiceover": "先比关键维度，再谈哪家合适。", "text_overlay": "先比维度", "asset_id": None},
+                {"scene": 2, "duration": 6, "visual": "空白对比表", "voiceover": "价格和时效先空着，等有来源再填。", "text_overlay": "待补资料", "asset_id": None},
+                {"scene": 3, "duration": 6, "visual": "资料清单卡片", "voiceover": "把服务商、报价来源和测试日期准备齐。", "text_overlay": "准备资料", "asset_id": None},
+                {"scene": 4, "duration": 5, "visual": "品牌信息卡", "voiceover": "资料齐了再出正式评测。", "text_overlay": "资料确认后再评", "asset_id": None},
+            ]
+        outputs.append({
+            "platform": platform,
+            "title": title,
+            "body": body,
+            "hashtags": hashtags,
+            "image_pages": [
+                {"type": "cover", "headline": title[:18], "subheadline": "对比框架 · 待补资料", "points": ["无实测排名", "先列维度", "再补来源"]},
+                {"type": "content", "headline": "关键对比维度", "points": [name for name, _ in COMPARISON_DIMENSIONS[:4]]},
+                {"type": "content", "headline": "资料清单", "points": list(COMPARISON_CHECKLIST[:4])},
+                {"type": "content", "headline": "下一步", "points": ["补充评测资料", "确认来源后再生成正式评测"]},
+            ] if platform == "xiaohongshu" else [],
+            "duration_target": 30 if platform == "douyin" else None,
+            "scenes": scenes,
+            "music_suggestion": "",
+            "content": body,
+            "quality_warnings": ["当前为对比框架，证据不足，不可作为正式评测发布"],
+            "content_mode": "comparison_research",
+            "result_kind": "framework",
+            "source": "comparison_framework",
+        })
+    return outputs
+
+
+def enforce_comparison_authenticity(outputs: list[dict], evidence: dict) -> tuple[list[dict], bool]:
+    """Downgrade fabricated review copy to the comparison framework when evidence is thin."""
+    import chat_intent
+
+    blocked = False
+    for item in outputs:
+        scenes = item.get("scenes") or []
+        scene_text = " ".join(
+            str(scene.get(key) or "")
+            for scene in scenes if isinstance(scene, dict)
+            for key in ("visual", "voiceover", "text_overlay")
+        )
+        tags = " ".join(str(tag) for tag in (item.get("hashtags") or []))
+        violations = chat_intent.comparison_authenticity_violations(
+            item.get("title") or "",
+            item.get("body") or "",
+            tags,
+            scene_text,
+            evidence=evidence,
+        )
+        if violations:
+            blocked = True
+            break
+    if not blocked:
+        return outputs, False
+    topic = next((item.get("title") or "" for item in outputs), "对比评测")
+    platforms = [item.get("platform") or "xiaohongshu" for item in outputs]
+    return build_comparison_framework(topic, platforms, evidence), True
+
+
 def _safe_douyin_generated_content(topic: str) -> GeneratedContent:
     """Keep the non-chat generation endpoint on the same Douyin SOP fallback."""
     subject = _conservative_chat_subject(topic)
@@ -731,10 +850,11 @@ async def _chat_one_platform(
                 for scene in (parsed.get("scenes") or []) if isinstance(scene, dict)
                 for key in ("visual", "voiceover", "text_overlay")
             )
-            # 标题、发布文案和预览分镜都在同一个用户可见卡片上；任一位置
+            # 标题、发布文案、标签和预览分镜都在同一个用户可见卡片上；任一位置
             # 出现没有证据的服务承诺，就整体降级为中性提示，不能只清洗 body。
+            tag_text = " ".join(str(tag) for tag in hashtags)
             use_safe_fallback = bool(_unsupported_operational_claim_warnings(
-                " ".join((title, body, scene_claim_text))
+                " ".join((title, body, scene_claim_text, tag_text))
             ))
             if use_safe_fallback:
                 safe_subject = _conservative_chat_subject(topic, messages)

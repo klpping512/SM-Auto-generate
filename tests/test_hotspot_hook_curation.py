@@ -71,7 +71,7 @@ def test_qwen_curates_only_grounded_contiguous_hook_segments(tmp_db, monkeypatch
         "logistics_question": "入口检查变慢时，卖家应怎样核对到仓与配送计划？",
         "curator": "planner_text",
         "hook_sop_id": "buffalo-hotspot-hook-selection",
-        "hook_sop_version": "v2",
+        "hook_sop_version": "v3",
         "event_identity": "港口入口货车排队检查",
         "selected_segment_indexes": [0, 1],
     }
@@ -119,7 +119,10 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert first != second
     assert "边境卡车拥堵" in prompt
     assert "多事件合集" in prompt
+    assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
+    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v7"
+    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v4"
 
 
 def test_hook_curator_rejects_an_obvious_anchor_only_segment_before_model_audit():
@@ -153,20 +156,36 @@ def test_hook_curator_accepts_a_bare_model_candidate_list():
     assert hooks[0]["title_zh"] == "港口入口卡车排队"
 
 
-def test_hook_curator_rejects_mixed_event_identities_from_one_news_compilation():
+def test_hook_curator_keeps_mixed_event_identities_from_one_news_compilation():
     import hotspot_hook_curator
 
     hooks = hotspot_hook_curator._parse(json.dumps({"hooks": [
         {"event_identity": "港口入口货车排队检查", "start_segment_index": 0, "end_segment_index": 0,
          "title_zh": "入口货车排队", "what_happened": "货车在入口排队。", "hook_reason": "现场排队清晰。",
          "logistics_question": "卖家应怎样核对到仓计划？", "confidence": 0.88},
-        {"event_identity": "演播室主播报道", "start_segment_index": 1, "end_segment_index": 1,
-         "title_zh": "主播报道", "what_happened": "主播介绍新闻。", "hook_reason": "信息明确。",
-         "logistics_question": "卖家应怎样安排？", "confidence": 0.88},
+        {"event_identity": "入口货车检查作业", "start_segment_index": 1, "end_segment_index": 1,
+         "title_zh": "工作人员检查货车", "what_happened": "工作人员在入口检查货车。", "hook_reason": "连续履约动作。",
+         "logistics_question": "检查变慢时卖家应怎样安排？", "confidence": 0.86},
     ]}, ensure_ascii=False), _segments())
 
-    assert len(hooks) == 1
+    assert len(hooks) == 2
     assert hooks[0]["evidence"]["event_identity"] == "港口入口货车排队检查"
+    assert hooks[1]["evidence"]["event_identity"] == "入口货车检查作业"
+    assert hooks[0]["evidence"]["hook_sop_version"] == "v3"
+
+
+def test_hook_curator_accepts_soft_confidence_floor():
+    import hotspot_hook_curator
+
+    hooks = hotspot_hook_curator._parse(json.dumps({"hooks": [{
+        "event_identity": "港口入口货车排队检查",
+        "start_segment_index": 0, "end_segment_index": 0,
+        "title_zh": "入口货车排队", "what_happened": "货车在入口排队。",
+        "hook_reason": "现场排队清晰。", "logistics_question": "卖家应怎样核对？", "confidence": 0.36,
+    }]}, ensure_ascii=False), _segments())
+
+    assert len(hooks) == 1
+    assert hooks[0]["confidence"] == 0.36
 
 
 def test_hook_curation_prompt_keeps_all_long_video_segments_inside_input_budget():

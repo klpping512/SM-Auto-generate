@@ -258,9 +258,25 @@ def _score(atom: dict, segment: dict) -> dict | None:
         required_orientation
         and actual_orientation not in {None, "", "unknown", required_orientation}
     )
+    composition = tags.get("composition", set())
+    unsafe_crop = bool(
+        composition & {"edge_risk_both", "edge_risk_left", "edge_risk_right"}
+    )
+    # 横屏→竖屏：无边缘关键信息风险时可居中裁切，不应一律判为弱匹配。
+    # 有 edge_risk_* 时保留惩罚并强制复核。
+    orientation_forces_review = False
     if orientation_mismatch:
-        score -= 12
-        reasons.append(f"画幅需裁切：{actual_orientation} → {required_orientation}")
+        if unsafe_crop:
+            score -= 12
+            orientation_forces_review = True
+            risk_labels = sorted(composition & {"edge_risk_both", "edge_risk_left", "edge_risk_right"})
+            reasons.append(
+                f"画幅不适配裁切：{actual_orientation} → {required_orientation}"
+                f"（{'、'.join(risk_labels)}）"
+            )
+        else:
+            score -= 3
+            reasons.append(f"画幅可安全居中裁切：{actual_orientation} → {required_orientation}")
 
     required_region = set(atom.get("constraints", {}).get("region") or [])
     matched_region = required_region & tags.get("region", set())
@@ -286,8 +302,9 @@ def _score(atom: dict, segment: dict) -> dict | None:
         "match_score": score,
         "reasons": reasons,
         "review_required": bool(
-            score < 55 or not strong_evidence or duration_mismatch or orientation_mismatch
+            score < 55 or not strong_evidence or duration_mismatch or orientation_forces_review
         ),
+        "orientation_safe_crop": bool(orientation_mismatch and not unsafe_crop),
     }
 
 
@@ -297,11 +314,17 @@ def rank_segments(
     top_k: int = 3,
     used_segment_ids: set[int] | None = None,
     required_file_type: str | None = None,
+    exclude_asset_ids: set[int] | None = None,
+    diversify_by_asset: bool = True,
 ) -> list[dict]:
     used_segment_ids = used_segment_ids or set()
+    exclude_asset_ids = exclude_asset_ids or set()
     candidates = []
     for segment in segments:
         if required_file_type and segment.get("asset_file_type") != required_file_type:
+            continue
+        asset_id = int(segment.get("asset_id") or 0)
+        if asset_id and asset_id in exclude_asset_ids:
             continue
         item = _score(atom, segment)
         if not item:
@@ -312,12 +335,12 @@ def rank_segments(
         candidates.append(item)
     candidates.sort(key=lambda item: (-item["match_score"], item["segment_id"]))
     limit = max(1, min(int(top_k), 10))
-    scene_role = (atom.get("constraints") or {}).get("scene_role")
     result = []
     used_asset_ids: set[int] = set()
     for item in candidates:
         asset_id = int(item.get("asset_id") or 0)
-        if scene_role in HOTSPOT_SCENE_ROLES and asset_id and asset_id in used_asset_ids:
+        # 跨母片去重：同一原始视频不得占满 TopK，避免后续分镜无可用母片。
+        if diversify_by_asset and asset_id and asset_id in used_asset_ids:
             continue
         result.append(item)
         if asset_id:
@@ -335,17 +358,48 @@ def assign_candidates(
     top_k: int = 3,
     required_file_type: str | None = None,
 ) -> list[dict]:
-    used: set[int] = set()
-    assignments = []
+    """为整条时间线生成跨母片候选，并全局贪心保证优先不撞同一原始视频。"""
+    pools: list[list[dict]] = []
     for atom in atoms:
-        candidates = rank_segments(
-            atom,
-            segments,
-            top_k=top_k,
-            used_segment_ids=used,
-            required_file_type=required_file_type,
+        pools.append(
+            rank_segments(
+                atom,
+                segments,
+                top_k=top_k,
+                used_segment_ids=None,
+                required_file_type=required_file_type,
+                diversify_by_asset=True,
+            )
         )
-        if candidates:
-            used.add(candidates[0]["segment_id"])
-        assignments.append({**atom, "candidates": candidates})
+
+    used_segments: set[int] = set()
+    used_assets: set[int] = set()
+    assignments: list[dict] = []
+    for atom, pool in zip(atoms, pools):
+        available = []
+        for candidate in pool:
+            asset_id = int(candidate.get("asset_id") or 0)
+            segment_id = int(candidate["segment_id"])
+            if segment_id in used_segments:
+                continue
+            if asset_id and asset_id in used_assets:
+                continue
+            available.append(candidate)
+        if not available:
+            available = rank_segments(
+                atom,
+                segments,
+                top_k=top_k,
+                used_segment_ids=used_segments,
+                required_file_type=required_file_type,
+                exclude_asset_ids=used_assets,
+                diversify_by_asset=True,
+            )
+        preferred = available[0] if available else None
+        if preferred:
+            used_segments.add(int(preferred["segment_id"]))
+            preferred_asset = int(preferred.get("asset_id") or 0)
+            if preferred_asset:
+                used_assets.add(preferred_asset)
+        assignments.append({**atom, "candidates": available})
     return assignments

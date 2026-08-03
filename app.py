@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import database as db
 import ai_engine
+import chat_intent
 import publisher
 import scheduler as sched
 from xhs_cards import pages_from_content, render_carousel
@@ -114,6 +115,13 @@ async def lifespan(app: FastAPI):
     recovered_asset_jobs = db.recover_interrupted_asset_processing_jobs()
     if recovered_asset_jobs:
         logger.warning("已恢复 %s 个被服务重启中断的素材处理任务", recovered_asset_jobs)
+    # pending 任务在重启后不会自动消失；这里重新 create_task，避免排队半途作废。
+    redispatched_pending = 0
+    for pending_job_id in db.list_pending_asset_processing_job_ids():
+        asyncio.create_task(_run_asset_processing_job(pending_job_id))
+        redispatched_pending += 1
+    if redispatched_pending:
+        logger.info("已重新派发 %s 个排队中的素材处理任务", redispatched_pending)
     recovered_hook_curations = db.recover_retryable_hotspot_hook_curation()
     if recovered_hook_curations:
         logger.warning("已重新排队 %s 个因模型策展暂时不可用而未完成的热点母片", recovered_hook_curations)
@@ -3553,8 +3561,8 @@ async def process_pending_assets(user=Depends(require_role(UserRole.ADMIN))):
 
 @app.post("/api/assets/rebuild-taxonomy", status_code=202)
 async def rebuild_asset_taxonomy(body: dict | None = None, user=Depends(require_role(UserRole.ADMIN))):
-    """按小批量重建主场景和对象/动作标签，避免全库调用失控。"""
-    limit = int((body or {}).get("limit") or 30)
+    """按批次重建主场景和对象/动作标签；单次最多 100 条，避免全库瞬时失控。"""
+    limit = int((body or {}).get("limit") or 100)
     assets = db.list_assets_needing_taxonomy_rebuild(asset_processing.PROCESSING_VERSION, limit)
     jobs = []
     for asset in assets:
@@ -3562,7 +3570,7 @@ async def rebuild_asset_taxonomy(body: dict | None = None, user=Depends(require_
         jobs.append(job_id)
         asyncio.create_task(_run_asset_processing_job(job_id))
     db.add_audit_log(user["id"], user["username"], "rebuild_asset_taxonomy", detail=f"jobs={len(jobs)}")
-    return {"jobs": jobs, "count": len(jobs), "limit": min(max(limit, 1), 30), "status": "pending"}
+    return {"jobs": jobs, "count": len(jobs), "limit": min(max(limit, 1), 100), "status": "pending"}
 
 
 @app.post("/api/assets/backfill-buffalo-brand-tags")
@@ -4061,31 +4069,80 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
     latest_topic = str(req.topic or "").strip() or next(
         (str(message["content"]).strip() for message in reversed(messages) if message["role"] == "user"), ""
     )
-    # Hook matching and copy generation are independent.  Starting both at the
-    # same time keeps the chat responsive while preserving the strict rule that
-    # the video action is enabled only after the Hook result returns.
-    hotspot_task = asyncio.create_task(
-        _retrieve_confirmed_chat_hooks(latest_topic, int(user["id"]), session_id=req.session_id)
+    content_mode = chat_intent.classify_content_mode(latest_topic, context=req.context or "")
+    evidence = chat_intent.assess_comparison_evidence(
+        messages, topic=latest_topic, context=req.context or "",
     )
-    content_task = asyncio.create_task(ai_engine.chat_platforms(
-        messages=messages,
-        context=req.context or "",
-        command=req.command,
-        tone=req.tone,
-        length=req.length,
-        platforms=[p.value for p in req.platforms],
-        # A free-form chat usually has no separately selected topic.  Keep the
-        # latest user question as the copy subject so an event such as a border
-        # queue is not silently flattened into a generic warehouse introduction.
-        topic=latest_topic,
-        assets=[item for item in db.list_assets(status="active") if not item.get("hotspot_id")],
-    ))
-    hotspot_retrieval, outputs = await asyncio.gather(hotspot_task, content_task)
+    platforms = [p.value for p in req.platforms]
+    authenticity_blocked = False
+    brand_assets_insufficient = False
+
+    if content_mode == "comparison_research" and evidence["evidence_state"] != "sufficient":
+        hotspot_retrieval = {
+            "status": "not_requested",
+            "reason": "comparison_research_without_evidence",
+            "message": "对比评测缺少实测资料，未启动热点 Hook 补采。",
+            "hooks": [],
+            "video": {"status": "disabled"},
+        }
+        outputs = ai_engine.build_comparison_framework(latest_topic, platforms, evidence)
+    else:
+        hotspot_task = None
+        if chat_intent.should_request_hotspot_retrieval(content_mode):
+            hotspot_task = asyncio.create_task(
+                _retrieve_confirmed_chat_hooks(latest_topic, int(user["id"]), session_id=req.session_id)
+            )
+        else:
+            hotspot_retrieval = {
+                "status": "not_requested",
+                "reason": f"content_mode_{content_mode}",
+                "message": "当前主题不需要热点 Hook 补采。",
+                "hooks": [],
+                "video": {"status": "disabled"},
+            }
+        content_task = asyncio.create_task(ai_engine.chat_platforms(
+            messages=messages,
+            context=req.context or "",
+            command=req.command,
+            tone=req.tone,
+            length=req.length,
+            platforms=platforms,
+            topic=latest_topic,
+            assets=[item for item in db.list_assets(status="active") if not item.get("hotspot_id")],
+        ))
+        if hotspot_task is not None:
+            hotspot_retrieval, outputs = await asyncio.gather(hotspot_task, content_task)
+        else:
+            outputs = await content_task
+        if content_mode == "comparison_research":
+            outputs, authenticity_blocked = ai_engine.enforce_comparison_authenticity(outputs, evidence)
+            if authenticity_blocked:
+                hotspot_retrieval = {
+                    "status": "not_requested",
+                    "reason": "authenticity_blocked",
+                    "message": "评测结论缺少证据，已降级为对比框架，未启动热点补采。",
+                    "hooks": [],
+                    "video": {"status": "disabled"},
+                }
+
     for item in outputs:
         if item["platform"] == "xiaohongshu" and item.get("title") != "生成失败":
             item["image_pages"], item["attachments"] = render_carousel(
                 item["title"], item.get("image_pages"), STATIC_DIR,
             )
+    readiness = ((hotspot_retrieval or {}).get("video") or {}).get("delivery_readiness") or {}
+    brand_assets_insufficient = bool(
+        (hotspot_retrieval or {}).get("status") == "matched"
+        and readiness
+        and not readiness.get("delivery_ready", True)
+    )
+    result_state = chat_intent.derive_result_state(
+        content_mode=content_mode,
+        evidence_state=evidence["evidence_state"],
+        hotspot_retrieval=hotspot_retrieval,
+        authenticity_blocked=authenticity_blocked,
+        brand_assets_insufficient=brand_assets_insufficient,
+    )
     first = outputs[0]
     context_content = "\n\n".join(
         f"[{item['platform']}]\n{item['title']}\n{item['body']}"
@@ -4096,7 +4153,70 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "title": first["title"], "body": first["body"],
         "hashtags": first["hashtags"], "outputs": outputs,
         "hotspot_retrieval": hotspot_retrieval,
+        "content_mode": content_mode,
+        "result_state": result_state,
+        "evidence_state": evidence,
     }
+
+
+@app.get("/api/hotspot-discovery-requests/{request_id}")
+async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get_current_user)):
+    """User-scoped progress for a chat-triggered Hook discovery request."""
+    item = db.get_hotspot_discovery_request(request_id)
+    if not item:
+        raise HTTPException(404, "补采请求不存在")
+    if user["role"] != "admin" and item.get("requested_by") not in (None, user["id"]):
+        raise HTTPException(403, "无权查看该补采请求")
+    hooks = []
+    media_id = item.get("matched_media_id")
+    if media_id:
+        media = db.get_hotspot_media(int(media_id)) or {}
+        asset_id = media.get("asset_id")
+        if asset_id:
+            for event in db.list_hotspot_event_clips(asset_id=int(asset_id)):
+                if event.get("review_status") != "confirmed":
+                    continue
+                evidence = event.get("evidence") or {}
+                hooks.append({
+                    "event_clip_id": event["id"],
+                    "title": event.get("title_zh") or event.get("title_en"),
+                    "description": evidence.get("what_happened") or "",
+                    "asset_id": event.get("asset_id"),
+                })
+    status = item.get("status") or "pending"
+    stage = item.get("stage") or {
+        "pending": "queued",
+        "processing": "fetch_sources",
+        "matched": "hooks_ready",
+        "unmatched": "done",
+        "failed": "done",
+        "cancelled_misrouted": "archived",
+    }.get(status, status)
+    return {
+        "id": item["id"],
+        "topic": item.get("topic"),
+        "status": status,
+        "stage": stage,
+        "error_message": item.get("error_message"),
+        "matched_media_id": media_id,
+        "hooks": hooks,
+        "recovery": (
+            "请更换更具体的时效事件主题后重试"
+            if status in {"unmatched", "failed"}
+            else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
+        ),
+        "updated_at": item.get("updated_at"),
+    }
+
+
+@app.post("/api/hotspot-discovery-requests/archive-misrouted-comparisons")
+async def archive_misrouted_comparison_discovery(user=Depends(require_role(UserRole.ADMIN))):
+    cancelled = db.cancel_misrouted_comparison_discovery_requests()
+    db.add_audit_log(
+        user["id"], user["username"], "archive_misrouted_comparison_discovery",
+        detail=f"count={len(cancelled)}",
+    )
+    return {"cancelled": cancelled, "count": len(cancelled)}
 
 
 def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:
@@ -4235,6 +4355,18 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
 async def generate_chat_dual_library_video(body: ChatDualLibraryVideoRequest, user=Depends(get_current_user)):
     """Persist the action immediately; worker gates perform all planning."""
     return _queue_chat_dual_library_video_job(body, user)
+
+
+# ==================== Debug (temporary agent instrumentation) ====================
+
+@app.post("/api/_agent_debug_log")
+async def agent_debug_log(request: Request):
+    payload = await request.json()
+    log_path = Path(__file__).resolve().parent / ".cursor" / "debug-34c455.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+    return {"ok": True}
 
 # ==================== Static Assets ====================
 

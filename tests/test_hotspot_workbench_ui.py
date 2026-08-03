@@ -7,7 +7,7 @@ ROOT = Path(__file__).parents[1]
 def test_sidebar_places_assets_next_to_hotspot_workbench():
     common = (ROOT / "static" / "common.js").read_text(encoding="utf-8")
 
-    assert "{ id: 'hotspots', label: '热点选题', href: '/hotspots.html' }" in common
+    assert "{ id: 'hotspots', label: '热点审核台', href: '/hotspots.html' }" in common
     core = common.index("{ section: '核心' }")
     analysis = common.index("{ section: '分析' }")
     hotspots = common.index("id: 'hotspots'")
