@@ -378,7 +378,11 @@ async function init() {
     // 加载本地草稿
     const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
     const linkedProjectId = new URLSearchParams(location.search).get('project_id');
-    if (linkedProjectId) await loadVideoProjectDraft(linkedProjectId); else loadDraft();
+    if (linkedProjectId) {
+        location.replace(`/video-project.html?id=${encodeURIComponent(linkedProjectId)}&stage=brief`);
+        return;
+    }
+    loadDraft();
     try {
         const hotspotEvidence = JSON.parse(localStorage.getItem('hotspotSourceEvidence') || '[]');
         if (Array.isArray(hotspotEvidence) && hotspotEvidence.length) {
@@ -915,18 +919,17 @@ function renderPreview(platform) {
             <div style="font-size:11px;line-height:1.5;color:var(--text-muted);background:var(--bg-secondary);border-radius:8px;padding:8px 10px;">这些图片会自动随小红书内容进入审核队列，无需再次上传。</div>
         </div>` : '';
     const xhsPageEditor = platform === 'xiaohongshu' ? renderXhsPageEditor(c) : '';
-    const douyinScript = platform === 'douyin' ? renderDouyinScript(c) : '';
-    // 抖音成片预览：视频播放器 + 下载/一键发布，独立显示在预览区顶部
+    const douyinScript = platform === 'douyin' ? `<div style="margin-top:14px;padding:14px;border:1px solid var(--border-line);border-radius:10px;background:var(--bg-subcard);font-size:13px;line-height:1.55;color:var(--text-secondary)">图文编辑器不再嵌入视频生产。请到 <a href="/video-project.html">视频工作台</a> 完成分镜、素材、配音与验收。${isLegacyVideoDraft(c)?` 当前草稿疑似历史短分镜，请先 <a href="/video-migrate.html?from=editor">打开迁移页</a>。`:''}</div>` : '';
+    // 抖音成片预览：若草稿已带成片则只读展示，正式生产在视频工作台
     const douyinVideo = platform === 'douyin' && c.rendered_video
         ? `<div style="margin-bottom:16px;">
-            <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:8px;display:flex;align-items:center;gap:6px;"><iconify-icon icon="mdi:video" style="color:var(--primary);"></iconify-icon> ${c.rendered_video.preview_only?'预览视频':'成片预览'}</div>
+            <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">已有成片（只读）</div>
             <video src="${escapeHtml(c.rendered_video.url)}" controls style="width:100%;max-height:480px;border-radius:12px;background:#000;"></video>
             <div style="display:flex;gap:8px;margin-top:8px;">
-                <a href="${escapeHtml(c.rendered_video.url)}" download class="btn btn-secondary btn-sm"><iconify-icon icon="mdi:download" width="14"></iconify-icon> 下载 MP4</a>
-                ${c.rendered_video.preview_only?'':`<button class="btn btn-primary btn-sm" onclick="publishDouyinVideo()"><iconify-icon icon="mdi:send" width="14"></iconify-icon> 发布到抖音</button>`}
+                <a href="${escapeHtml(c.rendered_video.url)}" download class="btn btn-secondary btn-sm">下载 MP4</a>
+                ${c.video_project_id?`<a class="btn btn-primary btn-sm" href="/video-project.html?id=${encodeURIComponent(c.video_project_id)}&stage=review">打开视频工作台</a>`:''}
             </div>
-            ${c.rendered_video.preview_only?'<div style="font-size:10px;color:#a16207;margin-top:6px;">预览可编辑、可下载，但尚未完成发布级质检，不能发布。</div>':c.rendered_video.quality_status?`<div style="font-size:10px;color:${c.rendered_video.quality_status==='passed'?'#16a34a':'#dc2626'};margin-top:6px;">质量门禁：${c.rendered_video.quality_status==='passed'?'通过':'未通过'} · ${c.rendered_video.quality_report?.duration||0} 秒 · ${c.rendered_video.quality_report?.width||0}×${c.rendered_video.quality_report?.height||0}</div>`:''}
-            ${(c.rendered_clips||[]).length?`<div style="margin-top:10px;font-size:11px;font-weight:700;">可选切片</div><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:6px;">${c.rendered_clips.map(clip=>`<div><video src="${escapeHtml(clip.url)}" controls style="width:100%;border-radius:8px;background:#000;"></video><button class="btn btn-secondary btn-sm" style="width:100%;margin-top:4px;" onclick="selectDouyinVideo(${clip.scene})">选用场景 ${clip.scene} 切片</button></div>`).join('')}</div>`:''}
+            ${c.rendered_video.preview_only?'<div style="font-size:10px;color:#a16207;margin-top:6px;">预览可编辑、可下载，但尚未完成发布级质检，不能发布。</div>':''}
            </div>`
         : '';
     const accountChoices=publishingAccounts.filter(a=>a.platform===platform);
@@ -983,45 +986,20 @@ function moveXhsPage(index,delta){const c=generatedContents.xiaohongshu;const ta
 async function regenerateXhsCarousel(){const c=generatedContents.xiaohongshu;if(!c)return;try{const response=await apiFetch('/api/xhs/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:c.title,body:c.body,image_pages:c.image_pages||[]})});const data=await response.json();c.image_pages=data.image_pages||[];c.attachments=data.attachments||[];renderPreview('xiaohongshu');showToast(`已重绘 ${c.attachments.length} 张含 Buffalo Logo 的轮播图`);}catch(error){showToast(`重绘失败：${error.message}`,'error');}}
 
 function renderDouyinScript(content) {
-    const scenes=Array.isArray(content.scenes)?content.scenes:[];
-    const selected=new Set(content.selected_asset_ids||[]);
-    const selectedList=Array.from(selected); scenes.forEach((scene,index)=>{if(!scene.asset_id&&selectedList[index])scene.asset_id=selectedList[index];});
-    const scriptState=classifyDouyinScriptState({
-      durationTarget: content.duration_target,
-      scenes,
-      videoWorkflow: draftVideoWorkflow,
-      importedFromChat,
-      isFormalPlan: false,
-    });
-    const targetSeconds=scriptState.targetSeconds;
-    const workflowBlocked=importedFromChat&&draftVideoWorkflow?.status!=='ready';
-    const fallbackBlocked=content.source==='safe_fallback';
-    const ready=mediaCapabilities.ready&&!workflowBlocked&&!fallbackBlocked&&scriptState.canProduce;
-    const blockReason=fallbackBlocked
-      ? '当前只是模型不可用时的提示文本，不能生成视频'
-      : (scriptState.blockReason || draftVideoWorkflow?.block_reason || '正式成片需要强相关热点 Hook 和可用 Buffalo 自有素材');
-    const selectedVoice=content.tts_provider && content.voice
-      ? `${content.tts_provider}:${content.voice}`
-      : (content.voice === 'Cherry' ? 'qwen:Cherry' : voiceOptionValue((mediaCapabilities.voice_options||defaultVoiceOptions())[0]));
-    const missingCaps=[
-      !mediaCapabilities.ffmpeg?'FFmpeg':'',
-      !mediaCapabilities.ffprobe?'ffprobe':'',
-      !(mediaCapabilities.mimo_api_key || (mediaCapabilities.tts_fallback_enabled && mediaCapabilities.dashscope_key))?'MiMo API Key':'',
-    ].filter(Boolean).join(' ');
-    return `<div class="render-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><strong><iconify-icon icon="mdi:movie-edit-outline" width="15"></iconify-icon> ${escapeHtml(scriptState.label)}</strong><div style="display:flex;gap:10px"><a href="/video-workbench.html?from=editor" style="color:#d7b57e;font-size:11px;">视频精确调整</a><a href="/assets.html" style="color:#d7b57e;font-size:11px;">管理素材</a></div></div>
-    ${scenes.length?scenes.map((s,i)=>`<div class="scene-card"><div class="scene-meta"><b>场景 ${i+1}</b><span>${Number(s.duration||5)} 秒</span><label style="margin-left:auto;font-size:11px;"><input type="checkbox" class="douyin-clip-scene" value="${i+1}" ${content.selected_clip_scenes?.includes(i+1)?'checked':''}> 输出切片</label></div><input value="${escapeHtml(s.visual||'')}" aria-label="场景画面" onchange="updateScene(${i},'visual',this.value)"/><textarea rows="2" aria-label="口播" onchange="updateScene(${i},'voiceover',this.value)">${escapeHtml(s.voiceover||'')}</textarea><input value="${escapeHtml(s.text_overlay||'')}" aria-label="画面标题" onchange="updateScene(${i},'text_overlay',this.value)"/><select onchange="updateScene(${i},'asset_id',this.value?Number(this.value):null)"><option value="">品牌信息卡兜底</option>${mediaAssets.map(a=>`<option value="${a.id}" ${Number(s.asset_id)===a.id||(!s.asset_id&&selected.has(a.id)&&i===0)?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`).join(''):`<div style="font-size:12px;color:#aaa;padding:12px;">当前内容没有结构化分镜，请重新生成抖音内容。</div>`}
-    <div style="font-size:10px;color:#aaa;margin:7px 0;">字幕将依据实际配音时长逐句对齐，并避开平台底部操作区。勾选场景可同时生成独立切片。正式生产固定 ${targetSeconds} 秒目标，需 7～10 镜。</div>
-    <label style="font-size:11px;color:#aaa;">TTS 音色（Qwen / MiMo）</label>${voiceSelectMarkup(mediaCapabilities.voice_options, selectedVoice, 'douyinVoice', 'style="width:100%;margin:6px 0 10px;background:#242424;border:1px solid #444;color:white;border-radius:7px;padding:8px;"')}
-    <button class="btn btn-primary" style="width:100%" onclick="startDouyinRender()" ${!ready||!scenes.length?`disabled title="${escapeHtml(blockReason)}"`:''}>${importedFromChat?`生成 ${targetSeconds} 秒正式成片（重新规划分镜）`:`生成 ${targetSeconds} 秒正式 MP4`}</button>${!ready?`<div style="font-size:10px;color:#fca5a5;margin-top:7px;">${workflowBlocked||fallbackBlocked||scriptState.mode==='legacy'?escapeHtml(blockReason):`缺少：${escapeHtml(missingCaps||'视频能力未就绪')}`}</div>`:''}<div id="renderStatus"></div>${content.rendered_video?`<video src="${escapeHtml(content.rendered_video.url)}" controls style="width:100%;margin-top:10px;border-radius:10px;"></video>${formatRenderProvenance(content.rendered_video.quality_report, scenes)}`:''}</div>`;
-  }
-
+    return `<div style="margin-top:14px;padding:14px;border:1px solid var(--border-line);border-radius:10px;background:var(--bg-subcard);font-size:13px;line-height:1.55;">视频生产已迁至 <a href="/video-project.html">视频工作台</a>。</div>`;
+}
 function updateScene(index,key,value){const c=generatedContents.douyin;if(!c?.scenes?.[index])return;c.scenes[index][key]=value;}
 function toggleAccountTarget(platform,id,checked){const c=generatedContents[platform];if(!c)return;const ids=new Set(c.account_target_ids||[]);checked?ids.add(id):ids.delete(id);c.account_target_ids=Array.from(ids);}
 function selectDouyinVideo(scene){const c=generatedContents.douyin;const clip=(c.rendered_clips||[]).find(item=>item.scene===scene);if(!clip)return;c.rendered_video=clip;c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),clip];renderPreview('douyin');showToast(`已选用场景 ${scene} 切片`);}
-let renderingDouyin=false;async function startDouyinRender(){if(renderingDouyin){showToast('正在渲染中，请等待完成','error');return;}const c=generatedContents.douyin;if(!c)return;if(c.source==='safe_fallback'){showToast('当前只是模型不可用时的提示文本，不能生成视频','error');return;}const scriptState=classifyDouyinScriptState({durationTarget:c.duration_target,scenes:c.scenes,videoWorkflow:draftVideoWorkflow,importedFromChat});if(scriptState.mode==='legacy'||!scriptState.canProduce){showToast(scriptState.blockReason||'当前预览不可直接生产','error');return;}if(importedFromChat&&draftVideoWorkflow?.status!=='ready'){showToast(draftVideoWorkflow?.block_reason||'尚未匹配强相关热点 Hook，不能生成正式视频','error');return;}const selection=parseVoiceSelection(document.getElementById('douyinVoice')?.value||'');if(!selection.voice){showToast('请选择 TTS 音色','error');return;}c.voice=selection.voice;c.tts_provider=selection.tts_provider;c.selected_clip_scenes=Array.from(document.querySelectorAll('.douyin-clip-scene:checked')).map(el=>Number(el.value));c.output_mode=c.selected_clip_scenes.length?'full_and_clips':'full';renderingDouyin=true;try{if(importedFromChat&&draftVideoWorkflow){const r=await apiFetch('/api/ai/chat/dual-library-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:draftVideoWorkflow.topic||c.title,hotspot_event_ids:draftVideoWorkflow.hotspot_event_ids||[],platform:'douyin',target_duration_ms:60000,tts_provider:selection.tts_provider,voice:selection.voice,session_id:draftVideoWorkflow.session_id||'',idempotency_key:`editor-chat-${draftVideoWorkflow.session_id||'session'}-${(draftVideoWorkflow.hotspot_event_ids||[]).join('-')}`})});const d=await r.json();if(!d.job?.id||!d.project?.id)throw new Error('正式视频项目创建失败');c.video_project_id=d.project.id;c.video_generation_job_id=d.job.id;pollFormalEditorRender(d.job.id,d.project.id);return;}const targetSeconds=scriptState.targetSeconds;if(!(targetSeconds>=50&&targetSeconds<=90&&(c.scenes||[]).length>=FORMAL_MIN_SCENES&&(c.scenes||[]).length<=FORMAL_MAX_SCENES)){throw new Error(`正式生产需要 ${FORMAL_MIN_SCENES}～${FORMAL_MAX_SCENES} 个镜头，且时长在 50～90 秒`);}const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice:selection.voice,tts_provider:selection.tts_provider,duration_target_ms:targetSeconds*1000})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){renderingDouyin=false;showToast(e.message,'error');}}
-
-function pollFormalEditorRender(jobId,projectId){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/video-generation/jobs/${jobId}`,{cache:'no-store'});const job=await r.json();const box=document.getElementById('renderStatus');if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${escapeHtml(job.stage||'正式视频生成中')} · ${Number(job.progress||0)}%</div><div class="render-progress"><i style="width:${Number(job.progress||0)}%"></i></div><a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">查看正式项目</a>`;if(job.status==='succeeded'){clearInterval(renderPoller);renderingDouyin=false;const c=generatedContents.douyin;const video={type:'video',url:job.output_url,path:job.output_path,filename:(c.title||'douyin')+'.mp4',quality_status:'passed',quality_report:job.quality_report?.final_quality||job.quality_report||{}};c.rendered_video=video;c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),video];renderPreview('douyin');if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;color:#86efac;">50–90 秒正式成片已通过质量检查</div>${formatRenderProvenance(job.quality_report, job.quality_report?.script?.scenes||c.scenes)}<a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">查看正式项目</a>`;showToast('50–90 秒正式成片已通过质量检查');}else if(job.status==='needs_review'){clearInterval(renderPoller);renderingDouyin=false;const issues=[...new Set(job.quality_report?.gate?.issues||[])].slice(0,3);if(box)box.innerHTML=`<div style="color:#fca5a5;font-size:11px;margin-top:8px;">正式成片暂停：${issues.map(escapeHtml).join('；')||'请检查脚本与素材'}</div>${formatRenderProvenance(job.quality_report, job.quality_report?.script?.scenes||[])}<a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">检查正式项目</a>`;}else if(['failed','canceled'].includes(job.status)){clearInterval(renderPoller);renderingDouyin=false;if(box)box.innerHTML=`<div style="color:#fca5a5;font-size:11px;">${escapeHtml(job.error_message||'正式视频生成失败')}</div>`;}}catch(e){clearInterval(renderPoller);renderingDouyin=false;}};tick();renderPoller=setInterval(tick,2000);}
-async function pollRender(id){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/douyin/render/${id}`);const job=await r.json();const box=document.getElementById('renderStatus');const pending=job.status==='pending';if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${pending?'排队等待中（前面有任务正在渲染）…':escapeHtml(job.stage)+' · '+job.progress+'%'}</div><div class="render-progress"><i style="width:${pending?5:job.progress}%"></i></div>${job.error?`<div style="color:#fca5a5;font-size:10px;">${escapeHtml(job.error)}</div>`:''}`;if(job.status==='succeeded'){clearInterval(renderPoller);renderingDouyin=false;const c=generatedContents.douyin;c.rendered_video=job.rendered_video;c.rendered_clips=job.clips||[];c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),job.rendered_video];renderPreview('douyin');if(box)box.innerHTML=`${formatRenderProvenance(job.quality_report||job.rendered_video?.quality_report, c.scenes)}`;showToast(`视频质量检查通过${c.rendered_clips.length?'，已生成 '+c.rendered_clips.length+' 个切片':''}`);}else if(job.status==='failed'){clearInterval(renderPoller);renderingDouyin=false;showToast('视频渲染或质量检查失败','error');}}catch(e){clearInterval(renderPoller);}};await tick();renderPoller=setInterval(tick,2000);}
+async function startDouyinRender(){
+  showToast('请从 AI 对话创建 60 秒视频项目，或打开视频工作台','info');
+  const c=generatedContents.douyin;
+  if(c?.video_project_id){location.href=`/video-project.html?id=${encodeURIComponent(c.video_project_id)}&stage=brief`;return;}
+  if(isLegacyVideoDraft(c)){location.href='/video-migrate.html?from=editor';return;}
+  location.href='/video-project.html';
+}
+function pollFormalEditorRender(){/* video production moved to workbench */}
+async function pollRender(){/* video production moved to workbench */}
 
 function bindXhsImages(items){lightboxImages=items.map(a=>a.url);document.querySelectorAll('[data-xhs-index]').forEach(img=>img.addEventListener('click',()=>openXhsLightbox(Number(img.dataset.xhsIndex))));}
 function openXhsLightbox(index){lightboxIndex=index;updateLightbox();document.getElementById('xhsLightbox').hidden=false;document.body.style.overflow='hidden';}

@@ -221,3 +221,74 @@ def test_scene_command_seeks_to_matched_shot_start(tmp_path, monkeypatch):
     )
 
     assert command[command.index("-ss") + 1] == "2.5"
+
+
+def test_media_capabilities_expose_voice_availability_and_preview_flag(tmp_db, monkeypatch):
+    import app
+    client, headers = _client_and_token(tmp_db)
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-test")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    response = client.get("/api/media/capabilities", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tts_preview_supported"] is True
+    assert payload["voice_options"][0]["provider"] == "mimo"
+    assert "available" in payload["voice_options"][0]
+    assert "disabled_reason" in payload["voice_options"][0]
+    assert "preview_supported" in payload["voice_options"][0]
+
+
+def test_tts_preview_does_not_create_video_jobs(tmp_db, monkeypatch, tmp_path):
+    import database as db
+    import video_renderer
+
+    client, headers = _client_and_token(tmp_db)
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-test")
+
+    def _fake_preview(text, *, tts_provider=None, voice=None, output_dir=None):
+        root = Path(output_dir or tmp_path)
+        root.mkdir(parents=True, exist_ok=True)
+        out = root / "preview-test.wav"
+        out.write_bytes(b"RIFFpreview")
+        return {
+            "audio_path": f"uploads/tts-previews/{out.name}",
+            "audio_url": f"/static/uploads/tts-previews/{out.name}",
+            "tts_provider": tts_provider or "mimo",
+            "voice": voice or "mimo_default",
+            "text": text,
+            "fallback_used": False,
+        }
+
+    monkeypatch.setattr(video_renderer, "synthesize_tts_preview", _fake_preview)
+    user = db.get_user_by_username("mediaadmin")
+    before = len(db.list_active_video_generation_jobs(user["id"]))
+    response = client.post("/api/media/tts-preview", headers=headers, json={
+        "text": "西开普发货前先确认路况。",
+        "tts_provider": "mimo",
+        "voice": "mimo_default",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["audio_url"].startswith("/static/")
+    assert body["tts_provider"] == "mimo"
+    after = len(db.list_active_video_generation_jobs(user["id"]))
+    assert after == before
+
+
+def test_list_video_projects_endpoint(tmp_db):
+    import database as db
+    client, headers = _client_and_token(tmp_db)
+    user = db.get_user_by_username("mediaadmin")
+    created = db.create_video_project(
+        created_by=user["id"],
+        source_type="manual",
+        source_snapshot={},
+        title="列表测试项目",
+        platform="douyin",
+        target_duration_ms=60000,
+        target_orientation="portrait",
+    )
+    response = client.get("/api/video-projects", headers=headers)
+    assert response.status_code == 200
+    items = response.json()
+    assert any(item["id"] == created["id"] for item in items)

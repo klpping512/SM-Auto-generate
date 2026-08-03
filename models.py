@@ -346,6 +346,13 @@ class VideoProjectCreateRequest(BaseModel):
     revision: dict | None = None
 
 
+class TtsPreviewRequest(BaseModel):
+    """Short TTS preview — must never create a formal video generation job."""
+    text: str = Field(..., min_length=1, max_length=200)
+    tts_provider: str = Field(default="mimo", max_length=32)
+    voice: str = Field(default="mimo_default", max_length=64)
+
+
 class VideoProjectRevisionRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 

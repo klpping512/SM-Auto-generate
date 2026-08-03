@@ -10,6 +10,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
@@ -57,16 +58,65 @@ def normalize_tts_voice(voice: str | None) -> str:
     return candidate if candidate in VOICES else sorted(VOICES)[0]
 
 
-def tts_voice_options() -> list[dict]:
-    """Return selectable TTS voices for Qwen and MiMo."""
+def tts_voice_options(*, mimo_available: bool | None = None, qwen_available: bool | None = None) -> list[dict]:
+    """Return selectable TTS voices for Qwen and MiMo with availability flags."""
+    mimo_ok = bool(os.environ.get("MIMO_API_KEY")) if mimo_available is None else bool(mimo_available)
+    qwen_ok = bool(os.environ.get("DASHSCOPE_API_KEY")) if qwen_available is None else bool(qwen_available)
     options = [
-        {"provider": "mimo", "id": MIMO_TTS_VOICE, "label": "MiMo 默认"},
+        {
+            "provider": "mimo",
+            "id": MIMO_TTS_VOICE,
+            "label": "MiMo 默认",
+            "available": mimo_ok,
+            "disabled_reason": "" if mimo_ok else "未配置 MIMO_API_KEY",
+            "preview_supported": True,
+        },
     ]
     options.extend(
-        {"provider": "qwen", "id": voice, "label": f"Qwen {voice}"}
+        {
+            "provider": "qwen",
+            "id": voice,
+            "label": f"Qwen {voice}",
+            "available": qwen_ok,
+            "disabled_reason": "" if qwen_ok else "未配置 DASHSCOPE_API_KEY",
+            "preview_supported": True,
+        }
         for voice in sorted(VOICES)
     )
     return options
+
+
+def synthesize_tts_preview(
+    text: str,
+    *,
+    tts_provider: str | None = None,
+    voice: str | None = None,
+    output_dir: Path | None = None,
+) -> dict:
+    """Synthesize a short preview clip without creating a video generation job."""
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        raise ValueError("试听文本不能为空")
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120]
+    provider, resolved_voice = resolve_tts_selection(tts_provider, voice, strict=True)
+    root = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "static" / "uploads" / "tts-previews"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:12]
+    output = root / f"preview-{provider}-{stamp}.wav"
+    if provider == "mimo":
+        synthesize_mimo_tts(cleaned, resolved_voice, output)
+    else:
+        synthesize_qwen_tts(cleaned, resolved_voice, output)
+    rel = f"uploads/tts-previews/{output.name}"
+    return {
+        "audio_path": rel,
+        "audio_url": f"/static/{rel}",
+        "tts_provider": provider,
+        "voice": resolved_voice,
+        "text": cleaned,
+        "fallback_used": False,
+    }
 
 
 def resolve_tts_selection(

@@ -65,7 +65,7 @@ from models import (
     EvidencePackageCreateRequest,
     TopicBriefCreateRequest, TopicBriefUpdateRequest, TopicEvidenceSelectionRequest, TopicBriefGenerateRequest,
     TopicHotspotRecommendationRequest, TopicAutoPilotRequest,
-    ModelRouteRequest,
+    ModelRouteRequest, TtsPreviewRequest,
 )
 import publish_readiness
 from routes import auth_routes, config_routes, hotspot_package_routes, page_routes, video_generation_routes
@@ -3713,9 +3713,35 @@ async def media_capabilities(user=Depends(get_current_user)):
     media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
     tts_ok = bool(result["mimo_api_key"] or (result["tts_fallback_enabled"] and result["dashscope_key"]))
     result["ready"] = media_ok and tts_ok
-    result["voice_options"] = video_renderer.tts_voice_options()
+    result["voice_options"] = video_renderer.tts_voice_options(
+        mimo_available=result["mimo_api_key"],
+        qwen_available=result["dashscope_key"],
+    )
     result["voices"] = [item["id"] for item in result["voice_options"]]
+    result["tts_preview_supported"] = True
     return result
+
+
+@app.post("/api/media/tts-preview")
+async def media_tts_preview(body: TtsPreviewRequest, user=Depends(get_current_user)):
+    """Short voice preview only — never creates a formal video generation job."""
+    try:
+        preview = await asyncio.to_thread(
+            video_renderer.synthesize_tts_preview,
+            body.text,
+            tts_provider=body.tts_provider,
+            voice=body.voice,
+            output_dir=STATIC_DIR / "uploads" / "tts-previews",
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"音色试听失败：{exc}") from exc
+    db.add_audit_log(
+        user["id"], user["username"], "tts_preview",
+        target=f"{preview.get('tts_provider')}:{preview.get('voice')}",
+    )
+    return preview
 
 
 @app.get("/api/admin/sqlite-health")

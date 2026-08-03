@@ -3375,6 +3375,22 @@ def get_video_project(project_id: str, created_by: int | None = None) -> dict | 
         return item
 
 
+def list_video_projects(created_by: int, *, limit: int = 50) -> list[dict]:
+    """Return recent video projects for the signed-in user."""
+    capped = max(1, min(200, int(limit or 50)))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, title, platform, status, target_duration_ms, source_type,
+                      active_job_id, current_revision_id, created_at, updated_at
+               FROM video_projects
+               WHERE created_by=?
+               ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+               LIMIT ?""",
+            (created_by, capped),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_video_project_revision(revision_id: str, created_by: int | None = None) -> dict | None:
     with get_conn() as conn:
         sql = """SELECT r.* FROM video_project_revisions r

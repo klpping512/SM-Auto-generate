@@ -29,9 +29,16 @@ def test_config_page_is_mimo_first():
 
 def test_video_project_uses_shared_tts_selector_not_qwen_only():
     page = (ROOT / "static" / "video-project.html").read_text(encoding="utf-8")
-    assert "TTS 音色（Qwen / MiMo）" in page
-    assert "voiceSelectMarkup" in page
+    assert "voicePickerMarkup" in page or "voiceSelectMarkup" in page
+    assert "配音字幕" in page
     assert "Qwen TTS 音色" not in page
+
+
+def test_common_nav_exposes_video_project_entry():
+    source = (ROOT / "static" / "common.js").read_text(encoding="utf-8")
+    assert "id: 'video-project'" in source
+    assert "videoProjectNavBadge" in source
+    assert "ensureVideoTaskCenter" not in source
 
 
 def test_chat_response_contract_fields_present_in_backend():

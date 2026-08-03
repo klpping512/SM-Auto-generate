@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>历史草稿迁移 - SA-LogiFlow</title>
+<link rel="stylesheet" href="/static/design-system.css?v=8"/>
+<style>
+.migrate-main{overflow:auto;padding:24px}
+.migrate-card{max-width:880px;margin:0 auto;border:1px solid var(--border-line);border-radius:12px;background:#fff;padding:22px}
+.migrate-card h1{font-size:22px;margin:0 0 8px}
+.migrate-card p{font-size:13px;line-height:1.6;color:var(--text-secondary);margin:0 0 14px}
+.scene-list{display:grid;gap:10px;margin:16px 0}
+.scene-item{padding:12px;border:1px solid var(--border-light);border-radius:8px;background:var(--bg-subcard);font-size:12px;line-height:1.55}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+.actions .btn{min-height:44px}
+.meta{font-size:12px;color:var(--text-muted)}
+</style>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js?v=10"></script>
+<script>
+const PAGE_ID='video-project';
+const params=new URLSearchParams(location.search);
+const projectId=params.get('id');
+let project=null;
+let viewOnly=false;
+let draftPayload=null;
+
+document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content migrate-main"><div class="migrate-card" id="card"><div class="empty-note">加载中…</div></div></main>`;
+
+function renderDraft(payload, meta={}){
+  const scenes=Array.isArray(payload?.scenes)?payload.scenes:[];
+  const duration=payload?.duration_target||Math.round(Number(meta.target_duration_ms||payload?.target_duration_ms||0)/1000)||'—';
+  document.getElementById('card').innerHTML=`
+    <h1>历史草稿</h1>
+    <p>旧 30 秒 / 短分镜草稿不能直接进入正式五阶段工作台。请按 60 秒规则重建，或仅查看旧内容。已有项目、修订与成片不会被删除。</p>
+    <div class="meta">标题：${escapeHtml(payload?.title||meta.title||'未命名')} · 原始目标 ${escapeHtml(String(duration))} 秒 · ${scenes.length} 个镜头</div>
+    <div class="scene-list">${scenes.map((s,i)=>`<article class="scene-item"><strong>分镜 ${i+1} · ${escapeHtml(String(s.duration||5))} 秒</strong><div>旁白：${escapeHtml(s.voiceover||'')}</div><div>画面：${escapeHtml(s.visual||'')}</div></article>`).join('')||'<div class="empty-note">没有可读分镜</div>'}</div>
+    <div class="actions" id="migrateActions">
+      <button type="button" class="btn btn-primary" onclick="rebuildFormal()">按60秒规则重建视频项目</button>
+      <button type="button" class="btn btn-secondary" onclick="viewLegacyOnly()">仅查看旧内容</button>
+      <a class="btn btn-secondary" href="/video-project.html">返回项目列表</a>
+    </div>
+    <div id="status" class="meta" style="margin-top:12px"></div>`;
+}
+
+function viewLegacyOnly(){
+  viewOnly=true;
+  document.getElementById('migrateActions').innerHTML=`<a class="btn btn-secondary" href="/video-project.html">返回项目列表</a>`;
+  document.getElementById('status').textContent='当前为只读查看，不会写入正式生产区。';
+}
+
+async function rebuildFormal(){
+  const status=document.getElementById('status');
+  status.textContent='正在按 60 秒规则重建…';
+  try{
+    const snap=project?.source_snapshot||{};
+    const hookIds=snap.matched_event_clip_ids||draftPayload?.brief?.approved_hook_event_ids||[];
+    if(!hookIds.length){
+      showToast('缺少已锁定的热点 Hook，请回到 AI 对话重新创建 60 秒视频项目','error');
+      status.textContent='缺少 Hook，无法直接重建。请从 AI 对话发起。';
+      return;
+    }
+    const topic=snap.topic||draftPayload?.brief?.logistics_topic||project?.title||'南非物流热点';
+    const selection=parseVoiceSelection(voiceOptionValue(defaultVoiceOptions()[0]));
+    const response=await apiFetch('/api/ai/chat/dual-library-video',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        topic,
+        hotspot_event_ids:hookIds.slice(0,2),
+        platform:'douyin',
+        target_duration_ms:60000,
+        tts_provider:selection.tts_provider,
+        voice:selection.voice,
+        idempotency_key:`migrate-rebuild-${project?.id||'draft'}-${Date.now()}`,
+      }),
+    });
+    const result=await response.json();
+    if(!result.project?.id)throw new Error('重建失败');
+    showToast('已按 60 秒规则重建，正在进入工作台');
+    location.href=`/video-project.html?id=${encodeURIComponent(result.project.id)}&stage=brief`;
+  }catch(error){
+    status.textContent=error.message;
+    showToast(error.message,'error');
+  }
+}
+
+async function init(){
+  try{
+    if(projectId){
+      const response=await apiFetch(`/api/video-projects/${projectId}`);
+      project=await response.json();
+      draftPayload=project.current_revision?.payload||{};
+      renderDraft(draftPayload,{title:project.title,target_duration_ms:project.target_duration_ms});
+      return;
+    }
+    // editor / chat local draft fallback
+    const draft=JSON.parse(localStorage.getItem('draft')||'null');
+    const content=(draft?.contents||[]).find(item=>item.platform==='douyin')||null;
+    if(content){
+      draftPayload=content;
+      renderDraft(content,{title:content.title,target_duration_ms:(content.duration_target||30)*1000});
+      return;
+    }
+    document.getElementById('card').innerHTML=`<h1>历史草稿</h1><p>没有找到可迁移的旧草稿。</p><div class="actions"><a class="btn btn-primary" href="/chat.html">前往 AI 对话</a><a class="btn btn-secondary" href="/video-project.html">视频项目</a></div>`;
+  }catch(error){
+    document.getElementById('card').innerHTML=`<div class="match-score-note">${escapeHtml(error.message)}</div>`;
+  }
+}
+init();
+</script>
+</body>
+</html>

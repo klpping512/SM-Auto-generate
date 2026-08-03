@@ -119,6 +119,10 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
         )
         return db.get_video_project(project["id"], created_by=user["id"])
 
+    @router.get("/api/video-projects")
+    async def list_video_projects(limit: int = 50, user=Depends(get_current_user)):
+        return db.list_video_projects(user["id"], limit=limit)
+
     @router.get("/api/video-projects/{project_id}")
     async def get_video_project(project_id: str, user=Depends(get_current_user)):
         project = db.get_video_project(project_id, created_by=user["id"])

@@ -75,9 +75,15 @@ def test_douyin_script_removes_unknown_asset_ids():
 
 
 def test_tts_voice_options_include_mimo_and_qwen():
-    options = video_renderer.tts_voice_options()
-    assert {"provider": "mimo", "id": "mimo_default", "label": "MiMo 默认"} in options
+    options = video_renderer.tts_voice_options(mimo_available=True, qwen_available=True)
+    mimo = next(item for item in options if item["provider"] == "mimo" and item["id"] == "mimo_default")
+    assert mimo["label"] == "MiMo 默认"
+    assert mimo["available"] is True
+    assert mimo["preview_supported"] is True
     assert any(item["provider"] == "qwen" and item["id"] == "Cherry" for item in options)
+    disabled = video_renderer.tts_voice_options(mimo_available=False, qwen_available=False)
+    assert disabled[0]["available"] is False
+    assert "MIMO_API_KEY" in disabled[0]["disabled_reason"]
 
 
 def test_resolve_tts_selection_rejects_unknown_voice_in_strict_mode():

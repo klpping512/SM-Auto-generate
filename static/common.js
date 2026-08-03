@@ -81,6 +81,7 @@ const NAV_ITEMS = [
     { id: 'chat', label: 'AI 对话', href: '/chat.html' },
     { id: 'hotspots', label: '热点审核台', href: '/hotspots.html' },
     { id: 'assets', label: '内容资产', href: '/assets.html' },
+    { id: 'video-project', label: '视频项目', href: '/video-project.html' },
     { id: 'editor', label: '内容编辑器', href: '/editor.html' },
     { id: 'queue', label: '发布队列', href: '/queue.html' },
     { section: '分析' },
@@ -101,6 +102,7 @@ const NAV_ICONS = {
     '热点审核台':  '<path d="M12 2a7 7 0 00-4 12.74V18h8v-3.26A7 7 0 0012 2zm2 11.5-.9.52V16h-2.2v-1.98l-.9-.52A5 5 0 1114 13.5zM9 20h6v2H9v-2z"/>',
     '经营驾驶舱': '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
     '内容编辑器':  '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
+    '视频项目':    '<path d="M4 4h11a2 2 0 012 2v3l5-2.5v11L17 15v3a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zm2 3v10h9V7H6z"/>',
     '内容资产':    '<path d="M6 2a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6zm0 2h7v5h5v11H6V4z"/>',
     '发布日历':    '<path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5zm2 4h2v2H7v-2zm4 0h2v2h-2v-2zm-4 4h2v2H7v-2zm4 0h2v2h-2v-2z"/>',
     '企业知识库':  '<path d="M6 22v-4.3l-2.6-2.6L2 16.5V22h4zm14 0v-5.5l-1.4-1.4-2.6 2.6V22h4zM12 2L2 7v1h20V7l-10-5zM2 8v2.5l1.4 1.4 2.6-2.6-4-1.3zm10 3l-5-1.6 3.4-3.4L15 9.4l-3-1.6V11zm10-1l-4 1.3 2.6 2.6L22 10.5V8zm0-1h-5l3-3-2-1-4 4-4-4-2 1 3 3H2v1l5 1.6 3 1v4h4v-4l3-1 5-1.6V9z"/>',
@@ -127,9 +129,12 @@ function renderSidebar(activeId) {
             if (item.id === 'hotspots' && !isAdmin) continue;
             const active = item.id === activeId ? ' active' : '';
             const svg = NAV_ICONS[item.label] || '';
+            const badge = item.id === 'video-project'
+                ? '<b class="nav-badge" id="videoProjectNavBadge" hidden>0</b>'
+                : '';
             navHtml += `<a class="nav-item${active}" href="${item.href}" title="${escapeHtml(item.label)}">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">${svg}</svg>
-                <span>${escapeHtml(item.label)}</span>
+                <span>${escapeHtml(item.label)}</span>${badge}
             </a>`;
         }
     }
@@ -167,8 +172,8 @@ const FORMAL_MAX_DURATION_MS = 90_000;
 
 function defaultVoiceOptions() {
     return [
-        {provider: 'mimo', id: 'mimo_default', label: 'MiMo 默认'},
-        {provider: 'qwen', id: 'Cherry', label: 'Qwen Cherry'},
+        {provider: 'mimo', id: 'mimo_default', label: 'MiMo 默认', available: true, preview_supported: true},
+        {provider: 'qwen', id: 'Cherry', label: 'Qwen Cherry', available: true, preview_supported: true},
     ];
 }
 
@@ -187,14 +192,94 @@ function parseVoiceSelection(value) {
     return {tts_provider: raw.slice(0, splitAt), voice: raw.slice(splitAt + 1)};
 }
 
+function providerGroupLabel(provider) {
+    const key = String(provider || '').toLowerCase();
+    if (key === 'mimo') return 'MiMo';
+    if (key === 'qwen') return 'Qwen';
+    return key.toUpperCase() || '其他';
+}
+
 function voiceSelectMarkup(options, selectedValue, selectId, selectAttrs) {
     const opts = (Array.isArray(options) && options.length) ? options : defaultVoiceOptions();
-    const selected = String(selectedValue || voiceOptionValue(opts[0]));
+    const ordered = [...opts].sort((a, b) => {
+        const rank = (p) => (String(p).toLowerCase() === 'mimo' ? 0 : 1);
+        return rank(a.provider) - rank(b.provider);
+    });
+    const selected = String(selectedValue || voiceOptionValue(ordered[0]));
     const attrs = selectAttrs || '';
-    return `<select id="${escapeHtml(selectId)}" ${attrs}>${opts.map(option => {
-        const value = voiceOptionValue(option);
-        return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(option.label || `${option.provider} ${option.id}`)}</option>`;
-    }).join('')}</select>`;
+    const groups = new Map();
+    ordered.forEach((option) => {
+        const key = String(option.provider || 'other').toLowerCase();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(option);
+    });
+    // MiMo first
+    const groupOrder = [...groups.keys()].sort((a, b) => (a === 'mimo' ? -1 : b === 'mimo' ? 1 : a.localeCompare(b)));
+    const optionsHtml = groupOrder.map((key) => {
+        const items = groups.get(key).map((option) => {
+            const value = voiceOptionValue(option);
+            const disabled = option.available === false;
+            const reason = option.disabled_reason ? `（${option.disabled_reason}）` : '';
+            return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${escapeHtml((option.label || `${option.provider} ${option.id}`) + reason)}</option>`;
+        }).join('');
+        return `<optgroup label="${escapeHtml(providerGroupLabel(key))}">${items}</optgroup>`;
+    }).join('');
+    return `<select id="${escapeHtml(selectId)}" ${attrs}>${optionsHtml}</select>`;
+}
+
+function voicePickerMarkup(options, selectedValue, selectId, {selectAttrs = 'class="select"', previewButtonId = '', hintId = ''} = {}) {
+    const select = voiceSelectMarkup(options, selectedValue, selectId, selectAttrs);
+    const previewId = previewButtonId || `${selectId}Preview`;
+    const statusId = hintId || `${selectId}Hint`;
+    return `<div class="voice-picker">
+      ${select}
+      <button type="button" class="btn btn-secondary btn-sm voice-preview-btn" id="${escapeHtml(previewId)}" data-voice-select="${escapeHtml(selectId)}" data-voice-hint="${escapeHtml(statusId)}">试听</button>
+      <span class="voice-preview-hint" id="${escapeHtml(statusId)}" role="status"></span>
+    </div>`;
+}
+
+async function previewSelectedVoice(selectId, hintId, text) {
+    const select = document.getElementById(selectId);
+    const hint = document.getElementById(hintId);
+    if (!select) return;
+    const selection = parseVoiceSelection(select.value);
+    if (hint) hint.textContent = '试听生成中…';
+    try {
+        const response = await apiFetch('/api/media/tts-preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                text: text || '西开普发货前先确认路况与承运时效，再答复客户。',
+                tts_provider: selection.tts_provider,
+                voice: selection.voice,
+            }),
+        });
+        const payload = await response.json();
+        if (!payload?.audio_url) throw new Error('试听音频未返回');
+        const audio = new Audio(payload.audio_url);
+        await audio.play();
+        if (hint) hint.textContent = `试听：${selection.tts_provider} / ${selection.voice}`;
+    } catch (error) {
+        if (hint) hint.textContent = error.message || '试听失败';
+        showToast(error.message || '试听失败', 'error');
+    }
+}
+
+function isLegacyVideoDraft(projectOrPayload) {
+    const project = projectOrPayload || {};
+    const payload = project.current_revision?.payload || project.payload || project;
+    const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+    const targetMs = Number(
+        project.target_duration_ms
+        || payload.target_duration_ms
+        || payload.duration_target_ms
+        || (payload.duration_target ? Number(payload.duration_target) * 1000 : 0)
+        || 0
+    );
+    const targetSec = Math.round(targetMs / 1000);
+    if (targetSec > 0 && targetSec < 50) return true;
+    if (scenes.length > 0 && scenes.length < FORMAL_MIN_SCENES) return true;
+    return false;
 }
 
 function classifyDouyinScriptState({
@@ -289,12 +374,12 @@ function formatRenderProvenance(qualityReport, fallbackScenes) {
     const ownedFallback = sceneList.filter(scene => scene?.asset_id && !scene?.event_clip_id && scene?.evidence_type !== 'hotspot_video').length;
     const sourceText = `热点 Hook 母片 ${Number.isFinite(hotspotCount) ? hotspotCount : hotspotFallback} · Buffalo 自有 ${Number.isFinite(ownedCount) ? ownedCount : ownedFallback}`;
     const fallbackWarn = tts.fallback_used
-        ? '<div class="render-review-summary" style="color:#a16207;margin-top:6px;">TTS 已发生回退：请求 MiMo 后可恢复异常回退到 Qwen，请核对听感后再发布。</div>'
+        ? '<div class="render-review-summary tts-fallback-warn">TTS 已发生回退：MiMo → Qwen。请在验收页确认听感后再继续。</div>'
         : '';
-    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}</div>${fallbackWarn}`;
+    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}${tts.fallback_used ? ' · 回退已使用' : ''}</div>${fallbackWarn}`;
 }
 
-// ==================== Persistent Video Task Center ====================
+// ==================== Video project nav badge (no floating panel) ====================
 const VIDEO_STAGE_LABELS = {
     queued: '等待处理', topic_brief: '整理主题简报', hook_locking: '锁定热点 Hook',
     scripting: '生成正式脚本', project_building: '建项入库',
@@ -308,61 +393,24 @@ const VIDEO_STAGE_LABELS = {
 let videoTaskPollTimer = null;
 let videoTaskPollFailures = 0;
 
-function ensureVideoTaskCenter() {
-    if (document.getElementById('videoTaskCenter')) return;
-    const center = document.createElement('section');
-    center.id = 'videoTaskCenter';
-    center.className = 'video-task-center';
-    center.innerHTML = `
-        <button class="video-task-toggle" type="button" aria-expanded="false" onclick="toggleVideoTaskCenter()">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 4h11a2 2 0 012 2v3l5-2.5v11L17 15v3a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zm2 3v10h9V7H6z"/></svg>
-            <span>视频任务</span><b id="videoTaskCount">0</b>
-        </button>
-        <div class="video-task-panel" id="videoTaskPanel" hidden>
-            <header><strong>视频生成任务</strong><button type="button" onclick="toggleVideoTaskCenter(false)" aria-label="关闭">×</button></header>
-            <div id="videoTaskList" class="video-task-list"><p>暂无生成任务</p></div>
-        </div>`;
-    document.body.appendChild(center);
+function updateVideoProjectNavBadge(count) {
+    const badge = document.getElementById('videoProjectNavBadge');
+    if (!badge) return;
+    const n = Number(count || 0);
+    badge.textContent = String(n);
+    badge.hidden = n <= 0;
 }
 
-function toggleVideoTaskCenter(force) {
-    const panel = document.getElementById('videoTaskPanel');
-    const button = document.querySelector('.video-task-toggle');
-    if (!panel || !button) return;
-    const shouldOpen = typeof force === 'boolean' ? force : panel.hidden;
-    panel.hidden = !shouldOpen;
-    button.setAttribute('aria-expanded', String(shouldOpen));
-}
-
-function videoTaskMarkup(job) {
-    const status = job.status || 'pending';
-    const isPausedMatch = status === 'needs_review' && job.stage === 'match_quality_check';
-    const stage = isPausedMatch ? '匹配质量不足，等待人工处理' : (VIDEO_STAGE_LABELS[job.stage] || job.stage || '处理中');
-    const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
-    const canCancel = ['pending', 'running', 'needs_review', 'cancel_requested'].includes(status) && status !== 'cancel_requested';
-    return `<article class="video-task-item" data-job-id="${escapeHtml(job.id)}">
-        <a href="/video-project.html?id=${encodeURIComponent(job.project_id)}"><strong>${escapeHtml(stage)}</strong><span>${progress}%</span></a>
-        <div class="video-task-progress"><i style="width:${progress}%"></i></div>
-        <footer><span>${escapeHtml(status === 'needs_review' ? '质量未达标，请确认问题' : status)}</span>
-        ${canCancel ? `<button type="button" onclick="cancelVideoGeneration('${escapeHtml(job.id)}')">取消生成</button>` : ''}</footer>
-    </article>`;
-}
-
-async function refreshVideoTaskCenter() {
+async function refreshVideoTaskBadge() {
     if (!localStorage.getItem('token')) return [];
-    ensureVideoTaskCenter();
     try {
         const response = await apiFetch('/api/video-generation/jobs/active');
         const jobs = await response.json();
         videoTaskPollFailures = 0;
-        const list = document.getElementById('videoTaskList');
-        const count = document.getElementById('videoTaskCount');
-        count.textContent = String(jobs.length);
-        count.hidden = jobs.length === 0;
-        list.innerHTML = jobs.length ? jobs.map(videoTaskMarkup).join('') : '<p>暂无进行中的视频任务</p>';
+        updateVideoProjectNavBadge(jobs.length);
         const hasMovingJob = jobs.some(job => ['pending', 'running', 'cancel_requested'].includes(job.status));
         if (hasMovingJob && !videoTaskPollTimer) {
-            videoTaskPollTimer = window.setInterval(refreshVideoTaskCenter, 2000);
+            videoTaskPollTimer = window.setInterval(refreshVideoTaskBadge, 2000);
         } else if (!hasMovingJob && videoTaskPollTimer) {
             window.clearInterval(videoTaskPollTimer);
             videoTaskPollTimer = null;
@@ -371,30 +419,32 @@ async function refreshVideoTaskCenter() {
         return jobs;
     } catch (error) {
         videoTaskPollFailures += 1;
-        if (videoTaskPollFailures >= 3) {
-            if (videoTaskPollTimer) window.clearInterval(videoTaskPollTimer);
+        if (videoTaskPollFailures >= 3 && videoTaskPollTimer) {
+            window.clearInterval(videoTaskPollTimer);
             videoTaskPollTimer = null;
-            const list = document.getElementById('videoTaskList');
-            if (list) list.innerHTML = '<p class="video-task-offline">本地服务已断开，请重启 8080 后刷新页面</p>';
         }
         return [];
     }
+}
+
+/** @deprecated Use refreshVideoTaskBadge — kept for callers during migration */
+async function refreshVideoTaskCenter() {
+    return refreshVideoTaskBadge();
 }
 
 async function cancelVideoGeneration(jobId) {
     try {
         await apiFetch(`/api/video-generation/jobs/${encodeURIComponent(jobId)}/cancel`, {method: 'POST'});
         showToast('已提交取消请求', 'info');
-        await refreshVideoTaskCenter();
+        await refreshVideoTaskBadge();
     } catch (error) {
         showToast(error.message, 'error');
     }
 }
 
-function initVideoTaskCenter() {
+function initVideoTaskBadge() {
     if (!localStorage.getItem('token')) return;
-    ensureVideoTaskCenter();
-    refreshVideoTaskCenter();
+    refreshVideoTaskBadge();
 }
 
 // 页面初始化
@@ -405,5 +455,11 @@ document.addEventListener('DOMContentLoaded', () => {
         link.href = '/static/design-system.css?v=5';
         document.head.prepend(link);
     }
-    initVideoTaskCenter();
+    initVideoTaskBadge();
+    document.addEventListener('click', (event) => {
+        const button = event.target.closest?.('[data-voice-select]');
+        if (!button) return;
+        event.preventDefault();
+        previewSelectedVoice(button.getAttribute('data-voice-select'), button.getAttribute('data-voice-hint'));
+    });
 });
