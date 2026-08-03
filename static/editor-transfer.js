@@ -24,6 +24,9 @@
             music_suggestion: item.music_suggestion || '',
             selected_asset_ids: Array.isArray(item.selected_asset_ids) ? item.selected_asset_ids : [],
             rendered_video: item.rendered_video || null,
+            source: item.source || null,
+            video_project_id: item.video_project_id || null,
+            video_generation_job_id: item.video_generation_job_id || null,
         };
     }
 
@@ -34,7 +37,7 @@
         const requested = content(outputs[activeIndex], (fallbackPlatforms || [])[activeIndex]);
         const selected = requested && contents.find(item => item === requested || item.platform === requested.platform) || contents[0];
         return {
-            version: 2,
+            version: 3,
             source: 'chat',
             activePlatform: selected.platform,
             contents,
@@ -47,11 +50,12 @@
             ) ? 'insufficient' : (result && result.evidence_state && result.evidence_state.evidence_state) || 'unknown',
             result_state: result && result.result_state || null,
             content_mode: result && result.content_mode || null,
+            video_workflow: result && result.video_workflow || null,
         };
     }
 
     function normalizeDraft(draft, validPlatforms, fallbackPlatform) {
-        if (!draft || typeof draft !== 'object') return { valid: false, contents: [], activePlatform: fallbackPlatform, importedFromChat: false, evidence_status: null };
+        if (!draft || typeof draft !== 'object') return { valid: false, contents: [], activePlatform: fallbackPlatform, importedFromChat: false, evidence_status: null, video_workflow: null };
         const allowed = new Set(validPlatforms || []);
         let contents = Array.isArray(draft.contents)
             ? draft.contents.map(item => content(item)).filter(item => item && allowed.has(item.platform))
@@ -74,6 +78,7 @@
             evidence_status: draft.evidence_status || null,
             result_state: draft.result_state || null,
             content_mode: draft.content_mode || null,
+            video_workflow: draft.video_workflow && typeof draft.video_workflow === 'object' ? draft.video_workflow : null,
         };
     }
 

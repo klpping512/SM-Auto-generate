@@ -225,7 +225,7 @@ def normalize_script(
     platform: str = "douyin",
     target_duration_ms: int | None = None,
 ) -> dict:
-    target = platform_budget_ms(platform, target_duration_ms or script.get("duration_target_ms") or 30_000)
+    target = platform_budget_ms(platform, target_duration_ms or script.get("duration_target_ms") or 60_000)
     scenes = []
     repairs: list[str] = []
     for index, raw in enumerate(script.get("scenes") or []):
@@ -1053,6 +1053,7 @@ def render_job(
             topic = job["script"]["scenes"][0].get("voiceover", "")[:40]
         preserve_planned_duration = (
             str(job["script"].get("source_type") or "") == "topic_brief_dual_library"
+            or int(job["script"].get("duration_target_ms") or 0) >= 50_000
         )
 
         scenes = list(job["script"]["scenes"])
@@ -1385,6 +1386,11 @@ def render_job(
             "no_repeated_source_or_range": source_usage["passed"],
             "final_subtitle_timeline_aligned": final_subtitles["passed"],
             "transition_audio_video_sync": report["transition_audio_sync"]["passed"],
+            "production_duration_50_90s": (
+                50.0 <= float(report.get("duration") or 0) <= 90.0
+                if int(job["script"].get("duration_target_ms") or 0) >= 50_000
+                else True
+            ),
         })
         report["status"] = "passed" if all(report["checks"].values()) else "failed"
         clips = []

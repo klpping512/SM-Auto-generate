@@ -63,7 +63,7 @@
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
 <script src="/static/common.js?v=8"></script>
-<script src="/static/editor-transfer.js?v=2"></script>
+<script src="/static/editor-transfer.js?v=3"></script>
 <script>
 const PAGE_ID='chat';
 const platformNames={xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit'};
@@ -245,6 +245,7 @@ function resultStateCard(result,id){
     topic_needs_event_anchor:{title:'话题缺少热点锚点',reason:'这是宽泛常青主题，系统无法保证强相关热点 Hook，因此未启动补采。',next:'请绑定具体事件，或一键选用下方 3–5 个当前可生产选题。'},
     brand_assets_insufficient:{title:'脚本已生成 · 需要补充品牌素材',reason:'热点 Hook 已匹配，但 Buffalo 自有素材还不足以支撑正式成片。',next:'请补充品牌素材后再生成视频。'},
     authenticity_blocked:{title:'内容暂不可使用 · 请补充证据',reason:'输出含无依据评测或服务结论，已降级为对比框架。',next:'补充带来源的资料后重新生成。'},
+    generation_unavailable:{title:'文案模型暂不可用',reason:'当前显示的是系统提示文本，不是可发布文案。',next:'请检查内容模型配置或稍后重试；系统不会再把提示文本送去生成视频。'},
   };
   const card=map[state]||map.formal_content;
   const details=[];
@@ -268,6 +269,7 @@ function assistantBubbleText(result){
   const state=result?.result_state;
   if(state==='framework_pending_evidence')return '对比框架已生成 · 待补资料';
   if(state==='authenticity_blocked')return '内容暂不可使用 · 请补充证据';
+  if(state==='generation_unavailable')return '文案模型暂不可用 · 未生成正式内容';
   if(state==='topic_needs_event_anchor')return '话题缺少热点锚点 · 请选用可生产选题';
   if(state==='hook_coverage_gap')return '库未覆盖该时效事件';
   if(state==='hook_gate_blocked')return '有候选但未过质量门禁';
@@ -312,7 +314,7 @@ function douyinScenesMarkup(output, resultId, index, hotspotRetrieval, result) {
   const videoLabel=videoReady?'生成视频':(hotspotRetrieval?.status==='matched'?'补充 Buffalo 素材':'等待热点 Hook');
   const sceneLabel=videoReady
     ? `脚本预览 · 正式双素材成片约 ${Math.round((hotspotRetrieval?.video?.target_duration_ms||60000)/1000)} 秒`
-    : `脚本预览 · ${output.duration_target || 30}秒`;
+    : `脚本预览 · ${output.duration_target || 60}秒`;
   
   const scenesHtml = scenes.map((s, i) => {
     return `

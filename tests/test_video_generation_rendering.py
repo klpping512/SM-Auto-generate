@@ -361,7 +361,7 @@ def test_normalize_script_rejects_hotspot_mother_without_event_ref():
 
     with pytest.raises(ValueError, match="热点事件片段"):
         video_renderer.normalize_script(
-            {"scenes": [
+            {"duration_target_ms": 30_000, "scenes": [
                 {"duration": 5, "asset_id": 298},
                 {"duration": 5}, {"duration": 5}, {"duration": 5},
             ]},

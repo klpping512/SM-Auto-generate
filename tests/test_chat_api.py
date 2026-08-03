@@ -84,7 +84,8 @@ def test_chat_to_editor_uses_versioned_multi_platform_transfer_contract():
     assert "EditorTransfer.buildDraft" in chat_page
     assert "editor-transfer.js" in editor_page
     assert "EditorTransfer.normalizeDraft" in editor_page
-    assert "version: 2" in transfer_module
+    assert "version: 3" in transfer_module
+    assert "video_workflow" in transfer_module
     assert "activePlatform" in transfer_module
     assert "contents" in transfer_module
     assert "refreshPreviewTabs" in editor_page

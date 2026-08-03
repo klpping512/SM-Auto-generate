@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 
 PLATFORM_BUDGETS_MS = {
-    "douyin": 30_000,
+    "douyin": 60_000,
     "xiaohongshu": 45_000,
     "youtube": 60_000,
     "wechat": 90_000,

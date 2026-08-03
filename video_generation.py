@@ -615,7 +615,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 asset_lookup=asset_lookup,
                 event_lookup=event_lookup,
                 platform=str((project or {}).get("platform") or "douyin"),
-                target_duration_ms=int((project or {}).get("target_duration_ms") or 30_000),
+                target_duration_ms=int((project or {}).get("target_duration_ms") or 60_000),
             )
         except (ValueError, TypeError) as exc:
             script = payload
@@ -638,7 +638,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
         issues = list(report.get("planning_issues") or [])
         hard_failures = []
-        target_ms = int(script.get("duration_target_ms") or 30_000)
+        target_ms = int(script.get("duration_target_ms") or 60_000)
         min_scenes, max_scenes = (6, 18) if target_ms > 45_000 else (4, 8)
         if not min_scenes <= len(scenes) <= max_scenes:
             hard_failures.append(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")

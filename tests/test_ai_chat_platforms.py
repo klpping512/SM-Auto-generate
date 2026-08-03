@@ -164,7 +164,7 @@ def test_forced_safe_preview_replaces_every_scene_and_keeps_a_neutral_end_card()
 
 def test_forced_safe_preview_keeps_the_current_logistics_topic_useful_to_a_customer():
     safe = ai_engine._conservative_douyin_scenes(
-        [{"scene": index} for index in range(1, 7)],
+        [{"scene": index} for index in range(1, 9)],
         force_all=True, topic="Swartberg Pass 有卡车侧翻和道路劝退",
     )
 
@@ -205,7 +205,7 @@ def test_non_chat_douyin_fallback_uses_the_same_safe_peer_style():
     assert content.hashtags == ["南非物流", "信息核实"]
     assert "全链路" not in visible_text
     assert not ai_engine._unsupported_operational_claim_warnings(visible_text)
-    assert content.scenes[-1]["text_overlay"] == "信息以核实为准"
+    assert content.scenes[-1]["text_overlay"] == "先把信息理清楚"
 
 
 @pytest.mark.asyncio
@@ -247,8 +247,8 @@ def test_platform_format_detection_flags_script_markers_in_douyin_caption():
 
 def test_douyin_scene_normalization_falls_back_to_publishable_timeline():
     scenes = ai_engine._normalize_douyin_scenes([], "德班港提醒")
-    assert len(scenes) == 5
-    assert 25 <= sum(scene["duration"] for scene in scenes) <= 35
+    assert len(scenes) == 8
+    assert 50 <= sum(scene["duration"] for scene in scenes) <= 65
     assert all(scene["asset_id"] is None for scene in scenes)
 
 
@@ -318,7 +318,8 @@ async def test_chat_model_failure_uses_the_same_safe_fallback_for_a_generic_ware
     assert not ai_engine._unsupported_operational_claim_warnings(output["body"])
     assert "全链路" not in output["body"]
     assert output["hashtags"] == ["南非物流", "信息核实"]
-    assert output["scenes"][-1]["text_overlay"] == "信息以核实为准"
+    assert output["duration_target"] == 60
+    assert output["scenes"][-1]["text_overlay"] == "先把信息理清楚"
 
 
 @pytest.mark.asyncio
@@ -347,7 +348,44 @@ async def test_chat_model_operational_claims_are_replaced_before_the_video_butto
         platforms=["douyin"], topic="Beitbridge 边境排队",
     ))[0]
 
-    assert output["title"] == "Beitbridge 物流提醒｜先核实再安排"
+    assert output["title"] == "Beitbridge边境排队？南非清关时效这样看"
     assert not ai_engine._unsupported_operational_claim_warnings(output["body"])
-    assert output["hashtags"] == ["南非物流", "信息核实"]
-    assert output["scenes"][-1]["text_overlay"] == "信息以核实为准"
+    assert output["hashtags"] == ["南非物流"]
+    assert output["source"] == "model_sanitized"
+    assert output["duration_target"] == 60
+    assert len(output["scenes"]) == 8
+
+
+@pytest.mark.asyncio
+async def test_chat_sanitizer_keeps_useful_copy_and_removes_only_unsafe_sentence(monkeypatch):
+    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
+    draft = {
+        "title": "从0到1进入南非市场，先拆这四个物流节点",
+        "body": "进入南非市场，不是先找一句口号，而是先拆清运输、入库、分拣和末端交付。评论区留言单号，我们帮你查实时进度。",
+        "hashtags": ["南非市场", "查进度"],
+        "scenes": [
+            {"scene": index, "duration": 8, "visual": f"物流节点{index}", "voiceover": f"第{index}步先核对画面里能确认的物流动作。", "text_overlay": f"节点{index}"}
+            for index in range(1, 9)
+        ],
+    }
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": __import__("json").dumps(draft, ensure_ascii=False)}}]}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *_args, **_kwargs): return Response()
+
+    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", lambda **_kwargs: Client())
+    output = (await ai_engine.chat_platforms(
+        messages=[{"role": "user", "content": "请围绕从0到1开拓南非市场创作一篇内容"}],
+        platforms=["douyin"], topic="从0到1开拓南非市场",
+    ))[0]
+
+    assert "运输、入库、分拣和末端交付" in output["body"]
+    assert "查实时进度" not in output["body"]
+    assert output["title"] == draft["title"]
+    assert output["source"] == "model_sanitized"

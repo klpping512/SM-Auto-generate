@@ -3730,9 +3730,31 @@ async def create_douyin_render(body: dict, user=Depends(get_current_user)):
     if not os.environ.get("DASHSCOPE_API_KEY"):
         raise HTTPException(503, "未配置百炼 API Key")
     voice = str(body.get("voice") or "")
+    if str(body.get("source") or "") == "safe_fallback":
+        raise HTTPException(409, "AI 服务降级提示不能生成视频，请等待正式文案生成成功后重试")
+    target_duration_ms = int(
+        body.get("duration_target_ms")
+        or round(float(body.get("duration_target") or 60) * 1000)
+    )
+    if not 50_000 <= target_duration_ms <= 90_000:
+        raise HTTPException(400, "生产视频必须在 50–90 秒之间")
+    voiceover_chars = sum(
+        len(str(scene.get("voiceover") or "").strip())
+        for scene in (body.get("scenes") or []) if isinstance(scene, dict)
+    )
+    minimum_voiceover_chars = max(140, round(target_duration_ms / 1000 * 2.8))
+    if voiceover_chars < minimum_voiceover_chars:
+        raise HTTPException(
+            409,
+            f"旁白仅 {voiceover_chars} 字，无法支撑 {target_duration_ms // 1000} 秒正式成片；请先生成完整脚本",
+        )
     asset_ids = {asset["id"] for asset in db.list_assets(status="active")}
     try:
-        script = video_renderer.normalize_script(body, asset_ids)
+        script = video_renderer.normalize_script(
+            {**body, "duration_target_ms": target_duration_ms},
+            asset_ids,
+            target_duration_ms=target_duration_ms,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if voice not in video_renderer.VOICES:
@@ -4284,6 +4306,11 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         brand_assets_insufficient=brand_assets_insufficient,
         event_anchor=event_anchor,
     )
+    generation_unavailable = any(
+        str(item.get("source") or "") == "safe_fallback" for item in outputs
+    )
+    if generation_unavailable:
+        result_state = "generation_unavailable"
     first = outputs[0]
     context_content = "\n\n".join(
         f"[{item['platform']}]\n{item['title']}\n{item['body']}"
@@ -4300,6 +4327,34 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "event_anchor": event_anchor,
         "failure_class": (hotspot_retrieval or {}).get("failure_class"),
         "producible_topics": (hotspot_retrieval or {}).get("producible_topics") or [],
+        "video_workflow": {
+            "status": (
+                "ready"
+                if (
+                    not generation_unavailable
+                    and (hotspot_retrieval or {}).get("status") == "matched"
+                    and ((hotspot_retrieval or {}).get("video") or {}).get("status") == "ready"
+                    and readiness.get("delivery_ready", True)
+                )
+                else "blocked"
+            ),
+            "topic": latest_topic,
+            "target_duration_ms": 60_000,
+            "hotspot_event_ids": (
+                ((hotspot_retrieval or {}).get("video") or {}).get("hotspot_event_ids") or []
+            ),
+            "delivery_readiness": readiness,
+            "session_id": req.session_id,
+            "block_reason": (
+                "AI 文案服务不可用，当前仅为提示文本"
+                if generation_unavailable
+                else (
+                    readiness.get("message")
+                    or (hotspot_retrieval or {}).get("message")
+                    or "尚未匹配可用于正式成片的热点 Hook"
+                )
+            ),
+        },
     }
 
 

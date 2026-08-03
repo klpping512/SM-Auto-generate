@@ -17,7 +17,7 @@ def test_build_draft_preserves_all_platforms_and_active_selection():
         "{platform:'xiaohongshu',title:'小红书标题',body:'小红书正文',hashtags:['#物流']},"
         "{platform:'facebook',title:'Facebook title',body:'Facebook body',hashtags:['Logistics']}"
         "]},1,['xiaohongshu','facebook'])")
-    assert result["version"] == 2
+    assert result["version"] == 3
     assert result["activePlatform"] == "facebook"
     assert [item["platform"] for item in result["contents"]] == ["xiaohongshu", "facebook"]
     assert result["contents"][0]["hashtags"] == ["物流"]
@@ -66,3 +66,14 @@ def test_normalize_draft_rejects_empty_payload_without_consuming_it():
     result = _run_transfer("t.normalizeDraft({source:'chat',contents:[]},['xiaohongshu'],'xiaohongshu')")
     assert result["valid"] is False
     assert result["contents"] == []
+
+
+def test_chat_transfer_preserves_formal_video_workflow_and_generation_source():
+    result = _run_transfer("t.buildDraft({outputs:[{platform:'douyin',title:'T',body:'B',source:'model',duration_target:60}],"
+        "video_workflow:{status:'ready',target_duration_ms:60000,hotspot_event_ids:[12],topic:'南非市场'},result_state:'formal_content'"
+        "},0,['douyin'])")
+    normalized = _run_transfer("t.normalizeDraft(" + json.dumps(result, ensure_ascii=False) + ",['douyin'],'douyin')")
+    assert normalized["video_workflow"]["status"] == "ready"
+    assert normalized["video_workflow"]["hotspot_event_ids"] == [12]
+    assert normalized["contents"][0]["source"] == "model"
+    assert normalized["contents"][0]["duration_target"] == 60

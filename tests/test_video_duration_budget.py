@@ -9,7 +9,7 @@ from video_duration_budget import (
 
 
 def test_platform_budget_defaults():
-    assert platform_budget_ms("douyin") == 30_000
+    assert platform_budget_ms("douyin") == 60_000
     assert platform_budget_ms("xiaohongshu") == 45_000
     assert platform_budget_ms("youtube") == 60_000
     assert platform_budget_ms("wechat") == 90_000

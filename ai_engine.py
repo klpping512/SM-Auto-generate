@@ -10,6 +10,10 @@ import douyin_copywriting_sop
 
 logger = logging.getLogger(__name__)
 
+DOUYIN_TARGET_SECONDS = 60
+DOUYIN_MIN_SCENES = 7
+DOUYIN_MAX_SCENES = 10
+
 # 话题关键词 → 推荐素材分类，用于 AI prompt 中的素材优先级提示
 TOPIC_TO_CATEGORY_HINTS = [
     (["海外仓", "仓库", "仓储", "warehouse", "入库", "出库", "库存", "货架", "堆场"], "warehouse"),
@@ -128,7 +132,7 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
         elif platform == Platform.DOUYIN:
             category_hint = _get_category_priority_hint(topic, category, assets or [])
             asset_instruction = """
-【重要规则】必须生成 4-6 个 scenes，总时长约 30 秒。
+【重要规则】必须生成 7-10 个 scenes，总时长 50-65 秒，目标 60 秒。
 每个场景必须包含：scene、duration（整数秒）、visual、voiceover、text_overlay、asset_id。
 
 【强制要求】
@@ -190,7 +194,7 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
                     body=parsed.get("body", content_text),
                     hashtags=parsed.get("hashtags", []),
                     image_pages=parsed.get("image_pages", []) if platform == Platform.XIAOHONGSHU else [],
-                    duration_target=30 if platform == Platform.DOUYIN else None,
+                    duration_target=DOUYIN_TARGET_SECONDS if platform == Platform.DOUYIN else None,
                     scenes=_normalize_douyin_scenes(parsed.get("scenes"), topic, {a["id"] for a in (assets or [])}) if platform == Platform.DOUYIN else [],
                     music_suggestion=parsed.get("music_suggestion", "") if platform == Platform.DOUYIN else "",
                 ))
@@ -323,6 +327,28 @@ def _unsupported_operational_claim_warnings(
     return [f"未经证据支持的服务能力或交付承诺：{'、'.join(matches)}"] if matches else []
 
 
+def _sanitize_operational_copy(text: str, fallback: str = "") -> tuple[str, bool]:
+    """Remove only unsupported sentences instead of discarding the whole draft."""
+    raw = str(text or "").strip()
+    if not raw:
+        return fallback, False
+    units = re.findall(r"[^。！？!?.\n]+[。！？!?]?|\n+", raw)
+    kept: list[str] = []
+    removed = False
+    for unit in units:
+        candidate = unit.strip()
+        if not candidate:
+            continue
+        if _unsupported_operational_claim_warnings(candidate):
+            removed = True
+            continue
+        kept.append(candidate)
+    cleaned = "".join(kept).strip()
+    if not cleaned:
+        cleaned = fallback.strip()
+    return cleaned, removed
+
+
 def _conservative_chat_body(topic: str) -> str:
     """A user-facing fallback when the model keeps inventing service facts."""
     return (
@@ -379,13 +405,19 @@ def _normalize_douyin_scenes(value, topic: str, allowed_asset_ids: set[int] | No
             asset_id_int = None
         asset_id = asset_id_int if asset_id_int is not None and asset_id_int in (allowed_asset_ids or set()) else None
         scenes.append({"scene": index + 1, "duration": duration, "visual": str(item.get("visual") or "品牌信息卡")[:80], "voiceover": str(item.get("voiceover") or "")[:180], "text_overlay": str(item.get("text_overlay") or item.get("voiceover") or "")[:48], "asset_id": asset_id})
-    if 4 <= len(scenes) <= 6: return scenes
+    if DOUYIN_MIN_SCENES <= len(scenes) <= DOUYIN_MAX_SCENES and sum(
+        scene["duration"] for scene in scenes
+    ) >= 50:
+        return scenes
     return [
-        {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"刚做南非物流？{topic}，先看清这个节点。", "text_overlay": "先看这个节点", "asset_id": None},
-        {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "先把订单节点和最新消息对一遍。", "text_overlay": "先核对订单节点", "asset_id": None},
-        {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "资料提前看一遍，后面少一点临时返工。", "text_overlay": "资料提前核对", "asset_id": None},
-        {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "路线怎么排，先按实际订单信息来判断。", "text_overlay": "按订单信息判断", "asset_id": None},
-        {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "南非物流怎么安排？先把信息理清楚。", "text_overlay": "先把信息理清楚", "asset_id": None},
+        {"scene": 1, "duration": 7, "visual": "与主题直接相关的热点现场", "voiceover": f"{topic}，先从一个能被核实的现场问题说起。", "text_overlay": "先看真实现场", "asset_id": None},
+        {"scene": 2, "duration": 8, "visual": "南非市场或运输节点", "voiceover": "进入一个新市场，先别急着谈结果，要先看货物会经过哪些真实节点。", "text_overlay": "先拆真实节点", "asset_id": None},
+        {"scene": 3, "duration": 8, "visual": "仓库入库操作", "voiceover": "镜头转到仓内，入库、核对和分拣是否顺畅，会直接影响后面的执行节奏。", "text_overlay": "入库与核对", "asset_id": None},
+        {"scene": 4, "duration": 8, "visual": "仓内分拣操作", "voiceover": "再看分拣环节，订单信息、货物状态和操作要求，需要在这里逐项对应。", "text_overlay": "分拣逐项对应", "asset_id": None},
+        {"scene": 5, "duration": 8, "visual": "打包与出库准备", "voiceover": "出库之前，把包装、标签和交接信息核对清楚，才能减少后续反复确认。", "text_overlay": "出库前再核对", "asset_id": None},
+        {"scene": 6, "duration": 8, "visual": "卡车运输或末端配送", "voiceover": "到了运输和配送环节，路线与时效判断都应以订单节点和承运方确认信息为准。", "text_overlay": "以确认信息为准", "asset_id": None},
+        {"scene": 7, "duration": 8, "visual": "客户签收或交付现场", "voiceover": "最后回到交付结果，先把每个节点做实，再讨论这套方案是否适合自己的业务。", "text_overlay": "节点做实再判断", "asset_id": None},
+        {"scene": 8, "duration": 5, "visual": "品牌结尾信息卡", "voiceover": "做南非物流，先把信息和执行路径理清楚。", "text_overlay": "先把路径理清楚", "asset_id": None},
     ]
 
 
@@ -407,6 +439,8 @@ def _conservative_douyin_scenes(
         ("运输准备画面", "路线要不要调整，先以承运方确认的信息为准。", "以确认信息为准"),
         ("客户沟通画面", "客户沟通时，把已确认和待确认的部分分开说清楚。", "已确认与待确认分开说"),
         ("仓储作业现场", "信息核对清楚后，再安排下一步。", "核对后再安排"),
+        ("出库准备现场", "包装、标签和交接信息，也要在出库前逐项确认。", "出库前逐项确认"),
+        ("运输配送现场", "运输与配送安排，以订单节点和承运方确认信息为准。", "以确认信息为准"),
         ("品牌信息卡", "做南非物流，先把信息理清楚。", "先把信息理清楚"),
     )
     for index, scene in enumerate(scenes):
@@ -456,7 +490,7 @@ def _safe_chat_fallback(platform: str, topic: str, messages: list[dict] | None =
         "body": body,
         "hashtags": ["南非物流", "信息核实"],
         "image_pages": [],
-        "duration_target": 30 if platform == "douyin" else None,
+        "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None,
         "scenes": scenes,
         "music_suggestion": "",
         "content": body,
@@ -542,7 +576,7 @@ def build_comparison_framework(
                 {"type": "content", "headline": "资料清单", "points": list(COMPARISON_CHECKLIST[:4])},
                 {"type": "content", "headline": "下一步", "points": ["补充评测资料", "确认来源后再生成正式评测"]},
             ] if platform == "xiaohongshu" else [],
-            "duration_target": 30 if platform == "douyin" else None,
+            "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None,
             "scenes": scenes,
             "music_suggestion": "",
             "content": body,
@@ -595,7 +629,7 @@ def _safe_douyin_generated_content(topic: str) -> GeneratedContent:
         title=f"{subject}｜先核实再安排",
         body="物流提醒：" + _conservative_chat_body(subject),
         hashtags=["南非物流", "信息核实"],
-        duration_target=30,
+        duration_target=DOUYIN_TARGET_SECONDS,
         scenes=scenes,
         music_suggestion="稳健、克制的商务节奏",
     )
@@ -749,7 +783,7 @@ async def _chat_one_platform(
         + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；也不得虚构 Buffalo 已启动应急方案、优先安排、实时跟进、自营团队、全程可追踪或不影响交期等服务承诺。用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
         + f"\n平台硬性格式：{config['format']}"
         + ("\n小红书还必须返回 image_pages 数组，共 5-7 页。每项格式为 {\"type\":\"cover或content\",\"headline\":\"不超过18字\",\"subheadline\":\"可选副标题\",\"points\":[\"2-4条具体短句，每条说明一个真实问题或行动\"]}。第一页是有冲击力的封面，内页信息具体，最后一页是建议或互动引导，避免空泛口号。" if platform == "xiaohongshu" else "")
-        + ("\n抖音的 body 是面向观众的发布文案（种草文字，不要写【画面】【口播】标记）；分镜必须返回 4-6 个 scenes，总时长约30秒，每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id。**每个场景的 asset_id 必须从素材目录中选择一个真实 ID**，同一视频不能重复引用同一素材，最后1个场景可以是品牌信息卡（asset_id=null）。visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言。" if platform == "douyin" else "")
+        + ("\n抖音的 body 是面向观众的发布文案（不要写【画面】【口播】标记）；分镜必须返回 7-10 个 scenes，总时长 50-65 秒，目标 60 秒。每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id。每段旁白必须提供新的具体信息，不能用空泛口号凑时长。**每个场景的 asset_id 必须从素材目录中选择一个真实 ID**，同一视频不能重复引用同一素材，最后1个场景可以是品牌信息卡（asset_id=null）。visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言。" if platform == "douyin" else "")
         + (("\n" + douyin_copywriting_sop.prompt_for_chat_douyin()) if platform == "douyin" else "")
         + (("\n" + _get_category_priority_hint(topic or messages[-1]["content"][:40] if messages else "", "douyin", assets or []) + "\n" + _format_asset_catalog(assets or [])) if platform == "douyin" else "")
         + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"],\"image_pages\":[],\"scenes\":[],\"music_suggestion\":\"\"}，不要输出 Markdown 代码块或解释。"
@@ -853,14 +887,20 @@ async def _chat_one_platform(
             # 标题、发布文案、标签和预览分镜都在同一个用户可见卡片上；任一位置
             # 出现没有证据的服务承诺，就整体降级为中性提示，不能只清洗 body。
             tag_text = " ".join(str(tag) for tag in hashtags)
-            use_safe_fallback = bool(_unsupported_operational_claim_warnings(
-                " ".join((title, body, scene_claim_text, tag_text))
-            ))
-            if use_safe_fallback:
-                safe_subject = _conservative_chat_subject(topic, messages)
-                body = _conservative_chat_body(safe_subject)
-                title = f"{safe_subject}｜先核实再安排"
-                hashtags = ["南非物流", "信息核实"]
+            safe_subject = _conservative_chat_subject(topic, messages)
+            title, title_sanitized = _sanitize_operational_copy(title, safe_subject)
+            body, body_sanitized = _sanitize_operational_copy(
+                body,
+                f"围绕「{safe_subject}」，先说明能被资料和画面支持的事实，再给出可执行的核对步骤。",
+            )
+            hashtags = [
+                tag for tag in hashtags
+                if not _unsupported_operational_claim_warnings(str(tag))
+            ] or ["南非物流"]
+            use_safe_fallback = title_sanitized or body_sanitized or bool(
+                _unsupported_operational_claim_warnings(scene_claim_text)
+                or _unsupported_operational_claim_warnings(tag_text)
+            )
             quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
             quality_warnings.extend(
                 f"仍包含{item}，请人工核实" for item in _unsupported_operational_claim_warnings(body)
@@ -869,7 +909,9 @@ async def _chat_one_platform(
             normalized_scenes = _normalize_douyin_scenes(
                 parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])},
             ) if platform == "douyin" else []
-            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": 30 if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes, force_all=use_safe_fallback, topic=safe_subject if use_safe_fallback else "") if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings}
+            if use_safe_fallback:
+                quality_warnings.append("已删除草稿中无证据支持的服务承诺，保留其余可用内容")
+            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings, "source": "model_sanitized" if use_safe_fallback else "model"}
     except Exception as e:
         logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
         return _safe_chat_fallback(platform, topic, messages)

@@ -36,7 +36,7 @@ def test_ingest_rejects_fake_image(tmp_db, tmp_path):
 
 def test_douyin_script_normalization_rejects_bad_scene_count():
     try:
-        video_renderer.normalize_script({"scenes": [{"duration": 5}]}, set())
+        video_renderer.normalize_script({"duration_target_ms": 30_000, "scenes": [{"duration": 5}]}, set())
         assert False, "expected validation error"
     except ValueError as exc:
         assert "4–8" in str(exc)
@@ -53,7 +53,7 @@ def test_douyin_script_normalization_rejects_legacy_infographic_scene():
 
 
 def test_douyin_script_removes_unknown_asset_ids():
-    script = {"scenes": [
+    script = {"duration_target_ms": 30_000, "scenes": [
         {"duration": 5, "asset_id": 1}, {"duration": 5, "asset_id": 999},
         {"duration": 5}, {"duration": 5}, {"duration": 5},
     ]}

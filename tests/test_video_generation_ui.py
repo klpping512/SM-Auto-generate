@@ -120,6 +120,17 @@ def test_video_project_page_has_quality_review_and_output_controls():
     assert "editor.html?project_id=" in page
 
 
+def test_editor_routes_chat_imports_to_formal_dual_library_and_shows_real_duration():
+    page = (ROOT / "static" / "editor.html").read_text()
+
+    assert "draftVideoWorkflow" in page
+    assert "/api/ai/chat/dual-library-video" in page
+    assert "pollFormalEditorRender" in page
+    assert "秒正式分镜" in page
+    assert "生成 ${targetSeconds} 秒正式 MP4" in page
+    assert "当前只是模型不可用时的提示文本，不能生成视频" in page
+
+
 def test_match_review_is_rendered_as_paused_with_actionable_issues():
     common = (ROOT / "static" / "common.js").read_text()
     project = (ROOT / "static" / "video-project.html").read_text()

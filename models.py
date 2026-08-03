@@ -338,7 +338,7 @@ class VideoProjectCreateRequest(BaseModel):
     source_snapshot: dict = Field(default_factory=dict)
     title: str = Field(default="", max_length=120)
     platform: str = Field(default="douyin", max_length=32)
-    target_duration_ms: int = Field(default=30000, ge=3000, le=180000)
+    target_duration_ms: int = Field(default=60000, ge=3000, le=180000)
     # Retained for older clients. The server always stores and renders 9:16.
     target_orientation: str = Field(default="portrait", pattern=r"^(portrait|landscape|square)$")
     revision: dict | None = None

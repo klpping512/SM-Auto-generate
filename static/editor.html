@@ -199,7 +199,7 @@
 </div>
 
 <script src="/static/common.js?v=8"></script>
-<script src="/static/editor-transfer.js?v=2"></script>
+<script src="/static/editor-transfer.js?v=3"></script>
 <script>
 const PAGE_ID = 'editor';
 const platformInfo = {
@@ -221,6 +221,7 @@ let selectedKbCats = new Set();  // 已勾选引用的知识库分类 id
 let promptTemplates = [];        // Prompt 模板
 let attachments = [];            // 上传的图片/视频附件
 let importedFromChat = false;     // AI 对话导入时，仅展示实际带入的平台
+let draftVideoWorkflow = null;    // AI 对话传入的正式双素材生产上下文
 let mediaAssets = [];
 let mediaCapabilities = {};
 let publishingAccounts = [];
@@ -434,6 +435,8 @@ function saveToHistory(source = 'manual') {
         timestamp: Date.now(),
         source: source, // 'ai_generate' | 'manual_save' | 'import'
         activePlatform: currentPreview,
+        importedFromChat,
+        video_workflow: draftVideoWorkflow,
         contents: contents.map(c => ({
             platform: c.platform,
             title: c.title || '',
@@ -444,6 +447,10 @@ function saveToHistory(source = 'manual') {
             scenes: Array.isArray(c.scenes) ? c.scenes : [],
             voice: c.voice || null,
             rendered_video: c.rendered_video || null,
+            source: c.source || null,
+            duration_target: c.duration_target || null,
+            video_project_id: c.video_project_id || null,
+            video_generation_job_id: c.video_generation_job_id || null,
         }))
     };
 
@@ -541,6 +548,8 @@ function restoreFromHistory(historyId) {
     item.contents.forEach(c => {
         generatedContents[c.platform] = c;
     });
+    importedFromChat = Boolean(item.importedFromChat);
+    draftVideoWorkflow = item.video_workflow || null;
     currentPreview = item.activePlatform || 'xiaohongshu';
 
     // 更新 UI
@@ -631,7 +640,8 @@ function autoSaveDraft() {
         const contents = Object.values(generatedContents).filter(c => c && (c.title || c.body));
         if (contents.length) {
             localStorage.setItem('editorAutoSave', JSON.stringify({
-                version: 2, source: 'editor', activePlatform: currentPreview, contents,
+                version: 3, source: importedFromChat ? 'chat' : 'editor', activePlatform: currentPreview, contents,
+                video_workflow: draftVideoWorkflow,
             }));
         }
         if (status) status.innerHTML = '<iconify-icon icon="mdi:check-circle" width="12" style="color:#22c55e;"></iconify-icon> 已自动保存';
@@ -675,6 +685,7 @@ function loadDraft() {
     if (!draft) return;
     const normalized = EditorTransfer.normalizeDraft(draft,Object.keys(platformInfo),currentPreview);
     importedFromChat = normalized.importedFromChat && normalized.valid;
+    draftVideoWorkflow = normalized.video_workflow;
     draftEvidenceInsufficient = normalized.evidence_status === 'insufficient';
     normalized.contents.forEach(item => { generatedContents[item.platform] = item; });
     currentPreview = normalized.activePlatform;
@@ -976,18 +987,24 @@ function renderDouyinScript(content) {
     const selected=new Set(content.selected_asset_ids||[]);
     const selectedList=Array.from(selected); scenes.forEach((scene,index)=>{if(!scene.asset_id&&selectedList[index])scene.asset_id=selectedList[index];});
     const options=mediaAssets.filter(a=>a.file_type==='video'||a.file_type==='image').map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
-    const ready=mediaCapabilities.ready;
-    return `<div class="render-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><strong><iconify-icon icon="mdi:movie-edit-outline" width="15"></iconify-icon> 30 秒分镜</strong><div style="display:flex;gap:10px"><a href="/video-workbench.html?from=editor" style="color:#d7b57e;font-size:11px;">视频精确调整</a><a href="/assets.html" style="color:#d7b57e;font-size:11px;">管理素材</a></div></div>
+    const targetSeconds=Math.round(Number(content.duration_target||draftVideoWorkflow?.target_duration_ms/1000||60));
+    const workflowBlocked=importedFromChat&&draftVideoWorkflow?.status!=='ready';
+    const fallbackBlocked=content.source==='safe_fallback';
+    const ready=mediaCapabilities.ready&&!workflowBlocked&&!fallbackBlocked&&targetSeconds>=50;
+    const blockReason=fallbackBlocked?'当前只是模型不可用时的提示文本，不能生成视频':(draftVideoWorkflow?.block_reason||'正式成片需要强相关热点 Hook 和可用 Buffalo 自有素材');
+    return `<div class="render-panel"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><strong><iconify-icon icon="mdi:movie-edit-outline" width="15"></iconify-icon> ${targetSeconds} 秒正式分镜</strong><div style="display:flex;gap:10px"><a href="/video-workbench.html?from=editor" style="color:#d7b57e;font-size:11px;">视频精确调整</a><a href="/assets.html" style="color:#d7b57e;font-size:11px;">管理素材</a></div></div>
     ${scenes.length?scenes.map((s,i)=>`<div class="scene-card"><div class="scene-meta"><b>场景 ${i+1}</b><span>${Number(s.duration||5)} 秒</span><label style="margin-left:auto;font-size:11px;"><input type="checkbox" class="douyin-clip-scene" value="${i+1}" ${content.selected_clip_scenes?.includes(i+1)?'checked':''}> 输出切片</label></div><input value="${escapeHtml(s.visual||'')}" aria-label="场景画面" onchange="updateScene(${i},'visual',this.value)"/><textarea rows="2" aria-label="口播" onchange="updateScene(${i},'voiceover',this.value)">${escapeHtml(s.voiceover||'')}</textarea><input value="${escapeHtml(s.text_overlay||'')}" aria-label="画面标题" onchange="updateScene(${i},'text_overlay',this.value)"/><select onchange="updateScene(${i},'asset_id',this.value?Number(this.value):null)"><option value="">品牌信息卡兜底</option>${mediaAssets.map(a=>`<option value="${a.id}" ${Number(s.asset_id)===a.id||(!s.asset_id&&selected.has(a.id)&&i===0)?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`).join(''):`<div style="font-size:12px;color:#aaa;padding:12px;">当前内容没有结构化分镜，请重新生成抖音内容。</div>`}
     <div style="font-size:10px;color:#aaa;margin:7px 0;">字幕将依据实际配音时长逐句对齐，并避开平台底部操作区。勾选场景可同时生成独立切片。</div>
     <label style="font-size:11px;color:#aaa;">Qwen TTS 音色</label><select id="douyinVoice" style="width:100%;margin:6px 0 10px;background:#242424;border:1px solid #444;color:white;border-radius:7px;padding:8px;"><option value="">请选择音色</option>${(mediaCapabilities.voices||['Cherry']).map(v=>`<option value="${v}" ${content.voice===v?'selected':''}>${v}</option>`).join('')}</select>
-    <button class="btn btn-primary" style="width:100%" onclick="startDouyinRender()" ${!ready||!scenes.length?'disabled':''}>生成可发布 MP4</button>${!ready?`<div style="font-size:10px;color:#fca5a5;margin-top:7px;">缺少：${!mediaCapabilities.ffmpeg?'FFmpeg ':''}${!mediaCapabilities.ffprobe?'ffprobe ':''}${!mediaCapabilities.dashscope_key?'百炼 API Key':''}</div>`:''}<div id="renderStatus"></div>${content.rendered_video?`<video src="${escapeHtml(content.rendered_video.url)}" controls style="width:100%;margin-top:10px;border-radius:10px;"></video>`:''}</div>`;
+    <button class="btn btn-primary" style="width:100%" onclick="startDouyinRender()" ${!ready||!scenes.length?`disabled title="${escapeHtml(blockReason)}"`:''}>生成 ${targetSeconds} 秒正式 MP4</button>${!ready?`<div style="font-size:10px;color:#fca5a5;margin-top:7px;">${workflowBlocked||fallbackBlocked?escapeHtml(blockReason):`缺少：${!mediaCapabilities.ffmpeg?'FFmpeg ':''}${!mediaCapabilities.ffprobe?'ffprobe ':''}${!mediaCapabilities.dashscope_key?'百炼 API Key':''}`}</div>`:''}<div id="renderStatus"></div>${content.rendered_video?`<video src="${escapeHtml(content.rendered_video.url)}" controls style="width:100%;margin-top:10px;border-radius:10px;"></video>`:''}</div>`;
 }
 
 function updateScene(index,key,value){const c=generatedContents.douyin;if(!c?.scenes?.[index])return;c.scenes[index][key]=value;}
 function toggleAccountTarget(platform,id,checked){const c=generatedContents[platform];if(!c)return;const ids=new Set(c.account_target_ids||[]);checked?ids.add(id):ids.delete(id);c.account_target_ids=Array.from(ids);}
 function selectDouyinVideo(scene){const c=generatedContents.douyin;const clip=(c.rendered_clips||[]).find(item=>item.scene===scene);if(!clip)return;c.rendered_video=clip;c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),clip];renderPreview('douyin');showToast(`已选用场景 ${scene} 切片`);}
-let renderingDouyin=false;async function startDouyinRender(){if(renderingDouyin){showToast('正在渲染中，请等待完成','error');return;}const c=generatedContents.douyin;const voice=document.getElementById('douyinVoice').value;if(!voice){showToast('请选择 Qwen TTS 音色','error');return;}c.voice=voice;c.selected_clip_scenes=Array.from(document.querySelectorAll('.douyin-clip-scene:checked')).map(el=>Number(el.value));c.output_mode=c.selected_clip_scenes.length?'full_and_clips':'full';renderingDouyin=true;try{const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){renderingDouyin=false;showToast(e.message,'error');}}
+let renderingDouyin=false;async function startDouyinRender(){if(renderingDouyin){showToast('正在渲染中，请等待完成','error');return;}const c=generatedContents.douyin;if(!c)return;if(c.source==='safe_fallback'){showToast('当前只是模型不可用时的提示文本，不能生成视频','error');return;}if(importedFromChat&&draftVideoWorkflow?.status!=='ready'){showToast(draftVideoWorkflow?.block_reason||'尚未匹配强相关热点 Hook，不能生成正式视频','error');return;}const voice=document.getElementById('douyinVoice').value;if(!voice){showToast('请选择 Qwen TTS 音色','error');return;}c.voice=voice;c.selected_clip_scenes=Array.from(document.querySelectorAll('.douyin-clip-scene:checked')).map(el=>Number(el.value));c.output_mode=c.selected_clip_scenes.length?'full_and_clips':'full';renderingDouyin=true;try{if(importedFromChat&&draftVideoWorkflow){const r=await apiFetch('/api/ai/chat/dual-library-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:draftVideoWorkflow.topic||c.title,hotspot_event_ids:draftVideoWorkflow.hotspot_event_ids||[],platform:'douyin',target_duration_ms:draftVideoWorkflow.target_duration_ms||60000,session_id:draftVideoWorkflow.session_id||'',idempotency_key:`editor-chat-${draftVideoWorkflow.session_id||'session'}-${(draftVideoWorkflow.hotspot_event_ids||[]).join('-')}`})});const d=await r.json();if(!d.job?.id||!d.project?.id)throw new Error('正式视频项目创建失败');c.video_project_id=d.project.id;c.video_generation_job_id=d.job.id;pollFormalEditorRender(d.job.id,d.project.id);return;}const targetSeconds=Math.round(Number(c.duration_target||60));const r=await apiFetch('/api/douyin/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,voice,duration_target_ms:targetSeconds*1000})});const d=await r.json();c.render_job_id=d.job_id;pollRender(d.job_id);}catch(e){renderingDouyin=false;showToast(e.message,'error');}}
+
+function pollFormalEditorRender(jobId,projectId){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/video-generation/jobs/${jobId}`,{cache:'no-store'});const job=await r.json();const box=document.getElementById('renderStatus');if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${escapeHtml(job.stage||'正式视频生成中')} · ${Number(job.progress||0)}%</div><div class="render-progress"><i style="width:${Number(job.progress||0)}%"></i></div><a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">查看正式项目</a>`;if(job.status==='succeeded'){clearInterval(renderPoller);renderingDouyin=false;const c=generatedContents.douyin;const video={type:'video',url:job.output_url,path:job.output_path,filename:(c.title||'douyin')+'.mp4',quality_status:'passed',quality_report:job.quality_report?.final_quality||{}};c.rendered_video=video;c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),video];renderPreview('douyin');showToast('50–90 秒正式成片已通过质量检查');}else if(job.status==='needs_review'){clearInterval(renderPoller);renderingDouyin=false;const issues=[...new Set(job.quality_report?.gate?.issues||[])].slice(0,3);if(box)box.innerHTML=`<div style="color:#fca5a5;font-size:11px;margin-top:8px;">正式成片暂停：${issues.map(escapeHtml).join('；')||'请检查脚本与素材'}</div><a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">检查正式项目</a>`;}else if(['failed','canceled'].includes(job.status)){clearInterval(renderPoller);renderingDouyin=false;if(box)box.innerHTML=`<div style="color:#fca5a5;font-size:11px;">${escapeHtml(job.error_message||'正式视频生成失败')}</div>`;}}catch(e){clearInterval(renderPoller);renderingDouyin=false;}};tick();renderPoller=setInterval(tick,2000);}
 async function pollRender(id){clearInterval(renderPoller);const tick=async()=>{try{const r=await apiFetch(`/api/douyin/render/${id}`);const job=await r.json();const box=document.getElementById('renderStatus');const pending=job.status==='pending';if(box)box.innerHTML=`<div style="font-size:11px;margin-top:10px;">${pending?'排队等待中（前面有任务正在渲染）…':escapeHtml(job.stage)+' · '+job.progress+'%'}</div><div class="render-progress"><i style="width:${pending?5:job.progress}%"></i></div>${job.error?`<div style="color:#fca5a5;font-size:10px;">${escapeHtml(job.error)}</div>`:''}`;if(job.status==='succeeded'){clearInterval(renderPoller);renderingDouyin=false;const c=generatedContents.douyin;c.rendered_video=job.rendered_video;c.rendered_clips=job.clips||[];c.attachments=[...(c.attachments||[]).filter(a=>a.type!=='video'),job.rendered_video];renderPreview('douyin');showToast(`视频质量检查通过${c.rendered_clips.length?'，已生成 '+c.rendered_clips.length+' 个切片':''}`);}else if(job.status==='failed'){clearInterval(renderPoller);renderingDouyin=false;showToast('视频渲染或质量检查失败','error');}}catch(e){clearInterval(renderPoller);}};await tick();renderPoller=setInterval(tick,2000);}
 
 function bindXhsImages(items){lightboxImages=items.map(a=>a.url);document.querySelectorAll('[data-xhs-index]').forEach(img=>img.addEventListener('click',()=>openXhsLightbox(Number(img.dataset.xhsIndex))));}
@@ -1240,7 +1257,7 @@ async function publishDouyinVideo() {
 
 async function saveDraft() {
     syncEditorToContent();
-    localStorage.setItem('draft',JSON.stringify({version:2,source:'editor',activePlatform:currentPreview,contents:Object.values(generatedContents),title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value}));
+    localStorage.setItem('draft',JSON.stringify({version:3,source:importedFromChat?'chat':'editor',activePlatform:currentPreview,contents:Object.values(generatedContents),video_workflow:draftVideoWorkflow,title:document.getElementById('editorTitle').value,body:document.getElementById('editorContent').value,hashtags:document.getElementById('editorHashtags').value}));
     if (activeVideoProject) {
         const payload = generatedContents.douyin || {};
         try {

@@ -121,6 +121,29 @@ def test_render_rejects_missing_capability(tmp_db, monkeypatch):
     assert "FFmpeg" in response.json()["detail"]
 
 
+def test_render_rejects_safe_fallback_and_short_production_copy(tmp_db, monkeypatch):
+    import app
+    client, headers = _client_and_token(tmp_db)
+    monkeypatch.setattr(app.media_assets, "capabilities", lambda: {"ffmpeg": True, "ffprobe": True})
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+
+    fallback = client.post("/api/douyin/render", headers=headers, json={
+        "source": "safe_fallback", "voice": "Cherry", "duration_target": 60, "scenes": [],
+    })
+    assert fallback.status_code == 409
+    assert "提示不能生成视频" in fallback.json()["detail"]
+
+    short = client.post("/api/douyin/render", headers=headers, json={
+        "source": "model", "voice": "Cherry", "duration_target": 60,
+        "scenes": [
+            {"duration": 8, "voiceover": "核对节点。", "visual": f"物流场景{i}"}
+            for i in range(8)
+        ],
+    })
+    assert short.status_code == 409
+    assert "无法支撑 60 秒正式成片" in short.json()["detail"]
+
+
 def test_render_job_is_private_to_creator(tmp_db, monkeypatch):
     import app, auth
     from fastapi.testclient import TestClient
@@ -137,6 +160,7 @@ def test_render_job_is_private_to_creator(tmp_db, monkeypatch):
 def test_subtitles_follow_speech_timeline_and_clip_selection():
     import video_renderer
     script = video_renderer.normalize_script({
+        "duration_target_ms": 30_000,
         "output_mode": "full_and_clips", "selected_clip_scenes": [1, "2", 9, 2],
         "scenes": [{"duration": 5, "voiceover": f"第{i}句。", "visual": "仓库"} for i in range(1, 5)],
     }, set())
@@ -168,7 +192,7 @@ def test_normalized_script_rejects_reusing_one_buffalo_source_for_multiple_segme
     import video_renderer
 
     with pytest.raises(ValueError, match="Buffalo 原始视频 7"):
-        video_renderer.normalize_script({"scenes": [
+        video_renderer.normalize_script({"duration_target_ms": 30_000, "scenes": [
             {"duration": 5, "voiceover": f"旁白{i}", "asset_id": 7,
              "asset_segment_id": 20 + i, "asset_start_ms": 2_000, "asset_end_ms": 7_000}
             for i in range(4)
