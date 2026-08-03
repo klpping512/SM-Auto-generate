@@ -106,7 +106,7 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
     # 默认不以时长二次筛选：产品承诺的是“所有已获得且已授权的资讯视频”
     # 都由内置模型分析。若部署方有明确容量约束，才通过环境变量设置下限。
     min_duration = max(0, int(os.environ.get("HOTSPOT_PREWARM_MIN_DURATION_SECONDS", "0")))
-    admin = db.get_user_by_username("admin")
+    admin = db.get_first_admin_user()
     if not admin:
         logger.warning("热点预热跳过：缺少管理员用户")
         return {"status": "missing_admin", "reason": "缺少管理员用户"}
@@ -262,7 +262,7 @@ async def refresh_targeted_hotspot_hooks() -> dict:
     """
     import chat_intent
 
-    admin = db.get_user_by_username("admin")
+    admin = db.get_first_admin_user()
     pending = [
         item for item in db.list_hotspot_discovery_requests(status="pending", limit=100)
         if chat_intent.should_request_hotspot_retrieval(
@@ -552,17 +552,50 @@ async def send_success_notify(item: dict):
     await asyncio.gather(send_feishu(text), send_wecom(text))
 
 
+async def fetch_hotspots_then_incremental_hook_intake():
+    """6h fetch followed by bounded incremental Hook materialization."""
+    admin = db.get_first_admin_user()
+    fetched = await hotspot_fetcher.fetch_hotspots(
+        static_dir=Path(__file__).with_name("static"),
+        created_by=admin["id"] if admin else None,
+        video_channels=hotspot_fetcher.configured_video_channels(),
+    )
+    # Prefer targeted discovery queue first, then a small incremental authorized batch.
+    targeted = await refresh_targeted_hotspot_hooks()
+    incremental_ids = []
+    for item in db.list_active_authorized_hotspot_media_for_full_intake():
+        if item.get("media_kind") not in {"video_link", "video_file"}:
+            continue
+        if item.get("download_status") not in {
+            "metadata_ready", "failed", "download_failed", "pending", "downloading",
+        }:
+            continue
+        incremental_ids.append(int(item["id"]))
+        if len(incremental_ids) >= max(1, int(os.environ.get("HOTSPOT_INCREMENTAL_HOOK_BATCH", "8"))):
+            break
+    intake = {"status": "skipped"}
+    if incremental_ids:
+        intake = await prewarm_authorized_hotspot_media(media_ids=incremental_ids)
+    report = {"fetch": fetched, "targeted": targeted, "incremental": intake, "incremental_ids": incremental_ids}
+    logger.info(
+        "抓取后增量 Hook 入库：fetch_new=%s targeted=%s incremental=%s ids=%s",
+        fetched.get("new"), targeted.get("status"), intake.get("status"), incremental_ids,
+    )
+    return report
+
+
 def start_scheduler():
     """启动定时调度器。"""
     # 每分钟检查一次定时发布任务
     scheduler.add_job(check_scheduled_publish, "interval", minutes=1, id="scheduled_publish", replace_existing=True)
     scheduler.add_job(
-        hotspot_fetcher.fetch_hotspots, "interval", hours=6, id="south_africa_hotspots",
-        kwargs={
-            "static_dir": Path(__file__).with_name("static"),
-            "video_channels": hotspot_fetcher.configured_video_channels(),
-        },
+        fetch_hotspots_then_incremental_hook_intake,
+        "interval",
+        hours=6,
+        id="south_africa_hotspots",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.add_job(
         cleanup_media_retention,

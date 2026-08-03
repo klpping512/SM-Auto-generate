@@ -117,12 +117,14 @@ function renderSidebar(activeId) {
     const displayName = escapeHtml(user.display_name || user.username || '未登录');
     const roleLabel = escapeHtml(roleLabels[user.role] || '');
     const initials = displayName.substring(0, 1).toUpperCase();
+    const isAdmin = user.role === 'admin';
 
     let navHtml = '';
     for (const item of NAV_ITEMS) {
         if (item.section) {
             navHtml += `<div class="nav-section-title">${escapeHtml(item.section)}</div>`;
         } else {
+            if (item.id === 'hotspots' && !isAdmin) continue;
             const active = item.id === activeId ? ' active' : '';
             const svg = NAV_ICONS[item.label] || '';
             navHtml += `<a class="nav-item${active}" href="${item.href}" title="${escapeHtml(item.label)}">

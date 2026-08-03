@@ -23,7 +23,9 @@ def get_conn():
     # Re-applying journal_mode=WAL for every short read/write can itself wait on
     # a writer lock, which made the old synchronous chat-to-video handoff look
     # stalled after the model had already returned.
-    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    # check_same_thread=False allows the process-wide write queue worker to open
+    # short connections without inheriting a connection across threads.
+    conn = sqlite3.connect(str(DB_PATH), timeout=15, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -37,6 +39,11 @@ def get_conn():
         conn.close()
 
 
+def queued_write(fn):
+    """Run a write callable on the process-wide single-writer queue."""
+    import sqlite_write_queue
+    return sqlite_write_queue.submit_write(fn)
+
 def _table_columns(conn, table: str) -> set[str]:
     """Return the set of column names for a given table."""
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -48,6 +55,24 @@ def _ensure_column(conn, table: str, column: str, col_def: str):
     if column not in _table_columns(conn, table):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
         logger.info("数据库迁移: %s.%s 已添加", table, column)
+
+
+def record_schema_migration(version: str, note: str = "") -> None:
+    """Idempotently record a schema version (replaces endless _ensure_column sprawl)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, note) VALUES (?, ?)",
+            (version, note),
+        )
+
+
+def list_schema_migrations() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT version, applied_at, note FROM schema_migrations ORDER BY applied_at, version"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
 
 
 def init_db():
@@ -522,6 +547,12 @@ def init_db():
                 updated_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now')),
+                note TEXT DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS model_call_cache (
                 cache_key TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
@@ -884,6 +915,7 @@ def init_db():
         _ensure_column(conn, "video_generation_jobs", "output_purged_at", "TEXT")
         _ensure_column(conn, "sample_bundles", "preview_path", "TEXT")
         _seed_defaults(conn)
+    record_schema_migration("2026-08-03-delivery-loop", "hook_kind/logistics_scenes + schema_migrations baseline")
     logger.info("数据库初始化完成: %s", DB_PATH)
 
 
@@ -940,6 +972,15 @@ def get_users() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("SELECT id, username, role, display_name, status, last_login, created_at FROM users ORDER BY id").fetchall()
         return [dict(r) for r in rows]
+
+
+def get_first_admin_user() -> dict | None:
+    """Return the first active admin (full row with password_hash), or None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE role='admin' AND COALESCE(status,'active')='active' ORDER BY id LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def update_user_last_login(user_id: int):
@@ -3120,8 +3161,12 @@ def _project_status_for_job_status(job_status: str) -> str:
         return "generating"
     if status == "needs_review":
         return "needs_review"
-    if status in _TERMINAL_VIDEO_JOB_STATUSES:
+    if status == "succeeded":
         return "ready"
+    if status == "failed":
+        return "failed"
+    if status == "canceled":
+        return "canceled"
     return "ready"
 
 

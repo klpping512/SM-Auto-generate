@@ -68,7 +68,7 @@ from models import (
     ModelRouteRequest,
 )
 import publish_readiness
-from routes import auth_routes, config_routes, page_routes, video_generation_routes
+from routes import auth_routes, config_routes, hotspot_package_routes, page_routes, video_generation_routes
 from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
 
 # 从项目本地的 .env 加载敏感配置；.env 已加入 .gitignore，不会进入源码仓库。
@@ -88,6 +88,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _ensure_bootstrap_admin() -> dict | None:
+    """Create the first admin from env when the user table is empty.
+
+    Empty databases must provide BOOTSTRAP_ADMIN_USERNAME and
+    BOOTSTRAP_ADMIN_PASSWORD. Hardcoded admin/admin123 is forbidden.
+    """
+    existing = db.get_users()
+    if existing:
+        admins = [u for u in existing if str(u.get("role") or "") == "admin" and str(u.get("status") or "active") == "active"]
+        if admins:
+            return db.get_user_by_username(admins[0]["username"]) or admins[0]
+        return db.get_user_by_username(existing[0]["username"]) or existing[0]
+
+    username = (os.environ.get("BOOTSTRAP_ADMIN_USERNAME") or "").strip()
+    password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    if not username or not password:
+        raise RuntimeError(
+            "空库首次启动必须设置 BOOTSTRAP_ADMIN_USERNAME 与 BOOTSTRAP_ADMIN_PASSWORD；"
+            "已禁止自动创建 admin/admin123。"
+        )
+    if len(password) < 8:
+        raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD 至少 8 位")
+    display = (os.environ.get("BOOTSTRAP_ADMIN_DISPLAY_NAME") or "系统管理员").strip() or "系统管理员"
+    db.create_user(username, hash_password(password), "admin", display)
+    logger.info("已通过 Bootstrap 创建管理员: %s", username)
+    return db.get_user_by_username(username)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # The organization confirmed that its configured feeds and channel links
@@ -98,11 +126,7 @@ async def lifespan(app: FastAPI):
     recovered_fetch_runs = db.recover_interrupted_hotspot_fetch_runs()
     if recovered_fetch_runs:
         logger.warning("已恢复 %s 个被服务重启中断的热点抓取任务", recovered_fetch_runs)
-    # 确保默认管理员存在
-    if not db.get_user_by_username("admin"):
-        db.create_user("admin", hash_password("admin123"), "admin", "系统管理员")
-        logger.info("已创建默认管理员: admin / admin123")
-    admin_user = db.get_user_by_username("admin")
+    admin_user = _ensure_bootstrap_admin()
     seeded_sources = hotspot_fetcher.seed_default_sources(admin_user["id"] if admin_user else None)
     if seeded_sources:
         logger.info("已补齐 %s 个南非官方热点信源", seeded_sources)
@@ -164,6 +188,7 @@ app.add_middleware(
 STATIC_DIR = Path(__file__).parent / "static"
 app.include_router(auth_routes.router)
 app.include_router(config_routes.router)
+app.include_router(hotspot_package_routes.router)
 app.include_router(page_routes.create_router(STATIC_DIR))
 app.include_router(video_generation_routes.create_router(lambda: STATIC_DIR))
 
@@ -2711,40 +2736,6 @@ async def delete_hotspot_event_clip(
     return {"status": "deleted", **result, **file_result}
 
 
-@app.get("/api/hotspot-packages")
-async def list_hotspot_packages(query: str = "", source: str = "", event_type: str = "", heat_state: str = "", media_form: str = "", since: str = "", limit: int = 100, user=Depends(get_current_user)):
-    return hotspot_package_service.list_packages(query=query, source=source, event_type=event_type, heat_state=heat_state, media_form=media_form, since=since, limit=max(1, min(limit, 200)))
-
-
-@app.get("/api/hotspot-packages/{hotspot_id}")
-async def get_hotspot_package_detail(hotspot_id: int, user=Depends(get_current_user)):
-    package = hotspot_package_service.get_package_detail(hotspot_id)
-    if package is None:
-        raise HTTPException(404, "热点专题包不存在")
-    return package
-
-
-@app.post("/api/hotspot-packages/{hotspot_id}/confirm")
-async def confirm_hotspot_package(hotspot_id: int, user=Depends(require_role(UserRole.ADMIN, UserRole.EDITOR))):
-    package = hotspot_package_service.confirm_package(hotspot_id, user)
-    if package is None:
-        raise HTTPException(404, "热点专题包不存在")
-    return package
-
-
-@app.post("/api/hotspot-packages/{hotspot_id}/merge")
-async def merge_hotspot_signals(hotspot_id: int, signal_ids: list[int], user=Depends(require_role(UserRole.ADMIN, UserRole.EDITOR))):
-    if not signal_ids:
-        raise HTTPException(422, "至少选择一条待合并信号")
-    try:
-        package = hotspot_package_service.merge_signals(hotspot_id, signal_ids, user)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    if package is None:
-        raise HTTPException(404, "热点专题包不存在")
-    return package
-
-
 @app.post("/api/hotspot-media/{media_id}/prepare", status_code=202)
 async def prepare_hotspot_media(media_id: int, user=Depends(require_role(UserRole.ADMIN))):
     try:
@@ -3712,9 +3703,24 @@ async def delete_media_asset(asset_id: int, user=Depends(require_role(UserRole.A
 async def media_capabilities(user=Depends(get_current_user)):
     result = media_assets.capabilities()
     result["dashscope_key"] = bool(os.environ.get("DASHSCOPE_API_KEY"))
-    result["ready"] = all(result.values())
+    result["mimo_api_key"] = bool(os.environ.get("MIMO_API_KEY"))
+    result["tts_provider"] = os.environ.get("TTS_PROVIDER", "mimo")
+    result["tts_fallback_provider"] = os.environ.get("TTS_FALLBACK_PROVIDER", "qwen")
+    result["tts_fallback_enabled"] = os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0"
+    result["mimo_tts_model"] = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+    result["mimo_tts_voice"] = os.environ.get("MIMO_TTS_VOICE", video_renderer.MIMO_TTS_VOICE)
+    # Ready for formal video: FFmpeg + MiMo TTS key (DashScope is visual/text, not narration-required).
+    media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
+    tts_ok = bool(result["mimo_api_key"] or (result["tts_fallback_enabled"] and result["dashscope_key"]))
+    result["ready"] = media_ok and tts_ok
     result["voices"] = sorted(video_renderer.VOICES)
     return result
+
+
+@app.get("/api/admin/sqlite-health")
+async def sqlite_health(user=Depends(require_role(UserRole.ADMIN))):
+    import sqlite_write_queue
+    return sqlite_write_queue.get_sqlite_health()
 
 
 async def _run_video_job(job_id: str):
@@ -3999,6 +4005,7 @@ async def _retrieve_confirmed_chat_hooks(
                 "status": "matched", "topic": normalized_topic, "hooks": hooks, "model": model_meta,
                 "failure_class": None,
                 "event_anchor": anchor,
+                "hook_kind": hook_kind,
                 "funnel": funnel,
                 "relevance": item.get("relevance") or {
                     "level": "strong", "reason": "内置模型确认该 Hook 可直接解释当前物流问题。",
@@ -4056,6 +4063,7 @@ async def _retrieve_confirmed_chat_hooks(
             "video": {"status": "disabled"},
             "failure_class": failure,
             "event_anchor": anchor,
+            "hook_kind": hook_kind,
             "funnel": funnel,
             "producible_topics": producible,
             "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
@@ -4070,6 +4078,7 @@ async def _retrieve_confirmed_chat_hooks(
         "video": {"status": "disabled"},
         "failure_class": "coverage_gap",
         "event_anchor": anchor,
+        "hook_kind": hook_kind,
         "funnel": funnel,
         "producible_topics": producible,
         "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
@@ -4316,6 +4325,13 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         f"[{item['platform']}]\n{item['title']}\n{item['body']}"
         for item in outputs
     )
+    failure_class = (hotspot_retrieval or {}).get("failure_class")
+    if brand_assets_insufficient and not failure_class:
+        failure_class = "brand_assets_insufficient"
+    hook_kind = (
+        (hotspot_retrieval or {}).get("hook_kind")
+        or ("generic_logistics" if content_mode in {"evergreen", "general_copy"} else "timely_event")
+    )
     return {
         "content": context_content,
         "title": first["title"], "body": first["body"],
@@ -4325,8 +4341,12 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "result_state": result_state,
         "evidence_state": evidence,
         "event_anchor": event_anchor,
-        "failure_class": (hotspot_retrieval or {}).get("failure_class"),
+        "hook_requirement": "required",
+        "hook_kind": hook_kind,
+        "failure_class": failure_class,
+        "funnel": (hotspot_retrieval or {}).get("funnel") or {},
         "producible_topics": (hotspot_retrieval or {}).get("producible_topics") or [],
+        "delivery_readiness": readiness,
         "video_workflow": {
             "status": (
                 "ready"

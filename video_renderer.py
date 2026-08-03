@@ -62,9 +62,9 @@ _ACTIVE_PROCESSES_LOCK = threading.Lock()
 
 def _scene_tts_concurrency() -> int:
     try:
-        return max(1, min(8, int(os.environ.get("SCENE_TTS_CONCURRENCY", "3"))))
+        return max(1, min(8, int(os.environ.get("SCENE_TTS_CONCURRENCY", "2"))))
     except ValueError:
-        return 3
+        return 2
 
 
 def _scene_ffmpeg_concurrency() -> int:
@@ -449,16 +449,113 @@ def synthesize_scene_voiceover(
     text: str,
     output: Path,
     *,
-    tts_provider: str,
-    voice: str,
-) -> None:
-    """Route one scene voiceover to the configured TTS provider."""
-    if tts_provider == "local_macos":
+    tts_provider: str | None = None,
+    voice: str = "",
+    style_instruction: str | None = None,
+) -> dict:
+    """Route one scene voiceover with MiMo-first + recoverable Qwen fallback.
+
+    Returns metadata describing the provider actually used. Non-recoverable
+    MiMo failures (auth/balance/params) do not silently fall back.
+    """
+    import hashlib
+
+    provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
+    fallback_enabled = os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0"
+    fallback_provider = (os.environ.get("TTS_FALLBACK_PROVIDER", "qwen") or "qwen").strip().lower()
+    mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+    mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
+    style = style_instruction or MIMO_TTS_DEFAULT_STYLE
+    meta = {
+        "provider": provider,
+        "model": mimo_model if provider == "mimo" else "qwen3-tts-flash",
+        "voice": mimo_voice if provider == "mimo" else normalize_tts_voice(voice or "Cherry"),
+        "style": style if provider == "mimo" else "",
+        "fallback_used": False,
+        "fallback_reason": None,
+        "attempts": 0,
+        "elapsed_ms": 0,
+        "cache_hit": False,
+    }
+    cache_root = Path(__file__).resolve().parent / "data" / "tts_cache"
+    cache_key = hashlib.sha256(
+        f"{text}|{provider}|{meta['model']}|{meta['voice']}|{meta['style']}".encode("utf-8")
+    ).hexdigest()
+    cache_path = cache_root / f"{cache_key}{output.suffix or '.wav'}"
+
+    def _copy_cache() -> bool:
+        if cache_path.is_file() and cache_path.stat().st_size > 64:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(cache_path.read_bytes())
+            meta["cache_hit"] = True
+            return True
+        return False
+
+    def _store_cache() -> None:
+        try:
+            cache_root.mkdir(parents=True, exist_ok=True)
+            if output.is_file() and output.stat().st_size > 64:
+                cache_path.write_bytes(output.read_bytes())
+        except OSError:
+            pass
+
+    def _is_recoverable(exc: Exception) -> bool:
+        text_err = str(exc).casefold()
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            code = int(exc.response.status_code)
+            if code in {401, 403, 400, 402, 422}:
+                return False
+            return code >= 500 or code == 429
+        recoverable_markers = ("timeout", "timed out", "429", "rate limit", "5xx", "503", "502", "504", "decode", "audio")
+        fatal_markers = ("未配置", "api key", "鉴权", "unauthorized", "forbidden", "balance", "余额", "invalid", "参数")
+        if any(marker in text_err for marker in fatal_markers):
+            return False
+        return any(marker in text_err for marker in recoverable_markers)
+
+    if provider == "local_macos":
         synthesize_local_macos(text, output)
-    elif tts_provider == "mimo":
-        synthesize_mimo_tts(text, MIMO_TTS_VOICE, output)
-    else:
-        synthesize_qwen_tts(text, voice, output)
+        meta.update({"provider": "local_macos", "model": "macos_say", "attempts": 1})
+        return meta
+
+    started = time.perf_counter()
+    if _copy_cache():
+        meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return meta
+
+    primary_error: Exception | None = None
+    try:
+        meta["attempts"] += 1
+        if provider == "mimo":
+            synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
+        else:
+            synthesize_qwen_tts(text, meta["voice"], output)
+        _store_cache()
+        meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return meta
+    except Exception as exc:
+        primary_error = exc
+        if provider != "mimo" or not fallback_enabled or fallback_provider != "qwen" or not _is_recoverable(exc):
+            raise
+
+    # Recoverable MiMo failure → temporary Qwen fallback.
+    meta["fallback_used"] = True
+    meta["fallback_reason"] = str(primary_error)[:240]
+    meta["provider"] = "qwen"
+    meta["model"] = "qwen3-tts-flash"
+    meta["voice"] = normalize_tts_voice(voice or "Cherry")
+    meta["style"] = ""
+    meta["attempts"] += 1
+    synthesize_qwen_tts(text, meta["voice"], output)
+    # Cache under the fallback identity so retries of the same text+provider reuse it.
+    cache_key = hashlib.sha256(
+        f"{text}|qwen|{meta['model']}|{meta['voice']}|".encode("utf-8")
+    ).hexdigest()
+    cache_path = cache_root / f"{cache_key}{output.suffix or '.wav'}"
+    _store_cache()
+    meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return meta
 
 
 def _generate_text_overlay(
@@ -991,7 +1088,7 @@ def render_job(
     cancel_check: Callable[[], bool] | None = None,
     output_size: tuple[int, int] = (1080, 1920),
     output_name: str | None = None,
-    tts_provider: str = "qwen",
+    tts_provider: str = "mimo",
     preview: bool = False,
 ):
     if not is_standard_portrait_size(output_size):
@@ -1060,6 +1157,7 @@ def render_job(
         # Parallel first-pass TTS: each scene writes an indexed WAV; video-fit
         # re-TTS stays serial inside the per-scene loop below.
         check_canceled()
+        tts_reports: list[dict] = []
         with ThreadPoolExecutor(max_workers=_scene_tts_concurrency()) as pool:
             tts_futures = {
                 index: pool.submit(
@@ -1073,7 +1171,8 @@ def render_job(
             }
             for index, future in tts_futures.items():
                 check_canceled()
-                future.result()
+                scene_meta = future.result() or {}
+                tts_reports.append({"scene_index": index, **dict(scene_meta)})
 
         pending_scene_renders: list[dict] = []
         for index, scene in enumerate(scenes):
@@ -1355,6 +1454,12 @@ def render_job(
         report["audio_sync"] = {
             "passed": all(item["passed"] for item in subtitle_sync_reports),
             "scenes": subtitle_sync_reports,
+        }
+        report["tts"] = {
+            "requested_provider": tts_provider,
+            "scenes": tts_reports,
+            "fallback_used": any(item.get("fallback_used") for item in tts_reports),
+            "cache_hits": sum(1 for item in tts_reports if item.get("cache_hit")),
         }
         report["audio_tempo_adjustments"] = audio_tempo_adjustments
         report["voiceover_compactions"] = voiceover_compactions

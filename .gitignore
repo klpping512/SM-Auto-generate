@@ -10,6 +10,10 @@ uploads/
 # 运行时数据：数据库文件、ASR 模型、生成样本、质检产物、JWT 密钥
 data/
 
+# Graphify 可再生成工件（勿污染业务提交）
+docs/graphify-out/
+graphify-out/
+
 # 素材库文件（太大不进 git，实测 static/assets/ 约 13GB）
 static/assets/
 *.mov

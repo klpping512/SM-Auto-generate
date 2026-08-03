@@ -3,6 +3,13 @@ import pytest
 import database as db
 
 
+@pytest.fixture(autouse=True)
+def _default_bootstrap_env(monkeypatch):
+    """Allow TestClient lifespan on empty temp DBs without hardcoded admin/admin123."""
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_USERNAME", "pytest_bootstrap_admin")
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "pytest-bootstrap-pass")
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     """每个测试用独立临时 SQLite，避免污染 data/logiflow.db。"""

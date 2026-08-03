@@ -302,24 +302,27 @@ async def fetch_hotspots(
                             "download_status": "metadata_ready",
                             "processing_status": "not_started",
                         })
-                    db.upsert_inspiration_item({
-                        "source_type": "official_news",
-                        "source_role": "fact_source",
-                        "source_url": final_url,
-                        "canonical_url": final_url,
-                        "title": item["title"],
-                        "summary": item["summary"],
-                        "author": item["publisher"],
-                        "published_at": item["published_at"],
-                        "thumbnail_url": item.get("image_candidate_url"),
-                        "media_kind": "article_link",
-                        "rights_status": "unknown",
-                        "materialization_status": "reference_only",
-                        "hotspot_id": hotspot_id,
-                        "created_by": created_by,
-                    })
+                    if os.environ.get("HOTSPOT_INSPIRATION_SYNC_ENABLED", "0") == "1":
+                        db.upsert_inspiration_item({
+                            "source_type": "official_news",
+                            "source_role": "fact_source",
+                            "source_url": final_url,
+                            "canonical_url": final_url,
+                            "title": item["title"],
+                            "summary": item["summary"],
+                            "author": item["publisher"],
+                            "published_at": item["published_at"],
+                            "thumbnail_url": item.get("image_candidate_url"),
+                            "media_kind": "article_link",
+                            "rights_status": "unknown",
+                            "materialization_status": "reference_only",
+                            "hotspot_id": hotspot_id,
+                            "created_by": created_by,
+                        })
                     result["new" if created else "updated"] += 1
                     if not created:
+                        continue
+                    if os.environ.get("HOTSPOT_COMMONS_IMAGE_ENABLED", "0") != "1":
                         continue
                     try:
                         licensed = await _licensed_commons_image(client, item["title"][:80])
@@ -334,25 +337,26 @@ async def fetch_hotspots(
                             db.update_asset_provenance(asset["id"], licensed["description_url"], licensed["license"], licensed["attribution"], hotspot_id)
                             db.link_hotspot_asset(hotspot_id, asset["id"])
                             db.update_asset_semantic_state(asset["id"], "other", "pending", rights_status="licensed")
-                            db.upsert_inspiration_item({
-                                "source_type": "licensed_media",
-                                "source_role": "supporting_visual",
-                                "source_url": licensed["description_url"],
-                                "canonical_url": licensed["description_url"],
-                                "title": f"开放许可补充配图：{item['title']}",
-                                "summary": "按主题检索的开放许可补充画面，不自动视为该新闻事件的现场图片。",
-                                "author": licensed["attribution"],
-                                "thumbnail_url": "/static/" + asset["filepath"],
-                                "media_kind": "image",
-                                "rights_status": "licensed",
-                                "license_name": licensed["license"],
-                                "attribution": licensed["attribution"],
-                                "rights_evidence_url": licensed["description_url"],
-                                "materialization_status": "materialized",
-                                "asset_id": asset["id"],
-                                "hotspot_id": hotspot_id,
-                                "created_by": created_by,
-                            })
+                            if os.environ.get("HOTSPOT_INSPIRATION_SYNC_ENABLED", "0") == "1":
+                                db.upsert_inspiration_item({
+                                    "source_type": "licensed_media",
+                                    "source_role": "supporting_visual",
+                                    "source_url": licensed["description_url"],
+                                    "canonical_url": licensed["description_url"],
+                                    "title": f"开放许可补充配图：{item['title']}",
+                                    "summary": "按主题检索的开放许可补充画面，不自动视为该新闻事件的现场图片。",
+                                    "author": licensed["attribution"],
+                                    "thumbnail_url": "/static/" + asset["filepath"],
+                                    "media_kind": "image",
+                                    "rights_status": "licensed",
+                                    "license_name": licensed["license"],
+                                    "attribution": licensed["attribution"],
+                                    "rights_evidence_url": licensed["description_url"],
+                                    "materialization_status": "materialized",
+                                    "asset_id": asset["id"],
+                                    "hotspot_id": hotspot_id,
+                                    "created_by": created_by,
+                                })
                             db.upsert_hotspot_media({
                                 "hotspot_id": hotspot_id,
                                 "media_kind": "image",
@@ -420,6 +424,10 @@ async def fetch_hotspots(
             root_id = package["signals"][0].get("hotspot_id")
             if not root_id:
                 continue
+            existing = db.get_hotspot_package(int(root_id)) or {}
+            preserved = str(existing.get("package_status") or "new")
+            if preserved not in {"confirmed", "rejected"}:
+                preserved = "new"
             db.update_hotspot_package_metrics(
                 int(root_id),
                 heat_score=package["heat_score"],
@@ -428,7 +436,7 @@ async def fetch_hotspots(
                 logistics_relevance=package["logistics_relevance"],
                 locations=package["locations"],
                 entities=package["entities"],
-                package_status="new",
+                package_status=preserved,
             )
         result["packages"] = len(packages)
         result["signals"] = len(signals)

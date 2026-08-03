@@ -207,14 +207,15 @@ def test_project_status_tracks_job_terminal_and_review_states(tmp_db):
     assert loaded["status"] == "needs_review"
     assert loaded["active_job_id"] == job["id"]
 
-    for terminal in ("succeeded", "failed", "canceled"):
+    expected = {"succeeded": "ready", "failed": "failed", "canceled": "canceled"}
+    for terminal, project_status in expected.items():
         tmp_db.update_video_generation_job(job["id"], status=terminal, stage=terminal)
         loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
-        assert loaded["status"] == "ready"
+        assert loaded["status"] == project_status
         assert loaded["active_job_id"] == job["id"]
 
 
-def test_cancel_pending_job_sets_project_ready(tmp_db):
+def test_cancel_pending_job_sets_project_canceled(tmp_db):
     user_id = _user(tmp_db)
     project, revision = _project_and_revision(tmp_db, user_id)
     job, _ = tmp_db.create_or_get_video_generation_job(
@@ -222,7 +223,7 @@ def test_cancel_pending_job_sets_project_ready(tmp_db):
     )
     tmp_db.request_video_generation_cancel(job["id"], user_id)
     loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
-    assert loaded["status"] == "ready"
+    assert loaded["status"] == "canceled"
     assert loaded["active_job_id"] == job["id"]
 
 

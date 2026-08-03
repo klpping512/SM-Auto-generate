@@ -56,9 +56,10 @@ def test_hotspot_workbench_has_topic_package_master_detail_flow():
     assert "来源信号" in page
     assert "视频素材" in page
     assert "图片素材" in page
-    assert "纯文本" in page
-    assert "确认并入热点库" in page
-    assert "生成视频跟进" in page
+    assert "确认专题事实" in page
+    assert "生成视频跟进" in page or "先准备视频素材" in page
+    assert "can_follow_up_video" in page
+    assert "确认并入热点库" not in page
 
 
 def test_hotspot_workbench_restores_evidence_and_guards_async_selection():

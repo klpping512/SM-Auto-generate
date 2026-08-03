@@ -74,14 +74,31 @@ def _video(package: dict, claim_ids: list[str]) -> dict:
         if scene["scene_role"] in semantic_matching.OWNED_SCENE_ROLES
         and not scene.get("candidates")
     ]
+    # Library-level readiness: both libraries contributing ≥1 candidate is enough
+    # for sample preview. Per-scene gaps stay as soft warnings; formal dual-library
+    # video still requires ≥1 Hook + ≥4 distinct Buffalo mothers elsewhere.
+    hotspot_ready = any(
+        scene.get("candidates")
+        for scene in scenes
+        if scene["scene_role"] in semantic_matching.HOTSPOT_SCENE_ROLES
+    )
+    owned_ready = any(
+        scene.get("candidates")
+        for scene in scenes
+        if scene["scene_role"] in semantic_matching.OWNED_SCENE_ROLES
+    )
     material_gaps = []
-    if hotspot_missing:
+    if not hotspot_ready:
+        material_gaps.append("热点素材库没有可用候选片段")
+    elif hotspot_missing:
         material_gaps.append(
-            f"热点素材未就绪：{len(hotspot_missing)} 个事实分镜没有当前热点的已授权图片或视频片段"
+            f"热点素材未齐：{len(hotspot_missing)} 个事实分镜缺少候选（样本仍可预览）"
         )
-    if owned_missing:
+    if not owned_ready:
+        material_gaps.append("原本素材库没有可用候选片段")
+    elif owned_missing:
         material_gaps.append(
-            f"原本素材未就绪：{len(owned_missing)} 个品牌分镜没有可解释的 Buffalo 自有镜头"
+            f"原本素材未齐：{len(owned_missing)} 个品牌分镜缺少候选（样本仍可预览）"
         )
     return {
         "title": f"南非物流观察｜{title}",
@@ -91,7 +108,7 @@ def _video(package: dict, claim_ids: list[str]) -> dict:
         "watermark": "内部测试｜素材待确认",
         "claim_ids": claim_ids,
         "scenes": scenes,
-        "material_status": "blocked" if material_gaps else "ready",
+        "material_status": "ready" if hotspot_ready and owned_ready else "blocked",
         "material_gaps": material_gaps,
     }
 

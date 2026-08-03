@@ -34,7 +34,17 @@ async def set_dashscope_key(body: dict, user=Depends(require_role(UserRole.ADMIN
     os.environ["DASHSCOPE_API_KEY"] = key
     ai_engine.set_api_key(key)
     db.add_audit_log(user["id"], user["username"], "set_dashscope_key")
-    return {"status": "ok"}
+    return {"status": "ok", "persistence": "runtime_only", "message": "仅本次运行生效（环境变量）"}
+
+
+@router.post("/api/config/mimo-key")
+async def set_mimo_key(body: dict, user=Depends(require_role(UserRole.ADMIN))):
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "Missing key")
+    os.environ["MIMO_API_KEY"] = key
+    db.add_audit_log(user["id"], user["username"], "set_mimo_key")
+    return {"status": "ok", "persistence": "runtime_only", "message": "仅本次运行生效（环境变量）"}
 
 
 @router.post("/api/config/notification")

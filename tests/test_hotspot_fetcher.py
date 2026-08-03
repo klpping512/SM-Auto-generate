@@ -27,7 +27,9 @@ def test_feed_parser_accepts_whitespace_before_xml_declaration():
 
 
 @pytest.mark.asyncio
-async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, tmp_path):
+async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOTSPOT_COMMONS_IMAGE_ENABLED", "1")
+    monkeypatch.setenv("HOTSPOT_INSPIRATION_SYNC_ENABLED", "1")
     image = Image.new("RGB", (32, 32), "blue")
     buf = io.BytesIO(); image.save(buf, "JPEG"); image_bytes = buf.getvalue()
     feed_xml = """<rss><channel><item><title>Durban port operational update</title>
@@ -332,7 +334,8 @@ async def test_cloudflare_challenged_source_is_blocked_not_errored(tmp_db, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_optional_commons_failure_does_not_mark_fact_source_failed(tmp_db, tmp_path):
+async def test_optional_commons_failure_does_not_mark_fact_source_failed(tmp_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOTSPOT_COMMONS_IMAGE_ENABLED", "1")
     feed_xml = """<rss><channel><item><title>South Africa logistics update</title>
       <link>https://gov.za/item</link><description>Durban freight update</description>
     </item></channel></rss>"""

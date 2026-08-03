@@ -60,7 +60,7 @@ def test_three_samples_share_claim_ids_but_use_distinct_structures(tmp_db, tmp_p
     assert 800 <= len(bundle["wechat"]["body"]) <= 1200
     assert bundle["manifest"]["model_usage"]["calls_used"] == 0
     assert bundle["video"]["material_status"] == "blocked"
-    assert any("热点素材" in item for item in bundle["video"]["material_gaps"])
+    assert any("热点素材库" in item for item in bundle["video"]["material_gaps"])
 
     output = tmp_path / bundle["id"]
     assert (output / "video-script.json").is_file()
@@ -69,7 +69,7 @@ def test_three_samples_share_claim_ids_but_use_distinct_structures(tmp_db, tmp_p
     assert (output / "manifest.json").is_file()
 
 
-def test_video_material_status_ready_only_when_both_libraries_have_candidates(tmp_db, tmp_path):
+def test_video_material_status_ready_when_both_libraries_have_candidates(tmp_db, tmp_path):
     import sample_harness
 
     package, user_id = _package(tmp_db, with_brand=True)
@@ -147,7 +147,7 @@ def test_video_material_status_ready_only_when_both_libraries_have_candidates(tm
     )
 
     assert bundle["video"]["material_status"] == "ready"
-    assert bundle["video"]["material_gaps"] == []
+    assert any("未齐" in item for item in bundle["video"]["material_gaps"])
 
 
 def test_missing_brand_evidence_removes_performance_promises(tmp_db, tmp_path):

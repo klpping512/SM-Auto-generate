@@ -14,15 +14,17 @@ SCENE_LABELS = {
     "last_mile": "末端配送",
     "port": "港口作业",
     "border": "口岸/清关",
+    "linehaul": "干线运输",
     "disruption": "道路/异常事件",
-    "cost_risk": "成本与履约风险",
 }
 
 GENERIC_DISALLOWED = (
     "市政", "环卫", "垃圾", "污水", "公园", "野生动物", "治安", "犯罪",
     "政治", "委员会", "证词", "娱乐", "听证会", "体育", "运动会",
+    "主播", "空镜", "综艺", "演唱会", "选举", "议会",
     "municipal", "refuse", "waste", "sewage", "wildlife", "testimony",
-    "commission", "hearing", "sport", "commonwealth",
+    "commission", "hearing", "sport", "commonwealth", "streamer", "vlog",
+    "entertainment", "concert", "election", "parliament",
 )
 
 
@@ -59,7 +61,10 @@ def is_generic_logistics_eligible(event: dict) -> bool:
     if any(term.casefold() in blob for term in GENERIC_DISALLOWED):
         return False
     scenes = set(hook_logistics_scenes(event))
-    return bool(scenes & {"warehouse", "last_mile", "port", "border", "disruption"})
+    # cost_risk is legacy; treat as disruption for matching.
+    if "cost_risk" in scenes:
+        scenes.add("disruption")
+    return bool(scenes & {"warehouse", "last_mile", "port", "border", "linehaul", "disruption"})
 
 
 def recommend_producible_topics(
