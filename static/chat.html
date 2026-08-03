@@ -186,33 +186,91 @@ function quickTopic(topic,btn){
 }
 function autoResize(input){input.style.height='42px';input.style.height=Math.min(input.scrollHeight,112)+'px';}
 
-function hotspotRetrievalMarkup(result){const retrieval=result?.hotspot_retrieval;if(!retrieval||retrieval.status==='not_requested')return '';if(retrieval.status==='matched'){const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');const readiness=retrieval.video?.delivery_readiness;const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';return `<div class="result-warning"><strong>强相关热点 Hook 已匹配</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>正式成片将锁定以上相关 Hook，并使用 Buffalo 自有素材补足可见执行动作。</p><a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;}return `<div class="result-warning" data-discovery-request="${escapeHtml(String(retrieval.request_id||''))}"><strong>文案草稿已生成 · 视频素材补采中</strong><p>${escapeHtml(retrieval.message||'已进入定向采集队列。')}</p><p>视频按钮会在 Hook 就绪后自动开放；可展开详情查看进度。</p></div>`;}
+function hotspotRetrievalMarkup(result){
+  const retrieval=result?.hotspot_retrieval;
+  if(!retrieval||retrieval.status==='not_requested')return '';
+  if(retrieval.status==='matched'){
+    const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
+    const readiness=retrieval.video?.delivery_readiness;
+    const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';
+    return `<div class="result-warning"><strong>强相关热点 Hook 已匹配</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>正式成片将锁定以上相关 Hook，并使用 Buffalo 自有素材补足可见执行动作。</p><a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
+  }
+  if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor')return '';
+  return `<div class="result-warning" data-discovery-request="${escapeHtml(String(retrieval.request_id||''))}"><strong>文案草稿已生成 · 视频素材补采中</strong><p>${escapeHtml(retrieval.message||'已进入定向采集队列。')}</p><p>视频按钮会在 Hook 就绪后自动开放；可展开详情查看进度。</p></div>`;
+}
+
+function funnelDetailsMarkup(funnel){
+  if(!funnel||typeof funnel!=='object')return '';
+  const items=[
+    ['扫描',funnel.scanned],
+    ['场景不匹配',funnel.scene_mismatch],
+    ['相关度不足',funnel.relevance_low],
+    ['不可播放/未确认',funnel.not_playable],
+    ['种类过滤',funnel.kind_filtered],
+    ['会话复用降权',funnel.duplicate_or_recent],
+    ['进入候选',funnel.passed],
+    ['最终锁定',funnel.selected],
+  ];
+  return `<li>漏斗：${items.map(([k,v])=>`${k} ${Number(v||0)}`).join(' · ')}</li>`;
+}
+
+function producibleTopicsMarkup(topics){
+  if(!Array.isArray(topics)||!topics.length)return '';
+  const buttons=topics.slice(0,5).map((item,i)=>{
+    const topic=escapeHtml(item.topic||'');
+    const reason=escapeHtml(item.reason||item.scene_label||'');
+    return `<button type="button" class="btn btn-secondary btn-sm" data-producible-topic="${topic}" onclick="useProducibleTopic(this)">${topic}</button><div class="muted" style="font-size:11px;margin:2px 0 8px">${reason}</div>`;
+  }).join('');
+  return `<div class="producible-topics" style="margin-top:10px"><strong>当前可生产选题</strong><p style="font-size:12px;margin:4px 0 8px">话题太宽泛时请改用下列有 Hook 锚点的选题，而不是等待无关素材补采。</p>${buttons}</div>`;
+}
+
+function useProducibleTopic(btn){
+  const topic=btn?.getAttribute('data-producible-topic')||'';
+  if(!topic)return;
+  const input=document.getElementById('chatInput');
+  if(!input)return;
+  input.value=topic;
+  autoResize(input);input.focus();
+  showToast('已填入可生产选题，发送后将按该事件检索 Hook','info');
+}
 
 function resultStateCard(result,id){
   const state=result?.result_state||'formal_content';
   const map={
     formal_content:{title:'平台内容已生成',reason:'已按当前主题生成可编辑文案。',next:'可发送到编辑器继续修订，或在 Hook 就绪后生成视频。'},
     framework_pending_evidence:{title:'对比框架已生成 · 待补资料',reason:'当前没有真实评测数据，因此未生成服务商排名和推荐结论。',next:'请补充候选服务商、价格/时效来源与测试日期后，再生成正式评测。'},
-    hotspot_retrieval_pending:{title:'文案草稿已生成 · 视频素材补采中',reason:'主题判定为时效热点，正在复扫已授权信源并准备 Hook。',next:'等待 Hook 就绪后，本卡片会自动开放视频按钮。'},
+    hotspot_retrieval_pending:{title:'文案草稿已生成 · 视频素材补采中',reason:'主题已映射到具体时效事件，正在复扫已授权信源并准备 Hook。',next:'等待 Hook 就绪后，本卡片会自动开放视频按钮；也可改用下方可生产选题。'},
+    hook_coverage_gap:{title:'库未覆盖该时效事件',reason:'主题有事件锚点，但当前 Hook 库还没有可播放的强相关片段。',next:'可等待定向补采，或改用下方已可生产的选题。'},
+    hook_gate_blocked:{title:'有候选但未过质量门禁',reason:'库内存在相关素材，但未确认、不可播放、场景不匹配或相关度不足。',next:'请查看漏斗明细，或改用已通过门禁的可生产选题。不要用无关事故画面硬配。'},
+    topic_needs_event_anchor:{title:'话题缺少热点锚点',reason:'这是宽泛常青主题，系统无法保证强相关热点 Hook，因此未启动补采。',next:'请绑定具体事件，或一键选用下方 3–5 个当前可生产选题。'},
     brand_assets_insufficient:{title:'脚本已生成 · 需要补充品牌素材',reason:'热点 Hook 已匹配，但 Buffalo 自有素材还不足以支撑正式成片。',next:'请补充品牌素材后再生成视频。'},
     authenticity_blocked:{title:'内容暂不可使用 · 请补充证据',reason:'输出含无依据评测或服务结论，已降级为对比框架。',next:'补充带来源的资料后重新生成。'},
   };
   const card=map[state]||map.formal_content;
   const details=[];
   if(result?.content_mode)details.push(`意图：${result.content_mode}`);
+  if(result?.failure_class||result?.hotspot_retrieval?.failure_class)details.push(`失败类：${result.failure_class||result.hotspot_retrieval.failure_class}`);
+  if(result?.event_anchor)details.push(`事件锚点：${result.event_anchor.has_event_anchor?'有':'无'}；场景：${(result.event_anchor.logistics_scenes||[]).join(',')||'无'}`);
   if(result?.evidence_state)details.push(`证据：${result.evidence_state.evidence_state||'unknown'}`);
   if(result?.hotspot_retrieval?.request_id)details.push(`补采请求 #${result.hotspot_retrieval.request_id}`);
   if(result?.hotspot_retrieval?.message)details.push(result.hotspot_retrieval.message);
+  const funnelHtml=funnelDetailsMarkup(result?.hotspot_retrieval?.funnel);
+  const topics=result?.producible_topics||result?.hotspot_retrieval?.producible_topics||[];
   const frameworkActions=state==='framework_pending_evidence'||state==='authenticity_blocked'
     ?`<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',0)">编辑对比框架</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',0)">复制框架</button></div>`
     :'';
-  return `<div class="result-state-card" data-result-state="${escapeHtml(state)}"><strong>${escapeHtml(card.title)}</strong><dl class="result-state-meta"><div><dt>当前情况</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>原因</dt><dd>${escapeHtml(card.reason)}</dd></div><div><dt>下一步</dt><dd>${escapeHtml(card.next)}</dd></div></dl>${frameworkActions}${details.length?`<details class="result-state-details"><summary>查看详情</summary><ul>${details.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ul></details>`:''}</div>`;
+  const topicActions=(state==='topic_needs_event_anchor'||state==='hook_coverage_gap'||state==='hook_gate_blocked'||state==='hotspot_retrieval_pending')
+    ?producibleTopicsMarkup(topics):'';
+  return `<div class="result-state-card" data-result-state="${escapeHtml(state)}"><strong>${escapeHtml(card.title)}</strong><dl class="result-state-meta"><div><dt>当前情况</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>原因</dt><dd>${escapeHtml(card.reason)}</dd></div><div><dt>下一步</dt><dd>${escapeHtml(card.next)}</dd></div></dl>${frameworkActions}${topicActions}${details.length||funnelHtml?`<details class="result-state-details"><summary>查看详情</summary><ul>${details.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}${funnelHtml}</ul></details>`:''}</div>`;
 }
 
 function assistantBubbleText(result){
   const state=result?.result_state;
   if(state==='framework_pending_evidence')return '对比框架已生成 · 待补资料';
   if(state==='authenticity_blocked')return '内容暂不可使用 · 请补充证据';
+  if(state==='topic_needs_event_anchor')return '话题缺少热点锚点 · 请选用可生产选题';
+  if(state==='hook_coverage_gap')return '库未覆盖该时效事件';
+  if(state==='hook_gate_blocked')return '有候选但未过质量门禁';
   if(state==='hotspot_retrieval_pending')return '文案草稿已生成 · 视频素材补采中';
   if(state==='brand_assets_insufficient')return '脚本已生成 · 需要补充品牌素材';
   if(result?.outputs?.length>1)return `已按 ${result.outputs.length} 个平台分别生成内容。`;

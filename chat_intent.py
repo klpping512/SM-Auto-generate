@@ -1,12 +1,14 @@
-"""Chat content-mode routing and comparison-evidence assessment.
+"""Chat content-mode routing, comparison evidence, and topic producibility.
 
-Safety-first: comparison intents outrank hotspot intents so evergreen review
-topics never open a hotspot Hook discovery queue.
+Safety-first: comparison intents outrank hotspot intents; broad evergreen topics
+never open a hotspot discovery queue when they lack a concrete event anchor.
 """
 from __future__ import annotations
 
 import re
 from typing import Iterable
+
+import hotspot_lexicon
 
 
 CONTENT_MODES = (
@@ -30,7 +32,16 @@ HOTSPOT_MARKERS = (
 
 EVERGREEN_MARKERS = (
     "怎么选", "如何", "介绍", "指南", "教程", "是什么", "知识", "操作",
-    "流程说明", "服务说明", "百科",
+    "流程说明", "服务说明", "百科", "从0到1", "开拓", "市场进入",
+)
+
+# Concrete event / place anchors beyond mere time words.
+EVENT_ENTITY_MARKERS = (
+    "beitbridge", "德班", "durban", "richards bay", "开普敦", "cape town",
+    "约翰内斯堡", "johannesburg", "r60", "r328", "robertson", "worcester",
+    "swartberg", "n3", "m7", "口岸", "边境", "港口", "port", "封路",
+    "事故", "侧翻", "拥堵", "堵车", "道路中断", "罢工", "洪水", "flood",
+    "load shedding", "eskom", "transnet",
 )
 
 # Fabricated review language that must not appear without evidence.
@@ -76,6 +87,28 @@ def classify_content_mode(text: str, *, context: str = "") -> str:
     return "general_copy"
 
 
+def assess_event_anchor(text: str, *, context: str = "") -> dict:
+    """Decide whether a topic maps to a concrete timely logistics event."""
+    blob = _joined_text([text, context])
+    folded = blob.casefold()
+    time_hits = [marker for marker in HOTSPOT_MARKERS if marker.casefold() in folded]
+    entity_hits = [marker for marker in EVENT_ENTITY_MARKERS if marker.casefold() in folded]
+    logistics_scenes = sorted(hotspot_lexicon.category_profile(blob, mode="topic"))
+    scene_set = set(logistics_scenes)
+    # Need at least one concrete entity/place/disruption term — time words alone
+    # (e.g. "最近物流") are not enough to open discovery.
+    has_event_anchor = bool(entity_hits) or (
+        bool(time_hits) and bool(scene_set & {"port", "border", "disruption"})
+    )
+    return {
+        "has_event_anchor": has_event_anchor,
+        "event_terms": sorted({*time_hits, *entity_hits}, key=str.casefold),
+        "logistics_scenes": logistics_scenes,
+        "time_hits": time_hits,
+        "entity_hits": entity_hits,
+    }
+
+
 def assess_comparison_evidence(
     messages: list[dict] | None = None,
     *,
@@ -118,6 +151,33 @@ def comparison_authenticity_violations(
     return [f"无依据评测表述：{hit}" for hit in hits]
 
 
+def classify_hook_failure(
+    *,
+    content_mode: str,
+    event_anchor: dict | None,
+    hotspot_retrieval: dict | None,
+) -> str | None:
+    """Map retrieval outcome to one of the three failure classes (or None if matched)."""
+    if content_mode == "comparison_research":
+        return None
+    retrieval = hotspot_retrieval or {}
+    status = str(retrieval.get("status") or "")
+    if status == "matched":
+        return None
+    explicit = str(retrieval.get("failure_class") or "").strip()
+    if explicit in {"no_event_anchor", "coverage_gap", "gate_blocked"}:
+        return explicit
+    anchor = event_anchor or {}
+    if content_mode in {"evergreen", "general_copy"} or not anchor.get("has_event_anchor"):
+        return "no_event_anchor"
+    funnel = retrieval.get("funnel") or {}
+    if int(funnel.get("scanned") or 0) > 0 and int(funnel.get("passed") or 0) == 0:
+        return "gate_blocked"
+    if status in {"queued", "pending", "processing", "unmatched", "failed"}:
+        return "coverage_gap"
+    return "coverage_gap"
+
+
 def derive_result_state(
     *,
     content_mode: str,
@@ -125,24 +185,51 @@ def derive_result_state(
     hotspot_retrieval: dict | None,
     authenticity_blocked: bool = False,
     brand_assets_insufficient: bool = False,
+    event_anchor: dict | None = None,
 ) -> str:
     """Collapse chat outcome into one user-facing result_state."""
     if authenticity_blocked:
         return "authenticity_blocked"
     if content_mode == "comparison_research" and evidence_state != "sufficient":
         return "framework_pending_evidence"
+    if content_mode == "comparison_research":
+        return "formal_content"
     retrieval = hotspot_retrieval or {}
     status = str(retrieval.get("status") or "")
-    if status in {"queued", "pending", "processing"}:
-        return "hotspot_retrieval_pending"
-    video = retrieval.get("video") or {}
-    readiness = video.get("delivery_readiness") or {}
-    if brand_assets_insufficient or (
-        status == "matched" and readiness and not readiness.get("delivery_ready", True)
-    ):
-        return "brand_assets_insufficient"
+    failure = classify_hook_failure(
+        content_mode=content_mode,
+        event_anchor=event_anchor,
+        hotspot_retrieval=retrieval,
+    )
+    if status == "matched":
+        video = retrieval.get("video") or {}
+        readiness = video.get("delivery_readiness") or {}
+        if brand_assets_insufficient or (readiness and not readiness.get("delivery_ready", True)):
+            return "brand_assets_insufficient"
+        return "formal_content"
+    if failure == "no_event_anchor" and status in {"", "not_requested"}:
+        return "topic_needs_event_anchor"
+    if failure == "gate_blocked":
+        return "hook_gate_blocked"
+    if status in {"queued", "pending", "processing"} or failure == "coverage_gap":
+        if failure == "coverage_gap" and status == "not_requested":
+            return "hook_coverage_gap"
+        if status in {"queued", "pending", "processing"}:
+            return "hotspot_retrieval_pending"
+        return "hook_coverage_gap"
     return "formal_content"
 
 
+def should_attempt_hook_retrieval(content_mode: str) -> bool:
+    """Evergreen/general may still try generic logistics openers; comparison does not."""
+    return content_mode in {"hotspot", "evergreen", "general_copy"}
+
+
+def should_enqueue_hotspot_discovery(content_mode: str, event_anchor: dict | None) -> bool:
+    """Only concrete timely-event topics may open the discovery queue."""
+    return content_mode == "hotspot" and bool((event_anchor or {}).get("has_event_anchor"))
+
+
 def should_request_hotspot_retrieval(content_mode: str) -> bool:
+    """Backward-compatible alias: historic callers meant 'run Hook retrieval for hotspots'."""
     return content_mode == "hotspot"

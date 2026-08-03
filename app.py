@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import database as db
 import ai_engine
 import chat_intent
+import producible_topics
 import publisher
 import scheduler as sched
 from xhs_cards import pages_from_content, render_carousel
@@ -1401,7 +1402,13 @@ def _compact_topic_evidence(brief: dict, event: dict, scenes: list[dict]) -> dic
     }
 
 
-def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict], str, list[dict]]:
+def _marketing_hook_candidates(
+    brief: dict,
+    limit: int = 8,
+    *,
+    hook_kind: str | None = None,
+    require_scene_overlap: bool = False,
+) -> tuple[list[dict], str, list[dict], dict]:
     """RAG retrieval for marketing hooks, not a claim that every headline proves Buffalo."""
     topic_text = " ".join(str(brief.get(key) or "") for key in ("raw_input", "subject", "angle", "goal"))
     terms = _topic_keywords(topic_text)
@@ -1419,16 +1426,32 @@ def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict],
     all_categories = [int(item["id"]) for item in db.get_kb_categories()]
     kb_context = db.get_kb_context(all_categories, max_docs=4, max_chars=2_000)
     brand_evidence = db.list_brand_evidence(status="confirmed")[:5]
+    funnel = {
+        "scanned": 0,
+        "scene_mismatch": 0,
+        "relevance_low": 0,
+        "not_playable": 0,
+        "kind_filtered": 0,
+        "duplicate_or_recent": 0,
+        "passed": 0,
+        "selected": 0,
+    }
     events_by_hotspot: dict[int, list[dict]] = {}
     for event in db.list_hotspot_event_clips():
-        # AI 对话和自动选题只检索可直接进入成片的 Hook 库，绝不把母片、
-        # 待复核或没有“发生了什么”的旧片段交给内容模型。
+        funnel["scanned"] += 1
+        kind = str(event.get("hook_kind") or "timely_event")
+        if hook_kind and kind != hook_kind:
+            funnel["kind_filtered"] += 1
+            continue
         if not _is_confirmed_renderable_hotspot_hook(event):
+            funnel["not_playable"] += 1
             continue
         events_by_hotspot.setdefault(int(event.get("hotspot_id") or 0), []).append(event)
     candidates = []
     for hotspot in db.list_hotspots(limit=100):
         event_clips = events_by_hotspot.get(int(hotspot["id"]), [])
+        if not event_clips:
+            continue
         # Parent headlines can be a generic daily-news title.  The confirmed
         # Hook evidence is the auditable factual record a customer actually
         # sees, so retrieval must search it as well instead of treating a
@@ -1466,14 +1489,38 @@ def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict],
         # Grounded only in verified fact text — the curator's invented
         # "logistics_question" bridge sentence is excluded from category
         # tagging so it cannot manufacture false topic/event overlap.
-        event_profile = _chat_hook_event_profile(hook_fact_text)
+        event_profile = set()
+        for event in event_clips:
+            scenes = event.get("logistics_scenes") or []
+            if scenes:
+                event_profile.update(str(item) for item in scenes)
+            else:
+                event_profile |= _chat_hook_event_profile(
+                    " ".join(
+                        str(value or "")
+                        for value in (
+                            event.get("title_zh"), event.get("title_en"),
+                            (event.get("evidence") or {}).get("what_happened"),
+                        )
+                    )
+                )
         profile_overlap = len(topic_profile & event_profile)
+        if require_scene_overlap and topic_profile and not profile_overlap:
+            funnel["scene_mismatch"] += 1
+            continue
+        # Broad-only topics (南非/物流 with no logistics category profile) must
+        # not hit random accident Hooks. Topics that already resolved to a
+        # category (cost_risk, warehouse, …) may still use intent_bridge below.
+        if not topic_profile and not specific_terms:
+            funnel["scene_mismatch"] += 1
+            continue
         intent_bridge = 0
         if "cost_risk" in topic_profile and event_profile & {"disruption", "border", "warehouse"}:
             intent_bridge = 12
         if "warehouse" in topic_profile and "border" in event_profile:
             intent_bridge = max(intent_bridge, 12)
         if strict_terms and not specific_direct:
+            funnel["relevance_low"] += 1
             continue
         # A hotspot's coarse type classification alone (kind_in_topics) is
         # not admitted as a qualifying signal — every hotspot in the small
@@ -1482,10 +1529,12 @@ def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict],
         # candidate set. It still contributes a small tie-break score below
         # once a candidate already qualifies on a real signal.
         if not direct and not profile_overlap and not intent_bridge:
+            funnel["relevance_low"] += 1
             continue
         event_fit = 1 if kind_in_topics else 0
         hooks = hotspot_hook_selector.rank_hook_clips(event_clips)
         if not hooks:
+            funnel["relevance_low"] += 1
             continue
         if kind == "strike":
             question = "路线出现变化时，卖家应先核对哪些履约节点？"
@@ -1516,6 +1565,7 @@ def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict],
             "summary": (str(hotspot.get("summary_zh") or hotspot.get("summary") or "") + " " + hook_context_text)[:500],
             "source_url": hotspot.get("source_url"), "published_at": hotspot.get("published_at"),
             "hook_type": "direct" if direct else "contextual", "logistics_signal": kind,
+            "logistics_scenes": sorted(event_profile),
             "relevance": {
                 "level": "strong_direct" if direct else "strong_logistics_context",
                 "reason": (
@@ -1541,8 +1591,10 @@ def _marketing_hook_candidates(brief: dict, limit: int = 8) -> tuple[list[dict],
         key=lambda item: (item["score"], str(item.get("published_at") or ""), int(item["hotspot_id"])),
         reverse=True,
     )
+    limited = candidates[:max(1, limit)] if candidates else []
+    funnel["passed"] = len(limited)
     rag = [{"claim": item.get("claim", "")[:300], "note": item.get("evidence_note", "")[:300]} for item in brand_evidence]
-    return candidates[:max(1, limit)], kb_context, rag
+    return limited, kb_context, rag, funnel
 
 
 def _recommendation_json(content: str, allowed_ids: set[int], limit: int) -> list[dict]:
@@ -1683,7 +1735,7 @@ async def recommend_topic_brief_hotspots(brief_id: str, body: TopicHotspotRecomm
     brief = db.get_topic_brief(brief_id, user["id"])
     if not brief:
         raise HTTPException(404, "选题简报不存在")
-    candidates, kb_context, brand_evidence = _marketing_hook_candidates(brief, limit=12)
+    candidates, kb_context, brand_evidence, _funnel = _marketing_hook_candidates(brief, limit=12)
     if not candidates:
         return {"recommendations": [], "status": "no_relevant_hotspot", "message": "当前热点池没有可作为物流营销引子的事件；可先生成常青内容，但不得伪装为热点。"}
     selected = candidates[:body.limit]
@@ -1702,7 +1754,7 @@ async def autopilot_topic_brief_video(brief_id: str, body: TopicAutoPilotRequest
     brief = db.get_topic_brief(brief_id, user["id"])
     if not brief:
         raise HTTPException(404, "选题简报不存在")
-    candidates, kb_context, brand_evidence = _marketing_hook_candidates(brief, limit=20)
+    candidates, kb_context, brand_evidence, _funnel = _marketing_hook_candidates(brief, limit=20)
     candidates, model_meta = await _model_decide_marketing_hooks(brief, candidates, kb_context, brand_evidence, limit=5)
     chosen = next((item for item in candidates if item.get("can_render_video") and item.get("event_clip_id")), None)
     if not chosen:
@@ -3845,16 +3897,25 @@ def _chat_hook_candidates_debug(candidates: list[dict], recently_used: set[int],
     return debug
 
 
-async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: str = "") -> dict:
+async def _retrieve_confirmed_chat_hooks(
+    topic: str,
+    user_id: int,
+    session_id: str = "",
+    *,
+    content_mode: str = "hotspot",
+    event_anchor: dict | None = None,
+) -> dict:
     """Let the deployed internal planner retrieve only confirmed, renderable Hooks.
 
-    Chat never downloads a video directly.  If the current Hook library cannot
-    support the topic, it creates a durable targeted-collection request for the
-    three-day intake worker instead of pretending a loosely related headline fits.
+    Chat never downloads a video directly.  Broad topics without an event anchor
+    only try audited generic logistics openers and never enqueue discovery.
+    Concrete timely topics may open a targeted-collection request when the
+    Hook library cannot support them.
     """
     normalized_topic = " ".join(str(topic or "").split())[:300]
     if not normalized_topic:
-        return {"status": "not_requested", "hooks": []}
+        return {"status": "not_requested", "hooks": [], "failure_class": "no_event_anchor"}
+    anchor = event_anchor or chat_intent.assess_event_anchor(normalized_topic)
     brief = {
         "id": f"chat-{hashlib.sha256(normalized_topic.encode()).hexdigest()[:16]}",
         "raw_input": normalized_topic,
@@ -3862,7 +3923,14 @@ async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: s
         "angle": normalized_topic[:180],
         "goal": "为 Buffalo 物流内容选择已确认热点 Hook",
     }
-    candidates, kb_context, brand_evidence = _marketing_hook_candidates(brief, limit=8)
+    use_generic = not anchor.get("has_event_anchor")
+    hook_kind = "generic_logistics" if use_generic else "timely_event"
+    candidates, kb_context, brand_evidence, funnel = _marketing_hook_candidates(
+        brief,
+        limit=8,
+        hook_kind=hook_kind,
+        require_scene_overlap=use_generic,
+    )
     # 同一聊天 session 内不应连续把同一段 Hook 当开场：对近期已用过的候选
     # 降权（不排除），素材库很小时仍能在没有更优选项时复用。
     recently_used = db.recent_session_hook_event_ids(session_id, user_id) if session_id else set()
@@ -3874,6 +3942,7 @@ async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: s
             }
             if hook_event_ids & recently_used:
                 item["score"] = item.get("score", 0) - 25
+                funnel["duplicate_or_recent"] = int(funnel.get("duplicate_or_recent") or 0) + 1
         candidates.sort(
             key=lambda item: (item["score"], str(item.get("published_at") or ""), int(item["hotspot_id"])),
             reverse=True,
@@ -3888,6 +3957,7 @@ async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: s
             if not selected_hooks:
                 continue
             selected_event_ids = {int(hook["event_clip_id"]) for hook in selected_hooks}
+            funnel["selected"] = len(selected_event_ids)
             hooks = [{
                 "event_clip_id": hook.get("event_clip_id"),
                 "asset_id": hook.get("asset_id"),
@@ -3905,6 +3975,9 @@ async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: s
             delivery_readiness = _chat_video_delivery_readiness(normalized_topic, locked_events)
             return {
                 "status": "matched", "topic": normalized_topic, "hooks": hooks, "model": model_meta,
+                "failure_class": None,
+                "event_anchor": anchor,
+                "funnel": funnel,
                 "relevance": item.get("relevance") or {
                     "level": "strong", "reason": "内置模型确认该 Hook 可直接解释当前物流问题。",
                 },
@@ -3921,11 +3994,62 @@ async def _retrieve_confirmed_chat_hooks(topic: str, user_id: int, session_id: s
                     "已由内置模型锁定一段相关、已确认 Hook；成片会以该真实现场开场。"
                 ),
             }
+
+    ready_events = [
+        event for event in db.list_hotspot_event_clips()
+        if _is_confirmed_renderable_hotspot_hook(event)
+    ]
+    hotspots_by_id = {
+        int(item["id"]): item
+        for item in db.list_hotspots(limit=200)
+    }
+    producible = producible_topics.recommend_producible_topics(
+        ready_events, limit=5, hotspots_by_id=hotspots_by_id,
+    )
+
+    if use_generic or not chat_intent.should_enqueue_hotspot_discovery(content_mode, anchor):
+        failure = "no_event_anchor" if use_generic else (
+            "gate_blocked" if int(funnel.get("scanned") or 0) > 0 and int(funnel.get("passed") or 0) == 0
+            else "coverage_gap"
+        )
+        message = {
+            "no_event_anchor": (
+                "当前话题缺少具体热点事件锚点，不能保证强相关 Hook；"
+                "未启动热点补采。请选择下方可生产选题，或补充口岸/港口/道路等具体事件。"
+            ),
+            "gate_blocked": (
+                "库内有候选 Hook，但未通过确认/可播/场景相关度门禁；"
+                "不会用无关事故画面硬配成片。请查看漏斗或改用可生产选题。"
+            ),
+            "coverage_gap": (
+                "主题需要时效事件 Hook，但当前库未覆盖；"
+                "因缺少可定向补采的条件或尚未命中，请改用可生产选题。"
+            ),
+        }.get(failure, "当前没有可用的强相关 Hook。")
+        return {
+            "status": "not_requested",
+            "topic": normalized_topic,
+            "hooks": [],
+            "request_id": None,
+            "video": {"status": "disabled"},
+            "failure_class": failure,
+            "event_anchor": anchor,
+            "funnel": funnel,
+            "producible_topics": producible,
+            "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
+            "reason": failure,
+            "message": message,
+        }
+
     request = db.enqueue_hotspot_discovery_request(normalized_topic, user_id)
     refresh_started = sched.request_targeted_hotspot_refresh()
     return {
         "status": "queued", "topic": normalized_topic, "hooks": [], "request_id": request["id"],
         "video": {"status": "disabled"},
+        "failure_class": "coverage_gap",
+        "event_anchor": anchor,
+        "funnel": funnel,
+        "producible_topics": producible,
         "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
         "message": (
             "当前没有与该主题相关且可播放的已确认热点 Hook；"
@@ -4070,6 +4194,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         (str(message["content"]).strip() for message in reversed(messages) if message["role"] == "user"), ""
     )
     content_mode = chat_intent.classify_content_mode(latest_topic, context=req.context or "")
+    event_anchor = chat_intent.assess_event_anchor(latest_topic, context=req.context or "")
     evidence = chat_intent.assess_comparison_evidence(
         messages, topic=latest_topic, context=req.context or "",
     )
@@ -4084,13 +4209,22 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
             "message": "对比评测缺少实测资料，未启动热点 Hook 补采。",
             "hooks": [],
             "video": {"status": "disabled"},
+            "failure_class": None,
+            "event_anchor": event_anchor,
+            "producible_topics": [],
         }
         outputs = ai_engine.build_comparison_framework(latest_topic, platforms, evidence)
     else:
         hotspot_task = None
-        if chat_intent.should_request_hotspot_retrieval(content_mode):
+        if chat_intent.should_attempt_hook_retrieval(content_mode):
             hotspot_task = asyncio.create_task(
-                _retrieve_confirmed_chat_hooks(latest_topic, int(user["id"]), session_id=req.session_id)
+                _retrieve_confirmed_chat_hooks(
+                    latest_topic,
+                    int(user["id"]),
+                    session_id=req.session_id,
+                    content_mode=content_mode,
+                    event_anchor=event_anchor,
+                )
             )
         else:
             hotspot_retrieval = {
@@ -4099,6 +4233,9 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
                 "message": "当前主题不需要热点 Hook 补采。",
                 "hooks": [],
                 "video": {"status": "disabled"},
+                "failure_class": None,
+                "event_anchor": event_anchor,
+                "producible_topics": [],
             }
         content_task = asyncio.create_task(ai_engine.chat_platforms(
             messages=messages,
@@ -4123,6 +4260,9 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
                     "message": "评测结论缺少证据，已降级为对比框架，未启动热点补采。",
                     "hooks": [],
                     "video": {"status": "disabled"},
+                    "failure_class": None,
+                    "event_anchor": event_anchor,
+                    "producible_topics": [],
                 }
 
     for item in outputs:
@@ -4142,6 +4282,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         hotspot_retrieval=hotspot_retrieval,
         authenticity_blocked=authenticity_blocked,
         brand_assets_insufficient=brand_assets_insufficient,
+        event_anchor=event_anchor,
     )
     first = outputs[0]
     context_content = "\n\n".join(
@@ -4156,6 +4297,9 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "content_mode": content_mode,
         "result_state": result_state,
         "evidence_state": evidence,
+        "event_anchor": event_anchor,
+        "failure_class": (hotspot_retrieval or {}).get("failure_class"),
+        "producible_topics": (hotspot_retrieval or {}).get("producible_topics") or [],
     }
 
 
@@ -4217,6 +4361,31 @@ async def archive_misrouted_comparison_discovery(user=Depends(require_role(UserR
         detail=f"count={len(cancelled)}",
     )
     return {"cancelled": cancelled, "count": len(cancelled)}
+
+
+@app.post("/api/hotspot-events/{event_id}/hook-kind")
+async def set_hotspot_event_hook_kind(event_id: int, body: dict, user=Depends(require_role(UserRole.ADMIN))):
+    """Admin: mark a confirmed Hook as timely_event or generic_logistics."""
+    event = db.get_hotspot_event_clip(int(event_id))
+    if not event:
+        raise HTTPException(404, "Hook 不存在")
+    kind = str((body or {}).get("hook_kind") or "").strip()
+    scenes = (body or {}).get("logistics_scenes")
+    if scenes is None:
+        scenes = producible_topics.hook_logistics_scenes(event)
+    if kind == "generic_logistics" and not producible_topics.is_generic_logistics_eligible({
+        **event, "logistics_scenes": scenes,
+    }):
+        raise HTTPException(400, "该 Hook 不适合作为通用物流开场（疑似市政/政治/体育等）")
+    try:
+        updated = db.update_hotspot_event_hook_kind(
+            int(event_id), hook_kind=kind, logistics_scenes=list(scenes or []),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.add_audit_log(user["id"], user["username"], "set_hotspot_event_hook_kind",
+                     target=str(event_id), detail=kind)
+    return {"event": updated}
 
 
 def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:

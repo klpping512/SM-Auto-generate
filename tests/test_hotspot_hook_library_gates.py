@@ -151,7 +151,10 @@ def test_chat_queues_targeted_collection_when_confirmed_hook_library_has_no_matc
     client = TestClient(app.app)
     token = client.post("/api/auth/login", json={"username": "chat-editor", "password": "pw12345"}).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([], "", []))
+    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([], "", [], {
+        "scanned": 0, "scene_mismatch": 0, "relevance_low": 0, "not_playable": 0,
+        "kind_filtered": 0, "duplicate_or_recent": 0, "passed": 0, "selected": 0,
+    }))
     refresh_calls = []
     monkeypatch.setattr(app.sched, "request_targeted_hotspot_refresh", lambda: refresh_calls.append(True) or True)
 
@@ -183,7 +186,10 @@ def test_chat_uses_latest_user_question_as_copy_topic_when_no_quick_topic_is_sel
     client = TestClient(app.app)
     token = client.post("/api/auth/login", json={"username": "chat-topic-editor", "password": "pw12345"}).json()["access_token"]
     captured = {}
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([], "", []))
+    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([], "", [], {
+        "scanned": 0, "scene_mismatch": 0, "relevance_low": 0, "not_playable": 0,
+        "kind_filtered": 0, "duplicate_or_recent": 0, "passed": 0, "selected": 0,
+    }))
     monkeypatch.setattr(app.sched, "request_targeted_hotspot_refresh", lambda: False)
 
     async def generated(**kwargs):
@@ -219,7 +225,7 @@ def test_chat_retrieval_locks_two_non_overlapping_hooks_from_one_parent(tmp_db, 
     async def decided(*_args, **_kwargs):
         return [candidate], {"used": True}
 
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", []))
+    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", [], {"scanned":1,"passed":1,"selected":0,"scene_mismatch":0,"relevance_low":0,"not_playable":0,"kind_filtered":0,"duplicate_or_recent":0}))
     monkeypatch.setattr(app, "_model_decide_marketing_hooks", decided)
 
     result = asyncio.run(app._retrieve_confirmed_chat_hooks("南非港口拥堵会怎样影响跨境订单", 1))
@@ -250,7 +256,7 @@ def test_chat_retrieval_uses_one_confirmed_hook_when_no_second_clip_exists(tmp_d
     async def decided(*_args, **_kwargs):
         return [candidate], {"used": True}
 
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", []))
+    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", [], {"scanned":1,"passed":1,"selected":0,"scene_mismatch":0,"relevance_low":0,"not_playable":0,"kind_filtered":0,"duplicate_or_recent":0}))
     monkeypatch.setattr(app, "_model_decide_marketing_hooks", decided)
 
     result = asyncio.run(app._retrieve_confirmed_chat_hooks("南非港口拥堵会怎样影响跨境订单", 1))
@@ -287,7 +293,7 @@ def test_chat_retrieval_marks_delivery_ready_before_user_clicks_generate(tmp_db,
     async def decided(_brief, candidates, *_args, **_kwargs):
         return candidates[:1], {"used": False, "fallback": "test"}
 
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", []))
+    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_args, **_kwargs: ([candidate], "", [], {"scanned":1,"passed":1,"selected":0,"scene_mismatch":0,"relevance_low":0,"not_playable":0,"kind_filtered":0,"duplicate_or_recent":0}))
     monkeypatch.setattr(app, "_model_decide_marketing_hooks", decided)
     result = asyncio.run(app._retrieve_confirmed_chat_hooks("南非港口拥堵会怎样影响跨境订单", 1))
 
@@ -320,7 +326,8 @@ def test_chat_retrieval_can_reuse_the_same_hook_for_two_relevant_logistics_topic
     assert second["video"]["hotspot_event_ids"] == expected_ids
 
 
-def test_chat_uses_border_event_as_context_without_relabeling_it_as_warehouse_news(tmp_db, monkeypatch):
+def test_chat_broad_warehouse_intro_does_not_hard_match_border_accident(tmp_db, monkeypatch):
+    """宽泛常青题不能再用边境事故硬配成片；应提示缺锚点并推荐可生产选题。"""
     import asyncio
     import app
 
@@ -331,11 +338,17 @@ def test_chat_uses_border_event_as_context_without_relabeling_it_as_warehouse_ne
 
     monkeypatch.setattr(app, "_model_decide_marketing_hooks", decided)
 
-    result = asyncio.run(app._retrieve_confirmed_chat_hooks("帮我生成一个关于南非海外仓的介绍视频", None))
+    result = asyncio.run(app._retrieve_confirmed_chat_hooks(
+        "帮我生成一个关于南非海外仓的介绍视频",
+        None,
+        content_mode="evergreen",
+        event_anchor=app.chat_intent.assess_event_anchor("帮我生成一个关于南非海外仓的介绍视频"),
+    ))
 
-    assert result["status"] == "matched"
-    assert result["video"]["status"] == "ready"
-    assert "边境" in result["hooks"][0]["title"]
+    assert result["status"] == "not_requested"
+    assert result["failure_class"] == "no_event_anchor"
+    assert result.get("request_id") in (None, "")
+    assert "未启动" in (result.get("message") or "") or result.get("producible_topics") is not None
 
 
 def test_chat_retrieval_matches_confirmed_hook_evidence_when_parent_headline_is_generic(tmp_db, monkeypatch):
@@ -371,7 +384,7 @@ def test_chat_hook_candidates_require_renderable_hooks(tmp_db):
         "snapshot_sha256": "no-render-hook",
     })
 
-    candidates, _kb, _rag = app._marketing_hook_candidates({
+    candidates, _kb, _rag, _funnel = app._marketing_hook_candidates({
         "raw_input": "南非物流突发延误怎么办", "subject": "南非物流突发延误怎么办",
         "angle": "备用供应链方案", "goal": "为 Buffalo 物流内容选择已确认热点 Hook",
     }, limit=8)
@@ -396,7 +409,7 @@ def test_chat_hook_candidates_do_not_reuse_border_for_cost_risk_when_better_disr
         snapshot="cost-risk-accident",
     )
 
-    candidates, _kb, _rag = app._marketing_hook_candidates({
+    candidates, _kb, _rag, _funnel = app._marketing_hook_candidates({
         "raw_input": "低价货代可能更贵，讲清南非物流最容易亏钱的 4 个坑",
         "subject": "低价货代可能更贵",
         "angle": "南非物流亏钱风险", "goal": "为 Buffalo 物流内容选择已确认热点 Hook",

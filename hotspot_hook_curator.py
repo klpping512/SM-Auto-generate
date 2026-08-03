@@ -269,6 +269,8 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
             "location": None,
             "entities": [],
             "keywords": _derive_hook_keywords(f"{happened} {title}"),
+            "logistics_scenes": _derive_hook_keywords(f"{happened} {title}"),
+            "hook_kind": "timely_event",
             "confidence": round(confidence, 3),
             "review_status": "confirmed",
             "segments": selected,

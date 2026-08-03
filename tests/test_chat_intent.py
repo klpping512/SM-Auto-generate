@@ -187,7 +187,14 @@ def test_ai_chat_comparison_with_evidence_allows_formal_path(tmp_db, monkeypatch
 
 def test_ai_chat_hotspot_topic_still_queues_discovery(tmp_db, monkeypatch):
     client, headers = _auth_client(tmp_db, "hot-editor")
-    monkeypatch.setattr(app, "_marketing_hook_candidates", lambda *_a, **_k: ([], "", []))
+    empty_funnel = {
+        "scanned": 0, "scene_mismatch": 0, "relevance_low": 0, "not_playable": 0,
+        "kind_filtered": 0, "duplicate_or_recent": 0, "passed": 0, "selected": 0,
+    }
+    monkeypatch.setattr(
+        app, "_marketing_hook_candidates",
+        lambda *_a, **_k: ([], "", [], empty_funnel),
+    )
     refresh_calls = []
     monkeypatch.setattr(app.sched, "request_targeted_hotspot_refresh", lambda: refresh_calls.append(True) or True)
 
@@ -204,19 +211,65 @@ def test_ai_chat_hotspot_topic_still_queues_discovery(tmp_db, monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["content_mode"] == "hotspot"
+    assert payload["event_anchor"]["has_event_anchor"] is True
     assert payload["result_state"] == "hotspot_retrieval_pending"
     assert payload["hotspot_retrieval"]["status"] == "queued"
+    assert payload["failure_class"] == "coverage_gap"
     assert refresh_calls == [True]
     assert tmp_db.list_hotspot_discovery_requests(status="pending")[0]["topic"] == topic
 
 
-def test_ai_chat_evergreen_skips_discovery(tmp_db, monkeypatch):
+def test_ai_chat_broad_market_topic_needs_event_anchor_not_discovery(tmp_db, monkeypatch):
+    client, headers = _auth_client(tmp_db, "market-editor")
+    empty_funnel = {
+        "scanned": 2, "scene_mismatch": 1, "relevance_low": 0, "not_playable": 0,
+        "kind_filtered": 1, "duplicate_or_recent": 0, "passed": 0, "selected": 0,
+    }
+    monkeypatch.setattr(
+        app, "_marketing_hook_candidates",
+        lambda *_a, **_k: ([], "", [], empty_funnel),
+    )
+    refresh_calls = []
+    monkeypatch.setattr(app.sched, "request_targeted_hotspot_refresh", lambda: refresh_calls.append(True) or True)
+
+    async def generated(**_kwargs):
+        return [{"platform": "xiaohongshu", "title": "市场开拓", "body": "先核实节点。", "hashtags": [], "image_pages": []}]
+
+    monkeypatch.setattr(ai_engine, "chat_platforms", generated)
+    topic = "从0到1开拓南非市场"
+    response = client.post("/api/ai/chat", headers=headers, json={
+        "messages": [{"role": "user", "content": topic}],
+        "platforms": ["xiaohongshu"],
+        "topic": topic,
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["content_mode"] == "evergreen"
+    assert payload["event_anchor"]["has_event_anchor"] is False
+    assert payload["result_state"] == "topic_needs_event_anchor"
+    assert payload["hotspot_retrieval"]["status"] == "not_requested"
+    assert payload["failure_class"] == "no_event_anchor"
+    assert refresh_calls == []
+    assert tmp_db.list_hotspot_discovery_requests() == []
+    assert "补采" not in (payload["hotspot_retrieval"].get("message") or "") or "未启动" in payload["hotspot_retrieval"]["message"]
+    assert payload["hotspot_retrieval"].get("funnel", {}).get("passed") == 0
+
+
+def test_ai_chat_evergreen_tries_generic_hooks_but_skips_discovery(tmp_db, monkeypatch):
     client, headers = _auth_client(tmp_db, "ever-editor")
     called = {"hooks": 0}
 
     async def fake_hooks(*_a, **_k):
         called["hooks"] += 1
-        return {"status": "queued"}
+        return {
+            "status": "not_requested",
+            "failure_class": "no_event_anchor",
+            "hooks": [],
+            "video": {"status": "disabled"},
+            "producible_topics": [{"topic": "德班港拥堵最新：港口拥堵时发货前要核对什么？", "scene": "port"}],
+            "funnel": {"scanned": 1, "passed": 0, "selected": 0},
+            "message": "当前话题缺少具体热点事件锚点，不能保证强相关 Hook；未启动热点补采。",
+        }
 
     async def generated(**_kwargs):
         return [{"platform": "xiaohongshu", "title": "介绍", "body": "先核实再写。", "hashtags": [], "image_pages": []}]
@@ -230,9 +283,50 @@ def test_ai_chat_evergreen_skips_discovery(tmp_db, monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["content_mode"] == "evergreen"
+    assert called["hooks"] == 1
     assert payload["hotspot_retrieval"]["status"] == "not_requested"
-    assert called["hooks"] == 0
-    assert payload["result_state"] == "formal_content"
+    assert payload["result_state"] == "topic_needs_event_anchor"
+    assert payload["producible_topics"]
+
+
+def test_assess_event_anchor_and_result_states():
+    broad = chat_intent.assess_event_anchor("从0到1开拓南非市场")
+    assert broad["has_event_anchor"] is False
+    port = chat_intent.assess_event_anchor("德班港拥堵最新")
+    assert port["has_event_anchor"] is True
+    assert chat_intent.derive_result_state(
+        content_mode="evergreen",
+        evidence_state="insufficient",
+        hotspot_retrieval={"status": "not_requested", "failure_class": "no_event_anchor"},
+        event_anchor=broad,
+    ) == "topic_needs_event_anchor"
+
+
+def test_producible_topics_cluster_ready_hooks():
+    import producible_topics
+
+    events = [
+        {
+            "id": 1, "hotspot_id": 10, "review_status": "confirmed", "clip_status": "ready",
+            "clip_path": "/x.mp4", "title_zh": "Beitbridge 卡车排队",
+            "logistics_scenes": ["border"], "evidence": {"logistics_question": "口岸排队会影响清关吗？"},
+        },
+        {
+            "id": 2, "hotspot_id": 11, "review_status": "confirmed", "clip_status": "ready",
+            "clip_path": "/y.mp4", "title_zh": "德班港船期延误",
+            "logistics_scenes": ["port"], "evidence": {},
+        },
+        {
+            "id": 3, "hotspot_id": 12, "review_status": "confirmed", "clip_status": "ready",
+            "clip_path": "/z.mp4", "title_zh": "听证会证词",
+            "logistics_scenes": ["disruption"], "evidence": {"what_happened": "委员会听证会"},
+        },
+    ]
+    recs = producible_topics.recommend_producible_topics(events, limit=5)
+    assert 2 <= len(recs) <= 5
+    assert any("Beitbridge" in item["topic"] or "口岸" in item["topic"] for item in recs)
+    assert producible_topics.is_generic_logistics_eligible(events[0])
+    assert not producible_topics.is_generic_logistics_eligible(events[2])
 
 
 def test_discovery_status_api_and_misrouted_archive(tmp_db):
@@ -274,11 +368,15 @@ def test_chat_ui_uses_result_state_card_without_conflicting_peer_status():
     assert "当前情况" in page and "原因" in page and "下一步" in page
     assert "assistantBubbleText" in page
     assert "framework_pending_evidence" in page
+    assert "topic_needs_event_anchor" in page
+    assert "producibleTopicsMarkup" in page
+    assert "funnelDetailsMarkup" in page
     assert "promptComparisonEvidence" in page
     assert "/api/hotspot-discovery-requests/" in page
     # Hotspot banner must not show for not_requested / framework-only paths.
     assert "retrieval.status==='not_requested'" in page.replace(" ", "")
     assert "showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'" in page.replace(" ", "")
+    assert "failure_class==='no_event_anchor'" in page.replace(" ", "")
     # Editor transfer carries evidence gate.
     transfer = Path("static/editor-transfer.js").read_text(encoding="utf-8")
     assert "evidence_status" in transfer

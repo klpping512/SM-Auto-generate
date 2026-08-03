@@ -852,6 +852,8 @@ def init_db():
         _ensure_column(conn, "hotspot_event_clips", "clip_status", "TEXT NOT NULL DEFAULT 'pending'")
         _ensure_column(conn, "hotspot_event_clips", "clip_error", "TEXT")
         _ensure_column(conn, "hotspot_event_clips", "library_origin", "TEXT NOT NULL DEFAULT 'hotspot_event'")
+        _ensure_column(conn, "hotspot_event_clips", "hook_kind", "TEXT NOT NULL DEFAULT 'timely_event'")
+        _ensure_column(conn, "hotspot_event_clips", "logistics_scenes_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "model_role_configs", "request_options", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(conn, "hotspot_media", "intake_title", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "hotspot_media", "intake_summary", "TEXT NOT NULL DEFAULT ''")
@@ -3780,19 +3782,26 @@ def replace_hotspot_event_clips(asset_id: int, hotspot_id: int, events: list[dic
             duration_ms = end_ms - start_ms
             first_segment = next((item for item in event.get("segments", []) if item.get("thumbnail_path")), None)
             evidence = {"segments": len(event.get("segments", [])), **dict(event.get("evidence") or {})}
+            hook_kind = str(event.get("hook_kind") or "timely_event").strip() or "timely_event"
+            if hook_kind not in {"timely_event", "generic_logistics"}:
+                hook_kind = "timely_event"
+            logistics_scenes = event.get("logistics_scenes") or []
+            if not isinstance(logistics_scenes, list):
+                logistics_scenes = []
             cur = conn.execute(
                 """INSERT INTO hotspot_event_clips
                    (asset_id,hotspot_id,event_index,start_ms,end_ms,title_zh,title_en,location,
                    entities_json,keywords_json,evidence_json,confidence,review_status,duration_ms,
-                    thumbnail_path,clip_status,library_origin)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    thumbnail_path,clip_status,library_origin,hook_kind,logistics_scenes_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (asset_id, hotspot_id, event["event_index"], start_ms, end_ms,
                  event["title_zh"], event["title_en"], event.get("location"),
                  json.dumps(event.get("entities", []), ensure_ascii=False),
                  json.dumps(event.get("keywords", []), ensure_ascii=False),
                  json.dumps(evidence, ensure_ascii=False),
                  event.get("confidence", 0), event.get("review_status", "review_required"),
-                 duration_ms, (first_segment or {}).get("thumbnail_path"), "pending", "hotspot_event"),
+                 duration_ms, (first_segment or {}).get("thumbnail_path"), "pending", "hotspot_event",
+                 hook_kind, json.dumps(logistics_scenes, ensure_ascii=False)),
             )
             event_id = cur.lastrowid
             conn.execute(
@@ -3825,9 +3834,11 @@ def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None
             row["virtual_asset_id"] = row.get("virtual_asset_id") or f"hotspot-event-{row['id']}"
             row["duration_ms"] = int(row.get("duration_ms") or (row["end_ms"] - row["start_ms"]))
             row["library_origin"] = row.get("library_origin") or "hotspot_event"
+            row["hook_kind"] = row.get("hook_kind") or "timely_event"
             row["entities"] = json.loads(row.pop("entities_json") or "[]")
             row["keywords"] = json.loads(row.pop("keywords_json") or "[]")
             row["evidence"] = json.loads(row.pop("evidence_json") or "{}")
+            row["logistics_scenes"] = json.loads(row.pop("logistics_scenes_json") or "[]")
         return rows
 
 
@@ -3943,6 +3954,63 @@ def mark_hotspot_discovery_request_matched(request_ids: list[int], media_id: int
 def get_hotspot_event_clip(event_clip_id: int) -> dict | None:
     items = list_hotspot_event_clips()
     return next((item for item in items if int(item["id"]) == int(event_clip_id)), None)
+
+
+def update_hotspot_event_hook_kind(
+    event_clip_id: int,
+    *,
+    hook_kind: str,
+    logistics_scenes: list[str] | None = None,
+) -> dict | None:
+    """Mark a Hook as timely_event or generic_logistics opener."""
+    kind = str(hook_kind or "timely_event").strip() or "timely_event"
+    if kind not in {"timely_event", "generic_logistics"}:
+        raise ValueError("hook_kind 必须是 timely_event 或 generic_logistics")
+    fields = {
+        "hook_kind": kind,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if logistics_scenes is not None:
+        fields["logistics_scenes_json"] = json.dumps(
+            [str(item) for item in logistics_scenes if item],
+            ensure_ascii=False,
+        )
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE hotspot_event_clips SET {','.join(f'{key}=?' for key in fields)} WHERE id=?",
+            (*fields.values(), int(event_clip_id)),
+        )
+    return get_hotspot_event_clip(int(event_clip_id))
+
+
+def backfill_hotspot_event_logistics_scenes(limit: int = 500) -> int:
+    """Fill empty logistics_scenes_json from fact text for older Hooks."""
+    import hotspot_lexicon
+
+    updated = 0
+    for event in list_hotspot_event_clips():
+        if updated >= limit:
+            break
+        if event.get("logistics_scenes"):
+            continue
+        fact = " ".join(
+            str(value or "")
+            for value in (
+                event.get("title_zh"),
+                event.get("title_en"),
+                (event.get("evidence") or {}).get("what_happened"),
+            )
+        )
+        scenes = sorted(hotspot_lexicon.category_profile(fact, mode="event"))
+        if not scenes:
+            continue
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE hotspot_event_clips SET logistics_scenes_json=?,updated_at=datetime('now') WHERE id=?",
+                (json.dumps(scenes, ensure_ascii=False), int(event["id"])),
+            )
+        updated += 1
+    return updated
 
 
 def update_hotspot_event_clip_media(event_clip_id: int, clip_path: str | None,
