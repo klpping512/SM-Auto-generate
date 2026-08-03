@@ -3713,7 +3713,8 @@ async def media_capabilities(user=Depends(get_current_user)):
     media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
     tts_ok = bool(result["mimo_api_key"] or (result["tts_fallback_enabled"] and result["dashscope_key"]))
     result["ready"] = media_ok and tts_ok
-    result["voices"] = sorted(video_renderer.VOICES)
+    result["voice_options"] = video_renderer.tts_voice_options()
+    result["voices"] = [item["id"] for item in result["voice_options"]]
     return result
 
 
@@ -3725,7 +3726,13 @@ async def sqlite_health(user=Depends(require_role(UserRole.ADMIN))):
 
 async def _run_video_job(job_id: str):
     async with video_render_semaphore:
-        await asyncio.to_thread(video_renderer.render_job, job_id, STATIC_DIR)
+        job = await asyncio.to_thread(db.get_render_job, job_id)
+        script = (job or {}).get("script") or {}
+        provider = str(script.get("tts_provider") or os.environ.get("TTS_PROVIDER", "mimo") or "mimo")
+        await asyncio.to_thread(
+            video_renderer.render_job, job_id, STATIC_DIR,
+            None, (1080, 1920), None, provider,
+        )
 
 
 @app.post("/api/douyin/render")
@@ -3733,9 +3740,6 @@ async def create_douyin_render(body: dict, user=Depends(get_current_user)):
     caps = media_assets.capabilities()
     if not caps["ffmpeg"] or not caps["ffprobe"]:
         raise HTTPException(503, "未安装 FFmpeg/ffprobe")
-    if not os.environ.get("DASHSCOPE_API_KEY"):
-        raise HTTPException(503, "未配置百炼 API Key")
-    voice = str(body.get("voice") or "")
     if str(body.get("source") or "") == "safe_fallback":
         raise HTTPException(409, "AI 服务降级提示不能生成视频，请等待正式文案生成成功后重试")
     target_duration_ms = int(
@@ -3744,6 +3748,15 @@ async def create_douyin_render(body: dict, user=Depends(get_current_user)):
     )
     if not 50_000 <= target_duration_ms <= 90_000:
         raise HTTPException(400, "生产视频必须在 50–90 秒之间")
+    scene_count = len([
+        scene for scene in (body.get("scenes") or []) if isinstance(scene, dict)
+    ])
+    if not video_renderer.FORMAL_MIN_SCENES <= scene_count <= video_renderer.FORMAL_MAX_SCENES:
+        raise HTTPException(
+            400,
+            f"正式生产需要 {video_renderer.FORMAL_MIN_SCENES}–"
+            f"{video_renderer.FORMAL_MAX_SCENES} 个完整分镜",
+        )
     voiceover_chars = sum(
         len(str(scene.get("voiceover") or "").strip())
         for scene in (body.get("scenes") or []) if isinstance(scene, dict)
@@ -3754,17 +3767,26 @@ async def create_douyin_render(body: dict, user=Depends(get_current_user)):
             409,
             f"旁白仅 {voiceover_chars} 字，无法支撑 {target_duration_ms // 1000} 秒正式成片；请先生成完整脚本",
         )
+    try:
+        tts_provider, voice = video_renderer.resolve_tts_selection(
+            body.get("tts_provider"), body.get("voice"), strict=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if tts_provider == "qwen" and not os.environ.get("DASHSCOPE_API_KEY"):
+        raise HTTPException(503, "未配置百炼 API Key，无法使用 Qwen TTS")
+    if tts_provider == "mimo" and not os.environ.get("MIMO_API_KEY"):
+        if not (os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0" and os.environ.get("DASHSCOPE_API_KEY")):
+            raise HTTPException(503, "未配置 MiMo API Key")
     asset_ids = {asset["id"] for asset in db.list_assets(status="active")}
     try:
         script = video_renderer.normalize_script(
-            {**body, "duration_target_ms": target_duration_ms},
+            {**body, "duration_target_ms": target_duration_ms, "tts_provider": tts_provider, "voice": voice},
             asset_ids,
             target_duration_ms=target_duration_ms,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if voice not in video_renderer.VOICES:
-        raise HTTPException(400, "请选择有效的 Qwen TTS 音色")
     job_id = _uuid4().hex
     db.create_render_job(job_id, script, voice, user["id"])
     asyncio.create_task(_run_video_job(job_id))
@@ -4493,6 +4515,12 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "message": readiness.get("message") or "当前 Buffalo 自有素材不足以生成正式成片",
             "delivery_readiness": readiness,
         })
+    try:
+        tts_provider, voice = video_renderer.resolve_tts_selection(
+            body.tts_provider, body.voice, strict=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     locked_hook_ids = [int(item["id"]) for item in ordered_events]
     idempotency_key = body.idempotency_key or _chat_dual_library_idempotency_key(
         body.topic, locked_hook_ids, body.platform, body.target_duration_ms
@@ -4536,6 +4564,8 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "logistics_nodes": logistics_nodes,
         "platform": body.platform,
         "target_duration_ms": body.target_duration_ms,
+        "tts_provider": tts_provider,
+        "voice": voice,
         "username": user["username"],
         "pipeline": [
             "topic_brief", "hook_locking", "scripting", "project_building",
@@ -4560,6 +4590,8 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "platform": body.platform,
         "duration_target_ms": body.target_duration_ms,
         "target_duration_ms": body.target_duration_ms,
+        "tts_provider": tts_provider,
+        "voice": voice,
         "brief": {
             "topic_brief_id": brief["id"],
             "logistics_topic": brief_input,

@@ -583,13 +583,17 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         # 删除项目重做，且不会改写原始 revision。
         planning_payload = dict(payload or {})
         planning_payload["source_type"] = (project or {}).get("source_type")
-        planning_scenes = [dict(scene) for scene in planning_payload.get("scenes") or []]
         snapshot = (project or {}).get("source_snapshot") or {}
         if isinstance(snapshot, str):
             try:
                 snapshot = json.loads(snapshot)
             except json.JSONDecodeError:
                 snapshot = {}
+        if not planning_payload.get("tts_provider"):
+            planning_payload["tts_provider"] = snapshot.get("tts_provider") or "mimo"
+        if not planning_payload.get("voice"):
+            planning_payload["voice"] = snapshot.get("voice") or video_renderer.MIMO_TTS_VOICE
+        planning_scenes = [dict(scene) for scene in planning_payload.get("scenes") or []]
         if (project or {}).get("source_type") == "hotspot_followup":
             hotspot_event_id = snapshot.get("hotspot_event_id")
             event = event_lookup.get(int(hotspot_event_id)) if hotspot_event_id else None
@@ -639,9 +643,25 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         issues = list(report.get("planning_issues") or [])
         hard_failures = []
         target_ms = int(script.get("duration_target_ms") or 60_000)
-        min_scenes, max_scenes = (6, 18) if target_ms > 45_000 else (4, 8)
+        min_scenes, max_scenes = video_renderer.formal_scene_bounds(target_ms)
         if not min_scenes <= len(scenes) <= max_scenes:
             hard_failures.append(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
+        if str(script.get("source_type") or "") == "topic_brief_dual_library":
+            if not (
+                video_renderer.FORMAL_MIN_DURATION_MS
+                <= target_ms
+                <= video_renderer.FORMAL_MAX_DURATION_MS
+            ):
+                hard_failures.append("正式双素材成片必须在 50–90 秒之间")
+            if not (
+                video_renderer.FORMAL_MIN_SCENES
+                <= len(scenes)
+                <= video_renderer.FORMAL_MAX_SCENES
+            ):
+                hard_failures.append(
+                    f"正式双素材成片需要 {video_renderer.FORMAL_MIN_SCENES}–"
+                    f"{video_renderer.FORMAL_MAX_SCENES} 个完整分镜"
+                )
         empty_voiceovers = [index + 1 for index, scene in enumerate(scenes) if not str(scene.get("voiceover") or "").strip()]
         if empty_voiceovers:
             hard_failures.append("存在无旁白分镜：" + "、".join(map(str, empty_voiceovers)))
@@ -899,14 +919,29 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
 
     async def render_version(job: dict, preview: bool):
         report = dict(job.get("quality_report") or {})
-        script = report.get("script") or {}
-        requested_voice = str(script.get("voice") or "")
-        voice = video_renderer.normalize_tts_voice(requested_voice)
-        if voice != requested_voice:
-            script["voice"] = voice
-            report.setdefault("normalizations", []).append(
-                f"历史音色“{requested_voice or '未设置'}”已迁移为当前 Qwen TTS 音色“{voice}”"
+        script = dict(report.get("script") or {})
+        project = await asyncio.to_thread(
+            db.get_video_project, job["project_id"], job["created_by"]
+        )
+        snapshot = (project or {}).get("source_snapshot") or {}
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except json.JSONDecodeError:
+                snapshot = {}
+        requested_provider = str(
+            script.get("tts_provider") or snapshot.get("tts_provider") or "mimo"
+        )
+        requested_voice = str(script.get("voice") or snapshot.get("voice") or "")
+        try:
+            tts_provider, voice = video_renderer.resolve_tts_selection(
+                requested_provider, requested_voice, strict=True,
             )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        script["tts_provider"] = tts_provider
+        script["voice"] = voice
+        report["script"] = script
         legacy = await asyncio.to_thread(db.get_render_job, job["id"])
         if not legacy:
             await asyncio.to_thread(db.create_render_job, job["id"], script, voice, job["created_by"])
@@ -920,7 +955,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         render_task = asyncio.create_task(asyncio.to_thread(
             video_renderer.render_job, job["id"], static_dir,
             lambda: _new_job_cancel_requested(job["id"]), output_size, output_name,
-            "mimo", preview,
+            tts_provider, preview,
         ))
         last_reported_progress = -1
         polls_since_renew = 0

@@ -1,5 +1,4 @@
 import io
-import base64
 from pathlib import Path
 
 from PIL import Image
@@ -42,12 +41,24 @@ def test_douyin_script_normalization_rejects_bad_scene_count():
         assert "4–8" in str(exc)
 
 
+def test_formal_production_requires_seven_to_ten_scenes():
+    try:
+        video_renderer.normalize_script({
+            "duration_target_ms": 60_000,
+            "scenes": [{"duration": 8, "voiceover": f"口播{i}"} for i in range(5)],
+        }, set())
+        assert False, "expected validation error"
+    except ValueError as exc:
+        assert "7–10" in str(exc)
+
+
 def test_douyin_script_normalization_rejects_legacy_infographic_scene():
     import pytest
 
     with pytest.raises(ValueError, match="信息图、流程图和 PPT 卡片已禁用"):
         video_renderer.normalize_script({"scenes": [
             {"duration": 5, "scene_role": "logistics_explainer", "evidence_type": "explanation_card"},
+            {"duration": 5}, {"duration": 5}, {"duration": 5},
             {"duration": 5}, {"duration": 5}, {"duration": 5},
         ]}, set())
 
@@ -61,6 +72,23 @@ def test_douyin_script_removes_unknown_asset_ids():
     assert normalized["scenes"][0]["asset_id"] == 1
     assert normalized["scenes"][1]["asset_id"] is None
     assert 25 <= sum(s["duration"] for s in normalized["scenes"]) <= 35
+
+
+def test_tts_voice_options_include_mimo_and_qwen():
+    options = video_renderer.tts_voice_options()
+    assert {"provider": "mimo", "id": "mimo_default", "label": "MiMo 默认"} in options
+    assert any(item["provider"] == "qwen" and item["id"] == "Cherry" for item in options)
+
+
+def test_resolve_tts_selection_rejects_unknown_voice_in_strict_mode():
+    import pytest
+
+    provider, voice = video_renderer.resolve_tts_selection("mimo", "mimo_default", strict=True)
+    assert provider == "mimo" and voice == "mimo_default"
+    with pytest.raises(ValueError, match="有效的 Qwen"):
+        video_renderer.resolve_tts_selection("qwen", "不存在的音色", strict=True)
+    with pytest.raises(ValueError, match="有效的 MiMo"):
+        video_renderer.resolve_tts_selection("mimo", "Cherry", strict=True)
 
 
 def test_qwen_tts_downloads_returned_wav(monkeypatch, tmp_path):

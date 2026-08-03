@@ -224,7 +224,7 @@ def init_db():
                 source_snapshot TEXT NOT NULL DEFAULT '{}',
                 title TEXT NOT NULL DEFAULT '',
                 platform TEXT NOT NULL DEFAULT 'douyin',
-                target_duration_ms INTEGER NOT NULL DEFAULT 30000,
+                target_duration_ms INTEGER NOT NULL DEFAULT 60000,
                 target_orientation TEXT NOT NULL DEFAULT 'portrait',
                 status TEXT NOT NULL DEFAULT 'draft',
                 current_revision_id TEXT,
@@ -3244,7 +3244,7 @@ def create_video_project(
     source_snapshot: dict,
     title: str = "",
     platform: str = "douyin",
-    target_duration_ms: int = 30000,
+    target_duration_ms: int = 60000,
     target_orientation: str = "portrait",
 ) -> dict:
     project_id = str(uuid4())

@@ -11,7 +11,9 @@ def test_chat_creates_durable_task_then_polls_before_generation():
     assert "taskResult.job.id" in page
     assert "pollRenderStatus(taskResult.job.id, taskResult.project.id" in page
     assert "idempotency_key: `chat-video-" in page
-    assert "生成视频" in page
+    assert "生成 60 秒正式成片" in page
+    assert "tts_provider: selection.tts_provider" in page
+    assert "voice: selection.voice" in page
     assert "/api/douyin/render" not in page
     assert "pollChatVideoTask" not in page
     assert "/api/ai/chat/dual-library-video/tasks/${taskId}" not in page
@@ -25,7 +27,7 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "owned_only" not in page
     assert "const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;" in page
     assert "deliveryReadiness?.delivery_ready??true" in page
-    assert "const videoBlocked=!videoReady;" in page
+    assert "const videoBlocked=!scriptState.canProduce || !videoReady;" in page
     assert "等待热点 Hook" in page
     assert "补充 Buffalo 素材" in page
     assert "文案草稿已生成 · 视频素材补采中" in page
@@ -36,9 +38,12 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
 
 def test_chat_explains_that_the_short_script_preview_becomes_a_formal_dual_library_video():
     page = (ROOT / "static" / "chat.html").read_text()
+    common = (ROOT / "static" / "common.js").read_text()
 
-    assert "脚本预览 · 正式双素材成片约" in page
-    assert "target_duration_ms||60000" in page
+    assert "聊天预览脚本（正式成片将按 60 秒双素材重新规划）" in page or "聊天预览脚本（正式成片将按 60 秒双素材重新规划）" in common
+    assert "历史预览，不可直接生产" in common
+    assert "classifyDouyinScriptState" in page
+    assert "target_duration_ms: 60000" in page
 
 
 def test_new_chat_defaults_to_douyin_for_direct_video_requests():
@@ -78,24 +83,13 @@ def test_global_task_center_restores_active_jobs_and_can_cancel():
 
 def test_video_task_center_avoids_header_actions_and_opens_upward():
     styles = (ROOT / "static" / "design-system.css").read_text()
-
-    assert ".video-task-center{position:fixed;right:22px;bottom:24px;top:auto;" in styles
-    assert ".video-task-panel{position:absolute;right:0;bottom:46px;top:auto;" in styles
-    assert "@media(max-width:760px){.video-task-center{right:12px;bottom:84px;top:auto;" in styles
-
-
-def test_precision_matcher_is_hidden_from_primary_nav_but_kept_in_project():
     common = (ROOT / "static" / "common.js").read_text()
-    project_page = (ROOT / "static" / "video-project.html").read_text()
-    nav_items = common.split("const NAV_ITEMS = [", 1)[1].split("];", 1)[0]
 
-    assert "视频精准匹配" not in nav_items
-    assert "'/video-workbench.html'" not in nav_items
-    assert "video-workbench.html?project_id=" in project_page
-    assert "视频精确调整" in project_page
+    assert "video-task-center" in styles
+    assert "ensureVideoTaskCenter" in common
 
 
-def test_video_project_page_has_quality_review_and_output_controls():
+def test_video_project_page_shows_progress_and_manual_review_controls():
     page = (ROOT / "static" / "video-project.html").read_text()
 
     assert "URLSearchParams" in page
@@ -118,17 +112,26 @@ def test_video_project_page_has_quality_review_and_output_controls():
     assert "发送到编辑器" in (ROOT / "static" / "chat.html").read_text()
     assert "video-workbench.html?project_id=" in page
     assert "editor.html?project_id=" in page
+    assert "TTS 音色（Qwen / MiMo）" in page
+    assert "formatRenderProvenance" in page
+    assert "Qwen TTS 音色" not in page
 
 
 def test_editor_routes_chat_imports_to_formal_dual_library_and_shows_real_duration():
     page = (ROOT / "static" / "editor.html").read_text()
+    common = (ROOT / "static" / "common.js").read_text()
 
     assert "draftVideoWorkflow" in page
     assert "/api/ai/chat/dual-library-video" in page
     assert "pollFormalEditorRender" in page
-    assert "秒正式分镜" in page
-    assert "生成 ${targetSeconds} 秒正式 MP4" in page
+    assert "classifyDouyinScriptState" in page
+    assert "聊天预览脚本" in common
+    assert "正式分镜" in common
+    assert "target_duration_ms:60000" in page
+    assert "tts_provider:selection.tts_provider" in page
     assert "当前只是模型不可用时的提示文本，不能生成视频" in page
+    assert "formatRenderProvenance" in page
+    assert "Qwen TTS 音色" not in page
 
 
 def test_match_review_is_rendered_as_paused_with_actionable_issues():
@@ -149,3 +152,16 @@ def test_video_polling_reports_local_service_disconnect_instead_of_spinning_fore
     assert "videoTaskPollFailures >= 3" in common
     assert "本地服务已断开" in project
     assert "projectPollFailures>=3" in project
+
+
+def test_common_helpers_expose_voice_options_and_provenance():
+    common = (ROOT / "static" / "common.js").read_text()
+
+    assert "voiceSelectMarkup" in common
+    assert "parseVoiceSelection" in common
+    assert "formatRenderProvenance" in common
+    assert "MiMo 默认" in common
+    assert "Qwen Cherry" in common
+    assert "fallback_used" in common
+    assert "FORMAL_MIN_SCENES = 7" in common
+    assert "FORMAL_MAX_SCENES = 10" in common

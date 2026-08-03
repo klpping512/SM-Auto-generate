@@ -12,7 +12,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=8"></script>
+<script src="/static/common.js?v=9"></script>
 <script>
 const PAGE_ID='video-project';
 const projectId=new URLSearchParams(location.search).get('id');
@@ -33,7 +33,7 @@ function projectShell(){
   document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}<main class="main-content project-main">
     <header class="page-header project-head"><div><h1 class="page-title" id="projectTitle">视频项目</h1><p class="project-subtitle">热点/自有素材 → 自动编排 → 预览检查 → 高清成片</p></div><div class="project-actions"><a class="btn btn-secondary btn-sm" id="editorLink" href="#">内容编辑器</a><a class="btn btn-secondary btn-sm" id="matcherLink" href="#">视频精确调整</a></div></header>
     <section class="project-grid">
-      <div class="project-card"><header><h2>分镜与音色</h2><button class="btn btn-primary btn-sm" onclick="saveRevision()">保存修改</button></header><div class="project-card-body"><div class="voice-row"><label for="projectVoice">Qwen TTS 音色</label><select class="select" id="projectVoice"><option>Cherry</option></select></div><div class="scene-editor" id="sceneEditor"></div></div></div>
+      <div class="project-card"><header><h2>分镜与音色</h2><button class="btn btn-primary btn-sm" onclick="saveRevision()">保存修改</button></header><div class="project-card-body"><div class="voice-row"><label for="projectVoice">TTS 音色（Qwen / MiMo）</label><span id="projectVoiceMount"></span></div><div id="sceneModeLabel" class="project-subtitle" style="margin-bottom:10px;"></div><div class="scene-editor" id="sceneEditor"></div></div></div>
       <aside>
         <div class="project-card"><header><h2>成片时长预算</h2><span id="budgetPlatform">平台</span></header><div class="project-card-body"><div class="stage-line"><strong id="budgetUsed">已用 0 秒</strong><span id="budgetRemaining">剩余 0 秒</span></div><div class="project-progress"><i id="budgetProgress" style="width:0"></i></div><div class="project-subtitle" id="budgetHint">热点事件片段和 Buffalo 原有素材共用此预算，母片不会绕过限制。</div></div></div>
         <div class="project-card"><header><h2>生成进度</h2><span id="jobStatus">未开始</span></header><div class="project-card-body"><div class="stage-line"><strong id="jobStage">等待生成</strong><span id="jobProgressText">0%</span></div><div class="project-progress"><i id="jobProgress" style="width:0"></i></div><div class="project-actions" id="jobActions"></div></div></div>
@@ -50,19 +50,36 @@ function currentPayload(){
     visual:row.querySelector('[data-field="visual"]').value.trim(),
     voiceover:row.querySelector('[data-field="voiceover"]').value.trim()
   }));
-  return {...base,title:document.getElementById('projectTitle').textContent,voice:document.getElementById('projectVoice').value,scenes};
+  const selection=parseVoiceSelection(document.getElementById('projectVoice')?.value||'');return {...base,title:document.getElementById('projectTitle').textContent,voice:selection.voice,tts_provider:selection.tts_provider,scenes};
 }
 
+let mediaCapabilities={};
+async function ensureProjectCapabilities(){
+  if(Object.keys(mediaCapabilities).length)return mediaCapabilities;
+  try{const response=await apiFetch('/api/media/capabilities');mediaCapabilities=await response.json();}catch(e){mediaCapabilities={};}
+  return mediaCapabilities;
+}
 function renderProject(){
   document.getElementById('projectTitle').textContent=project.title||'视频项目';
   document.getElementById('editorLink').href=`/editor.html?project_id=${encodeURIComponent(project.id)}`;
   document.getElementById('matcherLink').href=`/video-workbench.html?project_id=${encodeURIComponent(project.id)}`;
   const payload=project.current_revision?.payload||{};
-  const target=Number(project.target_duration_ms||30000);const used=Number(payload.duration_used_ms||((payload.scenes||[]).reduce((sum,scene)=>sum+Number(scene.duration_ms||scene.duration*1000||0),0)));const remaining=Math.max(0,target-used);document.getElementById('budgetPlatform').textContent=project.platform||'douyin';document.getElementById('budgetUsed').textContent=`已用 ${(used/1000).toFixed(1)} 秒`;document.getElementById('budgetRemaining').textContent=`剩余 ${(remaining/1000).toFixed(1)} 秒`;document.getElementById('budgetProgress').style.width=`${Math.min(100,Math.round(used/target*100))}%`;
-  document.getElementById('projectVoice').value='Cherry';
+  const target=Number(project.target_duration_ms||60000);const used=Number(payload.duration_used_ms||((payload.scenes||[]).reduce((sum,scene)=>sum+Number(scene.duration_ms||scene.duration*1000||0),0)));const remaining=Math.max(0,target-used);document.getElementById('budgetPlatform').textContent=project.platform||'douyin';document.getElementById('budgetUsed').textContent=`已用 ${(used/1000).toFixed(1)} 秒`;document.getElementById('budgetRemaining').textContent=`剩余 ${(remaining/1000).toFixed(1)} 秒`;document.getElementById('budgetProgress').style.width=`${Math.min(100,Math.round(used/target*100))}%`;
   const scenes=payload.scenes||[];
+  const scriptState=classifyDouyinScriptState({
+    durationTarget: Math.round(target/1000),
+    scenes,
+    videoWorkflow: {status:'ready', target_duration_ms: target},
+    importedFromChat: false,
+    isFormalPlan: scenes.length >= FORMAL_MIN_SCENES,
+  });
+  document.getElementById('sceneModeLabel').textContent=scriptState.label;
+  const selectedVoice=(payload.tts_provider && payload.voice)
+    ? `${payload.tts_provider}:${payload.voice}`
+    : (payload.voice === 'Cherry' ? 'qwen:Cherry' : voiceOptionValue((mediaCapabilities.voice_options||defaultVoiceOptions())[0]));
+  document.getElementById('projectVoiceMount').innerHTML=voiceSelectMarkup(mediaCapabilities.voice_options, selectedVoice, 'projectVoice', 'class="select"');
   const brief=payload.brief||{};if(brief.angle){document.querySelector('.project-subtitle').textContent=`动态选题：${brief.angle}`;}
-  document.getElementById('sceneEditor').innerHTML=scenes.length?scenes.map((scene,index)=>`<article class="scene-row"><header><span>分镜 ${index+1}｜${escapeHtml(scene.scene_role||scene.evidence_type||'待匹配')}</span><span>${escapeHtml(scene.duration||5)} 秒</span></header><div class="scene-fields"><label>目标画面<textarea class="input" data-field="visual">${escapeHtml(scene.visual||'')}</textarea></label><label>旁白与字幕<textarea class="input" data-field="voiceover">${escapeHtml(scene.voiceover||'')}</textarea></label></div></article>`).join(''):'<div class="empty-note">当前修订没有分镜，请先回内容编辑器补充。</div>';
+  document.getElementById('sceneEditor').innerHTML=scenes.length?scenes.map((scene,index)=>`<article class="scene-row"><header><span>分镜 ${index+1}｜${escapeHtml(scene.scene_role||scene.evidence_type||'待匹配')}</span><span>${escapeHtml(scene.duration||5)} 秒</span></header><div class="scene-fields"><label>目标画面<textarea class="input" data-field="visual">${escapeHtml(scene.visual||'')}</textarea></label><label>旁白与字幕<textarea class="input" data-field="voiceover">${escapeHtml(scene.voiceover||'')}</textarea></label></div></article>`).join(''):'<div class="empty-note">当前修订没有分镜；双素材重新规划完成后才会显示正式分镜。</div>';
 }
 
 async function saveRevision(){
@@ -147,7 +164,7 @@ function renderJob(){
   const tierNotice=!publishAllowed&&(internalPreview||manualReview)?'<div class="match-score-note"><strong>内部验收文件</strong>：不可进入发布队列；只有通过最终技术检查的高清文件才可下载。</div>':'';
   const preview=job?.preview_url&&job.preview_url!==job.output_url?`<h3>低清预览</h3><video src="${escapeHtml(job.preview_url)}" controls></video>${renderQuality(job.quality_report?.preview_quality)}`:'';
   const outputLabel=internalPreview?'内部测试预览':(publishAllowed?'高清成片':'高清内部验收成片');const outputDownload=internalPreview?'下载内部预览':(publishAllowed?'下载 MP4':'下载内部验收成片');const output=job?.output_url?`<h3 style="margin-top:14px">${outputLabel}</h3><video src="${escapeHtml(job.output_url)}" controls></video><a class="btn btn-primary btn-sm" style="margin-top:10px" href="${escapeHtml(job.output_url)}" download>${outputDownload}</a>${renderQuality(internalPreview?job.quality_report?.preview_quality:job.quality_report?.final_quality)}`:'';
-  document.getElementById('mediaPanel').innerHTML=tierNotice+(preview+output||'<div class="empty-note">通过质量检查后会显示预览和成片</div>')+renderManualPreviewReview(manualReview);
+  const provenance=formatRenderProvenance(job?.quality_report, project?.current_revision?.payload?.scenes||[]);document.getElementById('mediaPanel').innerHTML=tierNotice+(preview+output||'<div class="empty-note">通过质量检查后会显示预览和成片</div>')+((preview||output)?provenance:'')+renderManualPreviewReview(manualReview);
 }
 
 async function loadJob(){
@@ -156,7 +173,7 @@ async function loadJob(){
 }
 function startPolling(){if(projectPoller)clearInterval(projectPoller);projectPoller=setInterval(async()=>{await loadJob();if(!job||!['pending','running','cancel_requested'].includes(job.status)){clearInterval(projectPoller);projectPoller=null;}},2000);}
 
-async function init(){projectShell();if(!projectId){showToast('缺少视频项目 ID','error');return;}try{const response=await apiFetch(`/api/video-projects/${projectId}`);project=await response.json();renderProject();await loadJob();}catch(error){showToast(error.message,'error');}}
+async function init(){projectShell();if(!projectId){showToast('缺少视频项目 ID','error');return;}try{await ensureProjectCapabilities();const response=await apiFetch(`/api/video-projects/${projectId}`);project=await response.json();renderProject();await loadJob();}catch(error){showToast(error.message,'error');}}
 init();
 </script>
 </body>

@@ -28,6 +28,11 @@ from video_duration_budget import rebalance_scenes_to_budget, platform_budget_ms
 
 QWEN_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 VOICES = {"Cherry"}
+MIMO_TTS_VOICE = "mimo_default"
+FORMAL_MIN_SCENES = 7
+FORMAL_MAX_SCENES = 10
+FORMAL_MIN_DURATION_MS = 50_000
+FORMAL_MAX_DURATION_MS = 90_000
 TTS_BREATHING_ROOM_SECONDS = 0.35
 # Qwen 同一音色会随停顿和专有名词改变实际语速。真实短 Hook 不能循环，
 # 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
@@ -47,9 +52,55 @@ PORTRAIT_FRAME_POLICY = "full_bleed_center_crop"
 
 
 def normalize_tts_voice(voice: str | None) -> str:
-    """将历史项目的已下线音色安全迁移到当前提供方默认音色。"""
+    """将历史项目的已下线 Qwen 音色安全迁移到当前默认音色。"""
     candidate = str(voice or "").strip()
     return candidate if candidate in VOICES else sorted(VOICES)[0]
+
+
+def tts_voice_options() -> list[dict]:
+    """Return selectable TTS voices for Qwen and MiMo."""
+    options = [
+        {"provider": "mimo", "id": MIMO_TTS_VOICE, "label": "MiMo 默认"},
+    ]
+    options.extend(
+        {"provider": "qwen", "id": voice, "label": f"Qwen {voice}"}
+        for voice in sorted(VOICES)
+    )
+    return options
+
+
+def resolve_tts_selection(
+    provider: str | None,
+    voice: str | None,
+    *,
+    strict: bool = False,
+) -> tuple[str, str]:
+    """Resolve provider/voice pair. Formal production uses strict=True."""
+    normalized_provider = (provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
+    candidate = str(voice or "").strip()
+    if normalized_provider == "qwen":
+        if candidate in VOICES:
+            return "qwen", candidate
+        if strict:
+            raise ValueError("请选择有效的 Qwen TTS 音色")
+        return "qwen", sorted(VOICES)[0]
+    if normalized_provider == "mimo":
+        allowed = {MIMO_TTS_VOICE, "mimo_default", ""}
+        if candidate and candidate not in allowed:
+            if strict:
+                raise ValueError("请选择有效的 MiMo TTS 音色")
+            return "mimo", MIMO_TTS_VOICE
+        return "mimo", candidate or MIMO_TTS_VOICE
+    if strict:
+        raise ValueError("请选择有效的 TTS 服务商（mimo 或 qwen）")
+    return "mimo", MIMO_TTS_VOICE
+
+
+def formal_scene_bounds(target_duration_ms: int) -> tuple[int, int]:
+    """Return min/max scene counts for a target duration."""
+    if int(target_duration_ms) >= FORMAL_MIN_DURATION_MS:
+        return FORMAL_MIN_SCENES, FORMAL_MAX_SCENES
+    return 4, 8
 
 
 class RenderCanceled(RuntimeError):
@@ -295,7 +346,7 @@ def normalize_script(
             "event_clip_id": event_clip_id,
             "brand_endcard_path": str(raw.get("brand_endcard_path") or "")[:240],
         })
-    min_scenes, max_scenes = (6, 18) if target > 45_000 else (4, 8)
+    min_scenes, max_scenes = formal_scene_bounds(target)
     if not min_scenes <= len(scenes) <= max_scenes:
         raise ValueError(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
     if asset_lookup is not None:
@@ -374,7 +425,6 @@ def synthesize_qwen_tts(text: str, voice: str, output: Path, api_key: str | None
 
 
 MIMO_TTS_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-MIMO_TTS_VOICE = "mimo_default"
 # Qwen TTS 只接受文本，语气全靠标点，播报永远是同一个平铺直叙的节奏。
 # MiMo v2.5-tts 允许在 user 消息里用自然语言描述语气/语速，这条默认风格
 # 只是让旁白读起来像真人口语播报，不是台词内容，不会进入成片文本。

@@ -158,6 +158,142 @@ function renderSidebar(activeId) {
     </aside>`;
 }
 
+// ==================== Formal Douyin script / TTS helpers ====================
+const FORMAL_TARGET_SECONDS = 60;
+const FORMAL_MIN_SCENES = 7;
+const FORMAL_MAX_SCENES = 10;
+const FORMAL_MIN_DURATION_MS = 50_000;
+const FORMAL_MAX_DURATION_MS = 90_000;
+
+function defaultVoiceOptions() {
+    return [
+        {provider: 'mimo', id: 'mimo_default', label: 'MiMo 默认'},
+        {provider: 'qwen', id: 'Cherry', label: 'Qwen Cherry'},
+    ];
+}
+
+function voiceOptionValue(option) {
+    return `${option.provider}:${option.id}`;
+}
+
+function parseVoiceSelection(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return {tts_provider: 'mimo', voice: 'mimo_default'};
+    const splitAt = raw.indexOf(':');
+    if (splitAt <= 0) {
+        if (raw === 'Cherry') return {tts_provider: 'qwen', voice: 'Cherry'};
+        return {tts_provider: 'mimo', voice: raw || 'mimo_default'};
+    }
+    return {tts_provider: raw.slice(0, splitAt), voice: raw.slice(splitAt + 1)};
+}
+
+function voiceSelectMarkup(options, selectedValue, selectId, selectAttrs) {
+    const opts = (Array.isArray(options) && options.length) ? options : defaultVoiceOptions();
+    const selected = String(selectedValue || voiceOptionValue(opts[0]));
+    const attrs = selectAttrs || '';
+    return `<select id="${escapeHtml(selectId)}" ${attrs}>${opts.map(option => {
+        const value = voiceOptionValue(option);
+        return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(option.label || `${option.provider} ${option.id}`)}</option>`;
+    }).join('')}</select>`;
+}
+
+function classifyDouyinScriptState({
+    durationTarget,
+    scenes,
+    videoWorkflow,
+    importedFromChat,
+    isFormalPlan,
+} = {}) {
+    const sceneCount = Array.isArray(scenes) ? scenes.length : 0;
+    const durationSec = Math.round(Number(durationTarget || 0));
+    const workflowReady = videoWorkflow?.status === 'ready';
+    const formalTargetSec = Math.round(Number(
+        videoWorkflow?.target_duration_ms || FORMAL_TARGET_SECONDS * 1000
+    ) / 1000) || FORMAL_TARGET_SECONDS;
+
+    if (isFormalPlan) {
+        const ok = sceneCount >= FORMAL_MIN_SCENES
+            && sceneCount <= FORMAL_MAX_SCENES
+            && formalTargetSec >= 50
+            && formalTargetSec <= 90;
+        return {
+            mode: 'formal',
+            label: `${formalTargetSec} 秒正式分镜`,
+            canProduce: ok,
+            blockReason: ok ? '' : `正式生产需要 ${FORMAL_MIN_SCENES}～${FORMAL_MAX_SCENES} 个镜头，且时长在 50～90 秒`,
+            targetSeconds: formalTargetSec,
+        };
+    }
+
+    if (importedFromChat) {
+        if (durationSec > 0 && durationSec < 50) {
+            return {
+                mode: 'legacy',
+                label: '历史预览，不可直接生产',
+                canProduce: false,
+                blockReason: '旧 30 秒草稿不能直接生产；请重新发起 60 秒双素材成片任务',
+                targetSeconds: FORMAL_TARGET_SECONDS,
+            };
+        }
+        return {
+            mode: 'chat_preview',
+            label: '聊天预览脚本（正式成片将按 60 秒双素材重新规划）',
+            canProduce: workflowReady,
+            blockReason: workflowReady
+                ? ''
+                : (videoWorkflow?.block_reason || '正式成片需要强相关热点 Hook 和可用 Buffalo 自有素材'),
+            targetSeconds: FORMAL_TARGET_SECONDS,
+        };
+    }
+
+    if ((durationSec > 0 && durationSec < 50) || (sceneCount > 0 && sceneCount < FORMAL_MIN_SCENES)) {
+        return {
+            mode: 'legacy',
+            label: '历史预览，不可直接生产',
+            canProduce: false,
+            blockReason: '旧短分镜/旧时长草稿不能直接生产；正式成片需 7～10 镜且 50～90 秒',
+            targetSeconds: FORMAL_TARGET_SECONDS,
+        };
+    }
+
+    const ok = sceneCount >= FORMAL_MIN_SCENES
+        && sceneCount <= FORMAL_MAX_SCENES
+        && durationSec >= 50
+        && durationSec <= 90;
+    return {
+        mode: ok ? 'formal' : 'chat_preview',
+        label: ok ? `${durationSec || FORMAL_TARGET_SECONDS} 秒正式分镜` : '聊天预览脚本',
+        canProduce: ok,
+        blockReason: ok ? '' : `正式生产需要 ${FORMAL_MIN_SCENES}～${FORMAL_MAX_SCENES} 个镜头，且时长在 50～90 秒`,
+        targetSeconds: durationSec >= 50 ? durationSec : FORMAL_TARGET_SECONDS,
+    };
+}
+
+function formatRenderProvenance(qualityReport, fallbackScenes) {
+    const report = qualityReport || {};
+    const finalQuality = report.final_quality || report.preview_quality || report;
+    const tts = finalQuality.tts || report.tts || {};
+    const scenes = tts.scenes || [];
+    const actualProviders = [...new Set(scenes.map(item => item.provider).filter(Boolean))];
+    const actualVoices = [...new Set(scenes.map(item => item.voice).filter(Boolean))];
+    const requestedProvider = tts.requested_provider || actualProviders[0] || '';
+    const providerText = actualProviders.length
+        ? actualProviders.join(' / ')
+        : (requestedProvider || '未知');
+    const voiceText = actualVoices.length ? actualVoices.join(' / ') : '未知';
+    const usage = finalQuality.source_usage || report.source_usage || {};
+    const sceneList = Array.isArray(fallbackScenes) ? fallbackScenes : [];
+    const hotspotCount = Number(usage.hotspot_parent_count);
+    const ownedCount = Number(usage.owned_asset_count);
+    const hotspotFallback = sceneList.filter(scene => scene?.event_clip_id || scene?.evidence_type === 'hotspot_video').length;
+    const ownedFallback = sceneList.filter(scene => scene?.asset_id && !scene?.event_clip_id && scene?.evidence_type !== 'hotspot_video').length;
+    const sourceText = `热点 Hook 母片 ${Number.isFinite(hotspotCount) ? hotspotCount : hotspotFallback} · Buffalo 自有 ${Number.isFinite(ownedCount) ? ownedCount : ownedFallback}`;
+    const fallbackWarn = tts.fallback_used
+        ? '<div class="render-review-summary" style="color:#a16207;margin-top:6px;">TTS 已发生回退：请求 MiMo 后可恢复异常回退到 Qwen，请核对听感后再发布。</div>'
+        : '';
+    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}</div>${fallbackWarn}`;
+}
+
 // ==================== Persistent Video Task Center ====================
 const VIDEO_STAGE_LABELS = {
     queued: '等待处理', topic_brief: '整理主题简报', hook_locking: '锁定热点 Hook',

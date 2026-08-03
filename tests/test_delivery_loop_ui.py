@@ -27,8 +27,18 @@ def test_config_page_is_mimo_first():
     assert "百炼 Qwen TTS 负责旁白" not in page
 
 
+def test_video_project_uses_shared_tts_selector_not_qwen_only():
+    page = (ROOT / "static" / "video-project.html").read_text(encoding="utf-8")
+    assert "TTS 音色（Qwen / MiMo）" in page
+    assert "voiceSelectMarkup" in page
+    assert "Qwen TTS 音色" not in page
+
+
 def test_chat_response_contract_fields_present_in_backend():
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert '"hook_requirement": "required"' in source
     assert '"delivery_readiness": readiness' in source
     assert '"funnel": (hotspot_retrieval or {}).get("funnel")' in source
+    assert "voice_options" in source
+    assert "tts_provider" in source
+    assert "resolve_tts_selection" in source

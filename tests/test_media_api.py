@@ -134,7 +134,7 @@ def test_render_rejects_safe_fallback_and_short_production_copy(tmp_db, monkeypa
     assert "提示不能生成视频" in fallback.json()["detail"]
 
     short = client.post("/api/douyin/render", headers=headers, json={
-        "source": "model", "voice": "Cherry", "duration_target": 60,
+        "source": "model", "voice": "Cherry", "tts_provider": "qwen", "duration_target": 60,
         "scenes": [
             {"duration": 8, "voiceover": "核对节点。", "visual": f"物流场景{i}"}
             for i in range(8)
@@ -142,6 +142,16 @@ def test_render_rejects_safe_fallback_and_short_production_copy(tmp_db, monkeypa
     })
     assert short.status_code == 409
     assert "无法支撑 60 秒正式成片" in short.json()["detail"]
+
+    too_few = client.post("/api/douyin/render", headers=headers, json={
+        "source": "model", "voice": "Cherry", "tts_provider": "qwen", "duration_target": 60,
+        "scenes": [
+            {"duration": 10, "voiceover": "这是一段足够长的旁白用于通过字数门槛。" * 3, "visual": f"场景{i}"}
+            for i in range(5)
+        ],
+    })
+    assert too_few.status_code == 400
+    assert "7–10" in too_few.json()["detail"]
 
 
 def test_render_job_is_private_to_creator(tmp_db, monkeypatch):

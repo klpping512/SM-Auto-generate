@@ -173,6 +173,8 @@ class ChatDualLibraryVideoRequest(BaseModel):
     target_duration_ms: int = Field(default=60_000, ge=50_000, le=90_000)
     session_id: str = Field(default="", max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    tts_provider: str = Field(default="mimo", max_length=32)
+    voice: str = Field(default="mimo_default", max_length=64)
 
 
 class AccountCredentialsRequest(BaseModel):
