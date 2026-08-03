@@ -57,6 +57,7 @@ def test_official_item_with_explicit_open_license_can_be_auto_materialized():
 def test_youtube_download_options_use_proxy_progress_and_bounded_clip(monkeypatch):
     import inspiration_assets
 
+    monkeypatch.delenv("SA_HOTSPOT_PROXY", raising=False)
     monkeypatch.setenv("SA_YOUTUBE_PROXY", "http://127.0.0.1:7897")
     events = []
     options = inspiration_assets.build_ytdlp_options(
@@ -70,3 +71,21 @@ def test_youtube_download_options_use_proxy_progress_and_bounded_clip(monkeypatc
     assert options["download_ranges"] is not None
     assert options["progress_hooks"]
     assert "node" in options["js_runtimes"]
+
+
+def test_youtube_download_options_prefer_hotspot_proxy_over_empty_youtube(monkeypatch):
+    import inspiration_assets
+
+    monkeypatch.setenv("SA_HOTSPOT_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("SA_YOUTUBE_PROXY", "")
+    options = inspiration_assets.build_ytdlp_options("youtube", duration_seconds=240)
+    assert options["proxy"] == "http://127.0.0.1:7897"
+    assert options["download_ranges"] is not None
+
+
+def test_youtube_download_keeps_full_file_for_short_clips(monkeypatch):
+    import inspiration_assets
+
+    monkeypatch.setenv("SA_HOTSPOT_PROXY", "http://127.0.0.1:7897")
+    options = inspiration_assets.build_ytdlp_options("youtube", duration_seconds=120)
+    assert "download_ranges" not in options

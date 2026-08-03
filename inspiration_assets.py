@@ -122,14 +122,24 @@ def build_ytdlp_options(
         "fragment_retries": 2,
         "js_runtimes": {"node": {}},
     }
-    proxy = os.environ.get(
-        "SA_YOUTUBE_PROXY", "http://127.0.0.1:7897"
-    ).strip() if source_type == "youtube" else ""
+    # Prefer the unified hotspot proxy; empty SA_YOUTUBE_PROXY must not wipe it.
+    # Fall back to local VPN HTTP port when neither variable is set.
+    proxy = (
+        str(
+            os.environ.get("SA_HOTSPOT_PROXY")
+            or os.environ.get("SA_YOUTUBE_PROXY")
+            or "http://127.0.0.1:7897"
+        ).strip()
+        if source_type == "youtube"
+        else ""
+    )
     if proxy:
         options["proxy"] = proxy
     if progress_callback:
         options["progress_hooks"] = [progress_callback]
-    if float(duration_seconds or 0) > 600:
+    # Hotspot Hook curation only needs early footage. Downloading a full
+    # 5–10 minute 720p file often exceeds the materialization wall clock.
+    if float(duration_seconds or 0) > 180:
         from yt_dlp.utils import download_range_func
         options["download_ranges"] = download_range_func(None, [(0, 120)])
         options["force_keyframes_at_cuts"] = True

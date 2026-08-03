@@ -2872,7 +2872,7 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
         # 只能覆盖网络读写，无法约束解析器/源站卡住的总时长；这里由项目工作流
         # 施加总超时，失败后记录原因并继续分析下一条授权资讯视频。
         download_timeout = max(
-            1, int(os.environ.get("HOTSPOT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "90"))
+            1, int(os.environ.get("HOTSPOT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "300"))
         )
         asset = None
         if item.get("download_status") == "downloaded" and item.get("asset_id"):
