@@ -506,11 +506,58 @@ def test_rag_recommender_finds_contextual_marketing_hook_without_claiming_brand_
     client = TestClient(app.app)
     token = client.post("/api/auth/login", json={"username": "recommend-owner", "password": "pw12345"}).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    tmp_db.upsert_hotspot({
-        "title": "Port infrastructure disruption in South Africa", "summary": "Port and road routes need attention",
+    hotspot_id, _ = tmp_db.upsert_hotspot({
+        "title": "Beitbridge border trucks queue for screening",
+        "summary": "Freight trucks wait at the border screening gate",
         "source_url": "https://example.com/port", "publisher": "SA Today",
         "published_at": "2026-07-27T00:00:00Z", "retrieved_at": "2026-07-27T00:00:00Z",
         "snapshot_sha256": "rag-hotspot",
+    })
+    asset_id = tmp_db.create_asset({
+        "name": "边境排队母片", "filepath": "assets/rag-port.mp4", "file_type": "video",
+        "category": "other", "duration": 20, "size": 1, "source": "youtube",
+        "status": "active", "sha256": "b" * 64,
+    })
+    event = tmp_db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 7_000,
+        "title_zh": "边境货车排队等待筛查", "title_en": "Border truck queue",
+        "segments": [], "confidence": 0.9, "review_status": "confirmed",
+        "evidence": {
+            "what_happened": "货运卡车在边境筛查入口排队等待",
+            "hook_reason": "排队现场清晰可见",
+            "logistics_question": "边境等待会先影响哪个履约节点？",
+            "event_identity": "边境入口货车排队等待筛查",
+        },
+    }])[0]
+    tmp_db.update_hotspot_event_clip_media(event["id"], f"assets/hotspot-events/{event['id']}/event.mp4", None, "ready")
+    brief = client.post("/api/topic-briefs", headers=headers, json={
+        "raw_input": "南非边境拥堵时卖家应先核对哪些履约节点", "platforms": ["douyin"],
+    }).json()["brief"]
+
+    response = client.post(f"/api/topic-briefs/{brief['id']}/recommend-hotspots", headers=headers, json={"use_model": False})
+
+    assert response.status_code == 200
+    recommendations = response.json()["recommendations"]
+    assert recommendations
+    candidate = recommendations[0]
+    assert candidate.get("can_render_video") is True
+    assert "热点只用于提出问题" in candidate["usage_boundary"]
+    assert "只有该 Hook 是当前主题最强事实现场时才复用" in candidate["reuse_policy"]
+
+
+def test_rag_recommender_returns_empty_when_no_renderable_hooks(tmp_db):
+    import app
+    import auth
+
+    tmp_db.create_user("empty-recommend-owner", auth.hash_password("pw12345"), "editor", "Empty Owner")
+    client = TestClient(app.app)
+    token = client.post("/api/auth/login", json={"username": "empty-recommend-owner", "password": "pw12345"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    tmp_db.upsert_hotspot({
+        "title": "Port infrastructure disruption in South Africa", "summary": "Port and road routes need attention",
+        "source_url": "https://example.com/port-empty", "publisher": "SA Today",
+        "published_at": "2026-07-27T00:00:00Z", "retrieved_at": "2026-07-27T00:00:00Z",
+        "snapshot_sha256": "rag-hotspot-empty",
     })
     brief = client.post("/api/topic-briefs", headers=headers, json={
         "raw_input": "为进入南非市场的卖家讲物流风险", "platforms": ["douyin"],
@@ -519,10 +566,7 @@ def test_rag_recommender_finds_contextual_marketing_hook_without_claiming_brand_
     response = client.post(f"/api/topic-briefs/{brief['id']}/recommend-hotspots", headers=headers, json={"use_model": False})
 
     assert response.status_code == 200
-    candidate = response.json()["recommendations"][0]
-    assert candidate["hook_type"] == "contextual"
-    assert "热点只用于提出问题" in candidate["usage_boundary"]
-    assert "不同视频和物流话题中复用" in candidate["reuse_policy"]
+    assert response.json()["recommendations"] == []
 
 
 def test_model_hook_reason_is_rebuilt_from_grounded_hotspot_and_hook_evidence(tmp_db, monkeypatch):
@@ -559,7 +603,8 @@ def test_model_hook_reason_is_rebuilt_from_grounded_hotspot_and_hook_evidence(tm
     assert meta["used"] is True
     assert meta["prompt_version"] == "topic-content-decision-v3"
     assert captured["prompt_version"] == "topic-content-decision-v3"
-    assert "同一 Hook 可以跨不同视频和用户话题复用" in captured["messages"][0]["content"]
+    assert "不要把同一个 Hook 当作通用开场模板" in captured["messages"][0]["content"]
+    assert "最强事实现场时才可复用" in captured["messages"][0]["content"]
     assert "虚构" not in selected[0]["why"]
     assert "卡车在道路排队" in selected[0]["why"]
 

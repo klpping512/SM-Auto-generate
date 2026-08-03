@@ -8,12 +8,13 @@ def test_chat_creates_durable_task_then_polls_before_generation():
     page = (ROOT / "static" / "chat.html").read_text()
 
     assert "/api/ai/chat/dual-library-video" in page
-    assert "/api/ai/chat/dual-library-video/tasks/${taskId}" in page
     assert "taskResult.job.id" in page
     assert "pollRenderStatus(taskResult.job.id, taskResult.project.id" in page
     assert "idempotency_key: `chat-video-" in page
     assert "生成视频" in page
     assert "/api/douyin/render" not in page
+    assert "pollChatVideoTask" not in page
+    assert "/api/ai/chat/dual-library-video/tasks/${taskId}" not in page
 
 
 def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video():

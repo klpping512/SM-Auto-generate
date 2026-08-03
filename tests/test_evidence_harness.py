@@ -24,8 +24,27 @@ def test_build_evidence_package_keeps_external_and_brand_claims_separate(tmp_db)
 
     assert package["fact_claims"]
     assert package["fact_claims"][0]["source_url"] == "https://www.gov.za/durban-freight-update"
+    assert package["fact_claims"][0]["claim"] != package["fact_claims"][0]["excerpt"]
     assert package["brand_claims"] == []
     assert package["status"] == "needs_brand_evidence"
+
+
+def test_fact_claims_require_independent_source_excerpt(tmp_db):
+    import evidence_harness
+
+    hotspot_id, _ = tmp_db.upsert_hotspot({
+        "title": "Same text only",
+        "summary": "Same text only",
+        "source_url": "https://www.gov.za/same",
+        "publisher": "South African Government",
+        "published_at": "2026-07-22T06:00:00+02:00",
+        "retrieved_at": "2026-07-22T08:00:00+02:00",
+        "snapshot_sha256": "same-only",
+        "status": "new",
+    })
+    package = evidence_harness.build_package(hotspot_id, created_by=None)
+    assert package["fact_claims"] == []
+    assert package["status"] == "needs_fact_review"
 
 
 def test_unconfirmed_brand_claim_cannot_enter_publishable_package(tmp_db):

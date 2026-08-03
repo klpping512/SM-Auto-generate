@@ -78,7 +78,9 @@ def test_hotspot_workbench_exposes_material_evidence_preview_and_source_errors()
     assert "candidate.reasons" in page
     assert "sampleBundle?.preview_path" in page
     assert "本地 MP4 预览尚未生成" in page
-    assert "失败原因：" in page
+    assert "失败原因" in page
+    assert "受限说明" in page
+    assert "status==='blocked'?'受限说明':'失败原因'" in page
     assert "重新抓取全部启用信源" in page
     assert "wechat.source_refs" in page
     assert "输出目录：" in page

@@ -22,12 +22,12 @@ class _AccountDummy(PublishAdapter):
 
 
 def test_get_adapter_unknown_returns_none():
-    assert adapters.get_adapter("bilibili") is None  # 本期不支持的平台
+    assert adapters.get_adapter("unknown") is None
 
 
 async def test_dispatch_unknown_platform():
-    result = await publisher.dispatch(platform="bilibili", title="T", content="B")
-    assert result["success"] is False and "bilibili" in result["error"]
+    result = await publisher.dispatch(platform="unknown", title="T", content="B")
+    assert result["success"] is False and "unknown" in result["error"]
 
 
 async def test_dispatch_routes_to_registered_adapter(monkeypatch):
@@ -38,7 +38,7 @@ async def test_dispatch_routes_to_registered_adapter(monkeypatch):
 
 async def test_dispatch_loads_ready_account_from_database(monkeypatch):
     monkeypatch.setitem(adapters.ADAPTERS, "account_dummy", _AccountDummy())
-    monkeypatch.setattr(publisher.db, "get_accounts", lambda platform: [
+    monkeypatch.setattr(publisher.db, "get_accounts", lambda platform, owner_id=None: [
         {"account_id": "broken", "platform": platform, "status": "active", "credentials": "{}"},
         {"account_id": "ready", "platform": platform, "status": "active", "credentials": '{"token":"ok"}'},
     ])
@@ -46,7 +46,7 @@ async def test_dispatch_loads_ready_account_from_database(monkeypatch):
     assert result == {"success": True, "platform": "account_dummy", "output": "ready"}
 
 
-def test_five_adapters_registered():
+def test_core_and_huimei_adapters_registered():
     from adapters.facebook import FacebookAdapter
     from adapters.twitter import TwitterAdapter
     from adapters.reddit import RedditAdapter
@@ -57,6 +57,5 @@ def test_five_adapters_registered():
     assert isinstance(adapters.get_adapter("reddit"), RedditAdapter)
     assert isinstance(adapters.get_adapter("xiaohongshu"), XiaohongshuAdapter)
     assert isinstance(adapters.get_adapter("douyin"), DouyinAdapter)
-    # 注册表只含这 5 个；其余平台本期不支持
-    assert set(adapters.ADAPTERS) == {"facebook", "twitter", "reddit", "xiaohongshu", "douyin"}
-    assert adapters.get_adapter("bilibili") is None
+    assert adapters.get_adapter("wechat_mp").name == "wechat_mp"
+    assert adapters.get_adapter("bilibili").name == "bilibili"

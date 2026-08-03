@@ -84,7 +84,7 @@ def test_generate_fallback_returns_xhs_publishable_images(tmp_db, monkeypatch, t
     client = _client(tmp_db, monkeypatch)
     tok = _admin_token(tmp_db, client)
     monkeypatch.setattr(app, "STATIC_DIR", tmp_path)
-    monkeypatch.setattr(app.ai_engine, "MIMO_API_KEY", "")
+    monkeypatch.setattr(app.ai_engine, "DASHSCOPE_API_KEY", "")
 
     response = client.post(
         "/api/generate",
@@ -96,7 +96,7 @@ def test_generate_fallback_returns_xhs_publishable_images(tmp_db, monkeypatch, t
     content = response.json()["contents"][0]
     assert len(content["image_pages"]) >= 5
     assert len(content["attachments"]) == len(content["image_pages"])
-    assert all(item["template_version"] == "buffalo-gold-v1" for item in content["attachments"])
+    assert all(item["template_version"] == "buffalo-reference-v4" for item in content["attachments"])
     assert all((tmp_path / item["path"]).exists() for item in content["attachments"])
 
 

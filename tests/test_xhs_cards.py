@@ -13,6 +13,19 @@ def test_normalize_pages_sanitizes_and_limits_content():
     assert pages[0]["type"] == "cover"
     assert pages[1]["type"] == "content"
     assert pages[1]["points"] == ["A", "B", "C", "D"]
+    assert pages[0]["show_logo"] is True
+    assert pages[0]["logo_variant"] == "header"
+    assert len(pages) == 5
+
+
+def test_normalize_pages_preserves_logo_editing_controls():
+    pages = normalize_pages("标题", [
+        {"headline": "封面", "show_logo": False, "logo_variant": "large"},
+        {"headline": "正文", "points": ["要点"], "show_logo": True, "logo_variant": "large"},
+    ])
+    assert pages[0]["show_logo"] is False
+    assert pages[0]["logo_variant"] == "large"
+    assert pages[1]["show_logo"] is True
 
 
 def test_render_carousel_creates_publishable_pngs(tmp_path: Path):
@@ -21,20 +34,28 @@ def test_render_carousel_creates_publishable_pngs(tmp_path: Path):
         {"headline": "确认最新动态", "points": ["核对船期", "提前同步客户"]},
     ], tmp_path)
 
-    assert len(pages) == len(attachments) == 2
+    assert len(pages) == len(attachments) == 5
     first = tmp_path / attachments[0]["path"]
     assert first.exists()
     with Image.open(first) as image:
         assert image.format == "PNG"
         assert image.size == (1242, 1660)
     assert attachments[0]["generated"] is True
-    assert attachments[0]["template_version"] == "buffalo-gold-v1"
+    assert attachments[0]["template_version"] == "buffalo-reference-v4"
+
+    # Both the Buffalo icon and wordmark must be visible; neither a text-only
+    # fallback nor a hand-drawn approximation is acceptable.
+    with Image.open(first).convert("RGB") as image:
+        mark_region = image.crop((730, 50, 815, 145))
+        wordmark_region = image.crop((815, 50, 1100, 155))
+        assert any(r > 235 and g > 235 and b > 235 for r, g, b in mark_region.getdata())
+        assert any(r > 235 and g > 235 and b > 235 for r, g, b in wordmark_region.getdata())
 
 
 def test_pages_from_legacy_content_builds_carousel():
     pages = pages_from_content("PAT 注册三步走", "第一步：准备资料\n确认产品与企业资料。\n\n第二步：提交申请\n保存申请编号。")
     assert pages[0]["type"] == "cover"
-    assert len(pages) >= 3
+    assert 5 <= len(pages) <= 7
 
 
 def test_render_carousel_uses_available_brand_photos(tmp_path: Path):
@@ -48,6 +69,14 @@ def test_render_carousel_uses_available_brand_photos(tmp_path: Path):
         {"headline": "海外仓能力", "points": ["库位精细化管理", "灵活补货", "本地退货处理"]},
     ], tmp_path)
 
-    assert len(attachments) == 3
+    assert len(attachments) == 5
     with Image.open(tmp_path / attachments[2]["path"]) as image:
         assert image.getpixel((100, 100)) != image.getpixel((100, 1000))
+
+
+def test_normalize_pages_caps_carousel_at_seven_pages():
+    pages = normalize_pages("标题", [
+        {"headline": f"第 {index + 1} 页", "points": ["真实要点"]}
+        for index in range(10)
+    ])
+    assert len(pages) == 7

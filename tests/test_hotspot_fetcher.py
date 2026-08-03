@@ -126,7 +126,7 @@ def test_hotspot_source_admin_api_and_ssrf_validation(tmp_db):
     assert hotspot_fetcher.configured_feeds()[0]["url"] == "https://news.gov.za/feed.xml"
 
 
-def test_hotspot_source_api_limits_enabled_sources_to_five(tmp_db):
+def test_hotspot_source_api_limits_enabled_sources(tmp_db):
     from fastapi.testclient import TestClient
     import app, auth
 
@@ -138,7 +138,8 @@ def test_hotspot_source_api_limits_enabled_sources_to_five(tmp_db):
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    for index in range(5):
+    cap = hotspot_fetcher.MAX_ENABLED_SOURCES
+    for index in range(cap):
         response = client.post(
             "/api/hotspot-sources",
             headers=headers,
@@ -152,10 +153,10 @@ def test_hotspot_source_api_limits_enabled_sources_to_five(tmp_db):
     rejected = client.post(
         "/api/hotspot-sources",
         headers=headers,
-        json={"name": "Sixth", "feed_url": "https://sixth.gov.za/feed.xml"},
+        json={"name": "Overflow", "feed_url": "https://overflow.gov.za/feed.xml"},
     )
     assert rejected.status_code == 409
-    assert rejected.json()["detail"] == "最多启用 5 个可信源，请先停用一个现有信源"
+    assert rejected.json()["detail"] == f"最多启用 {cap} 个可信源，请先停用一个现有信源"
 
     disabled = client.post(
         "/api/hotspot-sources",
@@ -182,18 +183,19 @@ def test_hotspot_source_api_limits_enabled_sources_to_five(tmp_db):
     assert enable_rejected.status_code == 409
 
 
-def test_default_sources_seed_exactly_five_without_overwriting_admin_changes(tmp_db):
+def test_default_sources_seed_all_defaults_without_overwriting_admin_changes(tmp_db):
     inserted = hotspot_fetcher.seed_default_sources()
 
-    assert inserted == 5
+    default_count = len(hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES)
+    assert inserted == default_count
     sources = tmp_db.list_hotspot_sources(enabled_only=True)
-    assert len(sources) == 5
+    assert len(sources) == default_count
     assert {source["feed_url"] for source in sources} == {
         source["url"] for source in hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES
     }
 
     assert hotspot_fetcher.seed_default_sources() == 0
-    assert len(tmp_db.list_hotspot_sources(enabled_only=True)) == 5
+    assert len(tmp_db.list_hotspot_sources(enabled_only=True)) == default_count
     assert "https://www.transport.gov.za/?feed=rss2" in {
         source["feed_url"] for source in sources
     }
@@ -211,7 +213,7 @@ def test_default_sources_replaces_broken_legacy_statssa_feed(tmp_db):
     hotspot_fetcher.seed_default_sources()
 
     sources = tmp_db.list_hotspot_sources(enabled_only=True)
-    assert len(sources) == 5
+    assert len(sources) == len(hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES)
     assert all("statssa.gov.za" not in source["feed_url"] for source in sources)
     assert any("transport.gov.za" in source["feed_url"] for source in sources)
 
@@ -287,6 +289,46 @@ async def test_one_failed_source_does_not_block_healthy_source(tmp_db, tmp_path)
 
     assert result["new"] == 1
     assert [item["status"] for item in result["source_health"]] == ["error", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_challenged_source_is_blocked_not_errored(tmp_db, tmp_path):
+    feed_xml = """<rss><channel><item><title>South Africa logistics update</title>
+      <link>https://good.gov.za/item</link><description>Freight update</description>
+    </item></channel></rss>"""
+
+    def handler(request: httpx.Request):
+        url = str(request.url)
+        if url == "https://protected.co.za/feed/":
+            return httpx.Response(403, headers={"server": "cloudflare", "cf-mitigated": "challenge"}, request=request)
+        if url == "https://good.gov.za/feed.xml":
+            return httpx.Response(200, text=feed_xml, request=request)
+        if url == "https://good.gov.za/item":
+            return httpx.Response(200, text="Official update", request=request)
+        if url.startswith(hotspot_fetcher.COMMONS_API):
+            return httpx.Response(200, json={"query": {"pages": {}}}, request=request)
+        return httpx.Response(404, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await hotspot_fetcher.fetch_hotspots(
+            tmp_path,
+            feeds=[
+                {"name": "Protected", "url": "https://protected.co.za/feed/", "allowed_domains": ["protected.co.za"]},
+                {"name": "Good", "url": "https://good.gov.za/feed.xml", "allowed_domains": ["good.gov.za"]},
+            ],
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert result["new"] == 1
+    health_by_name = {item["name"]: item for item in result["source_health"]}
+    assert health_by_name["Protected"]["status"] == "blocked"
+    assert health_by_name["Good"]["status"] == "ok"
+    # 被反爬拦截的源不进硬错误列表，避免 source_health 刷红
+    assert result["errors"] == []
+    assert result["skipped"] >= 1
 
 
 @pytest.mark.asyncio

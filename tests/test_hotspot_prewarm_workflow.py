@@ -342,8 +342,10 @@ async def test_chat_targeted_refresh_rescans_authorised_sources_before_hook_inta
     report = await scheduler.refresh_targeted_hotspot_hooks()
 
     assert report["status"] == "completed"
-    assert captured["fetch"]["video_limit"] == 12
-    assert captured["fetch"]["video_channels"] == scheduler.hotspot_fetcher.DEFAULT_VIDEO_CHANNELS
+    import hotspot_video_sources
+
+    assert captured["fetch"]["video_limit"] == hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT
+    assert captured["fetch"]["video_channels"] == scheduler.hotspot_fetcher.configured_video_channels()
     assert captured["prewarm"] is True
 
 

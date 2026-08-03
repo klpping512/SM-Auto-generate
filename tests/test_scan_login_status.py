@@ -5,7 +5,9 @@ def test_scan_login_status_returns_session_state(tmp_db):
     from fastapi.testclient import TestClient
     import auth
 
-    tmp_db.create_user("scanadmin", auth.hash_password("pw12345"), "admin", "A")
+    user_id = tmp_db.create_user("scanadmin", auth.hash_password("pw12345"), "admin", "A")
+    tmp_db.create_account("xiaohongshu", "扫码账号", "scan-account", owner_id=user_id)
+    account_id = tmp_db.get_accounts(owner_id=user_id)[0]["id"]
     client = TestClient(app.app)
     token = client.post("/api/auth/login", json={
         "username": "scanadmin", "password": "pw12345",
@@ -13,11 +15,11 @@ def test_scan_login_status_returns_session_state(tmp_db):
     headers = {"Authorization": f"Bearer {token}"}
 
     app.scan_login_sessions["known"] = {
-        "status": "error", "account_id": 42, "platform": "xiaohongshu", "error": "network",
+        "status": "error", "account_id": account_id, "platform": "xiaohongshu", "error": "network",
     }
-    response = client.get("/api/accounts/42/scan-login/known", headers=headers)
+    response = client.get(f"/api/accounts/{account_id}/scan-login/known", headers=headers)
     assert response.status_code == 200
     assert response.json() == {"status": "error", "error": "network"}
 
-    missing = client.get("/api/accounts/7/scan-login/known", headers=headers)
+    missing = client.get(f"/api/accounts/{account_id + 1}/scan-login/known", headers=headers)
     assert missing.status_code == 404

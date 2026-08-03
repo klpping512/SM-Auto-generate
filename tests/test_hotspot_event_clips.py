@@ -123,3 +123,27 @@ def test_event_matching_separates_hotspot_and_owned_candidates():
     assert all(item["library_origin"] == "owned" for item in result["owned_candidates"])
     assert len(result["hotspot_candidates"]) <= 3
     assert len(result["owned_candidates"]) <= 3
+
+
+def test_event_matching_supports_chinese_only_hook_titles():
+    from hotspot_event_matching import match_event
+
+    event = {"hotspot_id": 9, "title_zh": "Musina 附近交通拥堵", "location": "", "keywords": []}
+    segments = [
+        {
+            "id": 1, "asset_hotspot_id": 9,
+            "description": "现场画面显示道路拥堵，卡车排队",
+            "asset_rights_status": "licensed", "asset_file_type": "video",
+        },
+        {
+            "id": 2, "asset_hotspot_id": None,
+            "description": "Buffalo 仓库货架分拣",
+            "asset_rights_status": "confirmed", "asset_file_type": "video",
+        },
+    ]
+
+    result = match_event(event, segments)
+
+    assert result["hotspot_candidates"]
+    assert "拥堵" in " ".join(result["hotspot_candidates"][0]["match_reasons"])
+    assert result["owned_candidates"] == []

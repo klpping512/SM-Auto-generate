@@ -241,13 +241,34 @@ def test_active_process_group_is_terminated(monkeypatch):
 
     process = FakeProcess()
     killed = []
-    video_renderer._ACTIVE_PROCESSES["job-a"] = process
+    video_renderer._ACTIVE_PROCESSES["job-a"] = {process}
     monkeypatch.setattr(video_renderer.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(video_renderer.os, "killpg", lambda pgid, signal: killed.append((pgid, signal)))
 
     assert video_renderer.cancel_render("job-a") is True
     assert killed and killed[0][0] == 4321
     video_renderer._ACTIVE_PROCESSES.pop("job-a", None)
+
+
+def test_cancel_terminates_all_active_ffmpeg_children(monkeypatch):
+    import video_renderer
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    killed = []
+    video_renderer._ACTIVE_PROCESSES["job-multi"] = {FakeProcess(11), FakeProcess(22)}
+    monkeypatch.setattr(video_renderer.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(video_renderer.os, "killpg", lambda pgid, signal: killed.append(pgid))
+
+    assert video_renderer.cancel_render("job-multi") is True
+    assert set(killed) == {11, 22}
+    video_renderer._ACTIVE_PROCESSES.pop("job-multi", None)
 
 
 def test_normalize_script_preserves_event_clip_range():

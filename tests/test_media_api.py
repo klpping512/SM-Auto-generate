@@ -1,4 +1,7 @@
 import io
+from pathlib import Path
+
+import pytest
 
 from PIL import Image
 
@@ -16,6 +19,50 @@ def _png():
     buffer = io.BytesIO(); Image.new("RGB", (100, 160), "red").save(buffer, "PNG"); buffer.seek(0); return buffer
 
 
+class _ChunkOnlyUpload:
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self.read_sizes = []
+
+    async def read(self, size=-1):
+        assert size > 0, "上传实现禁止无参数整文件读取"
+        self.read_sizes.append(size)
+        return next(self._chunks, b"")
+
+
+@pytest.mark.asyncio
+async def test_large_upload_is_streamed_in_bounded_chunks(tmp_path):
+    import media_assets
+
+    upload = _ChunkOnlyUpload([b"abcd", b"efgh", b"ij", b""])
+    target = tmp_path / "large.mov"
+    size = await media_assets.stream_upload_to_path(upload, target, max_size=12, chunk_size=4)
+
+    assert size == 10
+    assert target.read_bytes() == b"abcdefghij"
+    assert upload.read_sizes == [4, 4, 4, 4]
+
+
+@pytest.mark.asyncio
+async def test_stream_upload_rejects_limit_and_removes_partial_file(tmp_path):
+    import media_assets
+
+    upload = _ChunkOnlyUpload([b"abcd", b"efgh", b""])
+    target = tmp_path / "too-large.mov"
+    with pytest.raises(ValueError, match="超过大小限制"):
+        await media_assets.stream_upload_to_path(upload, target, max_size=6, chunk_size=4)
+
+    assert not target.exists()
+
+
+def test_assets_page_exposes_large_upload_progress_contract():
+    page = (Path(__file__).parents[1] / "static" / "assets.html").read_text()
+    assert "upload.onprogress" in page
+    assert 'id="uploadProgress"' in page
+    assert "MAX_VIDEO_UPLOAD" in page
+    assert "2147483648" in page
+
+
 def test_asset_upload_list_update_delete(tmp_db, monkeypatch, tmp_path):
     import app
     client, headers = _client_and_token(tmp_db)
@@ -29,6 +76,40 @@ def test_asset_upload_list_update_delete(tmp_db, monkeypatch, tmp_path):
     assert client.delete(f"/api/assets/{asset['id']}", headers=headers).json()["status"] == "deleted"
 
 
+def test_brand_filter_returns_delivery_asset_with_visible_buffalo_tag(tmp_db):
+    client, headers = _client_and_token(tmp_db)
+    asset_id = tmp_db.create_asset({
+        "name": "IMG_6032", "filepath": "assets/library/image/truck.jpg", "file_type": "image",
+        "category": "delivery", "duration": None, "width": 1600, "height": 900, "size": 1024,
+        "thumbnail": None, "sha256": "b" * 64, "source": "upload", "status": "active", "created_by": None,
+    })
+    segment_id = tmp_db.create_asset_segment({
+        "asset_id": asset_id, "segment_index": 0, "start_ms": 0, "end_ms": 0,
+        "description": "Buffalo 配送车", "primary_category": "delivery",
+        "processing_version": "semantic-v3-qwen-vl-brand",
+    })
+    tmp_db.replace_segment_tags(segment_id, [
+        {"dimension": "brand", "value": "Buffalo", "confidence": 0.95, "source": "ocr"},
+    ])
+
+    response = client.get("/api/assets?category=brand", headers=headers)
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["id"] for item in items] == [asset_id]
+    assert items[0]["category"] == "delivery"
+    assert items[0]["brand_tags"] == ["Buffalo"]
+
+
+def test_assets_page_exposes_brand_tags_and_safe_taxonomy_rebuild_actions():
+    page = (Path(__file__).parents[1] / "static" / "assets.html").read_text(encoding="utf-8")
+
+    assert "品牌露出：" in page
+    assert "补全 Buffalo 品牌标签" in page
+    assert "重建视觉与物流标签" in page
+    assert "/api/assets/backfill-buffalo-brand-tags" in page
+
+
 def test_render_rejects_missing_capability(tmp_db, monkeypatch):
     import app
     client, headers = _client_and_token(tmp_db)
@@ -36,3 +117,71 @@ def test_render_rejects_missing_capability(tmp_db, monkeypatch):
     response = client.post("/api/douyin/render", headers=headers, json={"voice": "苏打", "scenes": []})
     assert response.status_code == 503
     assert "FFmpeg" in response.json()["detail"]
+
+
+def test_render_job_is_private_to_creator(tmp_db, monkeypatch):
+    import app, auth
+    from fastapi.testclient import TestClient
+    own_id = tmp_db.create_user("owneditor", auth.hash_password("pw12345"), "editor", "Own")
+    other_id = tmp_db.create_user("othereditor", auth.hash_password("pw12345"), "editor", "Other")
+    client = TestClient(app.app)
+    token = client.post("/api/auth/login", json={"username": "owneditor", "password": "pw12345"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    tmp_db.create_render_job("private-job", {"scenes": []}, "苏打", other_id)
+    assert client.get("/api/douyin/render/private-job", headers=headers).status_code == 404
+    assert client.post("/api/douyin/render/private-job/retry", headers=headers).status_code == 404
+
+
+def test_subtitles_follow_speech_timeline_and_clip_selection():
+    import video_renderer
+    script = video_renderer.normalize_script({
+        "output_mode": "full_and_clips", "selected_clip_scenes": [1, "2", 9, 2],
+        "scenes": [{"duration": 5, "voiceover": f"第{i}句。", "visual": "仓库"} for i in range(1, 5)],
+    }, set())
+    assert script["selected_clip_scenes"] == [1, 2]
+    cues = video_renderer.build_subtitle_cues("先说事实。再说结论！", 6.5)
+    assert cues[0]["start"] == 0
+    assert cues[-1]["end"] == 6.5
+    assert cues[0]["end"] == cues[1]["start"]
+
+
+def test_scene_subtitles_do_not_require_optional_libass(tmp_path, monkeypatch):
+    import video_renderer
+    source = tmp_path / "source.mp4"; source.touch()
+    wav = tmp_path / "voice.wav"; wav.touch()
+    segment = tmp_path / "segment.mp4"
+    monkeypatch.setattr(video_renderer, "_has_audio", lambda *_: False)
+    command = video_renderer._scene_command(
+        "ffmpeg", "ffprobe", source, True, wav,
+        [{"start": 0.0, "end": 1.5, "text": "字幕兼容性测试。"}],
+        2.0, segment, tmp_path, 0,
+    )
+    joined = " ".join(command)
+    assert "overlay=" in joined
+    assert "ass=" not in joined
+    assert (tmp_path / "subtitle-0-0.png").exists()
+
+
+def test_normalized_script_rejects_reusing_one_buffalo_source_for_multiple_segments():
+    import video_renderer
+
+    with pytest.raises(ValueError, match="Buffalo 原始视频 7"):
+        video_renderer.normalize_script({"scenes": [
+            {"duration": 5, "voiceover": f"旁白{i}", "asset_id": 7,
+             "asset_segment_id": 20 + i, "asset_start_ms": 2_000, "asset_end_ms": 7_000}
+            for i in range(4)
+        ]}, {7})
+
+
+def test_scene_command_seeks_to_matched_shot_start(tmp_path, monkeypatch):
+    import video_renderer
+
+    source = tmp_path / "source.mp4"; source.touch()
+    wav = tmp_path / "voice.wav"; wav.touch()
+    monkeypatch.setattr(video_renderer, "_has_audio", lambda *_: False)
+    command = video_renderer._scene_command(
+        "ffmpeg", "ffprobe", source, True, wav, [], 4.0,
+        tmp_path / "out.mp4", tmp_path, 0, source_start=2.5,
+    )
+
+    assert command[command.index("-ss") + 1] == "2.5"

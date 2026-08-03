@@ -189,3 +189,56 @@ def test_expired_cancel_requested_job_recovers_as_canceled(tmp_db):
     recovered = tmp_db.get_video_generation_job(job["id"])
     assert recovered["status"] == "canceled"
     assert recovered["canceled_at"]
+
+
+def test_project_status_tracks_job_terminal_and_review_states(tmp_db):
+    user_id = _user(tmp_db)
+    project, revision = _project_and_revision(tmp_db, user_id)
+    job, created = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "sync-key"
+    )
+    assert created is True
+    loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+    assert loaded["status"] == "generating"
+    assert loaded["active_job_id"] == job["id"]
+
+    tmp_db.update_video_generation_job(job["id"], status="needs_review", stage="preview_quality_check")
+    loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+    assert loaded["status"] == "needs_review"
+    assert loaded["active_job_id"] == job["id"]
+
+    for terminal in ("succeeded", "failed", "canceled"):
+        tmp_db.update_video_generation_job(job["id"], status=terminal, stage=terminal)
+        loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+        assert loaded["status"] == "ready"
+        assert loaded["active_job_id"] == job["id"]
+
+
+def test_cancel_pending_job_sets_project_ready(tmp_db):
+    user_id = _user(tmp_db)
+    project, revision = _project_and_revision(tmp_db, user_id)
+    job, _ = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "cancel-sync-key"
+    )
+    tmp_db.request_video_generation_cancel(job["id"], user_id)
+    loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+    assert loaded["status"] == "ready"
+    assert loaded["active_job_id"] == job["id"]
+
+
+def test_revision_payload_update_does_not_force_generating_for_terminal_job(tmp_db):
+    user_id = _user(tmp_db)
+    project, revision = _project_and_revision(tmp_db, user_id)
+    job, _ = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "revision-sync-key"
+    )
+    tmp_db.update_video_generation_job(job["id"], status="succeeded", stage="succeeded", progress=100)
+    tmp_db.update_video_project_revision_payload(
+        revision["id"],
+        {"title": "改标题", "voice": "冰糖", "scenes": []},
+        created_by=user_id,
+        title="改标题",
+    )
+    loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+    assert loaded["status"] == "ready"
+    assert loaded["active_job_id"] == job["id"]

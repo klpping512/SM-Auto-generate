@@ -71,7 +71,7 @@ def test_qwen_curates_only_grounded_contiguous_hook_segments(tmp_db, monkeypatch
         "logistics_question": "入口检查变慢时，卖家应怎样核对到仓与配送计划？",
         "curator": "planner_text",
         "hook_sop_id": "buffalo-hotspot-hook-selection",
-        "hook_sop_version": "v1",
+        "hook_sop_version": "v2",
         "event_identity": "港口入口货车排队检查",
         "selected_segment_indexes": [0, 1],
     }

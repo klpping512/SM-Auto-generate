@@ -19,14 +19,43 @@ def _payload():
     }
 
 
-def test_default_youtube_sources_are_the_three_approved_channels():
+def test_default_youtube_sources_are_the_approved_channels():
     import hotspot_video_sources
 
     assert [item["url"] for item in hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS] == [
         "https://www.youtube.com/@SAtoday",
         "https://www.youtube.com/@SouthAfricaNow1",
         "https://www.youtube.com/@sabcdigitalnews",
+        "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA",
+        "https://www.youtube.com/@NewzroomAfrikaTV",
     ]
+
+
+def test_configured_channels_env_overrides_defaults(monkeypatch):
+    import hotspot_video_sources
+
+    monkeypatch.setenv(
+        "SA_HOTSPOT_VIDEO_CHANNELS_JSON",
+        json.dumps([
+            {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
+            {"name": "bad", "url": "https://example.com/@notyoutube"},
+            {"name": "", "url": "https://www.youtube.com/@nameless"},
+        ]),
+    )
+    channels = hotspot_video_sources.configured_channels()
+    assert channels == [
+        {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
+    ]
+
+
+def test_configured_channels_falls_back_to_defaults(monkeypatch):
+    import hotspot_video_sources
+
+    monkeypatch.delenv("SA_HOTSPOT_VIDEO_CHANNELS_JSON", raising=False)
+    assert hotspot_video_sources.configured_channels() == hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS
+
+    monkeypatch.setenv("SA_HOTSPOT_VIDEO_CHANNELS_JSON", "not json")
+    assert hotspot_video_sources.configured_channels() == hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS
 
 
 def test_channel_command_uses_configured_proxy_without_cookie(monkeypatch):
@@ -113,7 +142,7 @@ def test_authorized_youtube_metadata_is_persisted_for_qwen_intake(tmp_db):
     assert persisted["intake_metadata_checked_at"]
 
 
-def test_channel_discovery_reads_three_metadata_items_without_downloading(tmp_db):
+def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):
     import hotspot_video_sources
 
     commands = []
@@ -127,23 +156,23 @@ def test_channel_discovery_reads_three_metadata_items_without_downloading(tmp_db
         runner=runner,
     )
 
-    assert result["new"] == 3
-    assert result["media"] == 3
+    assert result["new"] == 5
+    assert result["media"] == 5
     assert result["source_health"] == [
-        {"name": "YouTube · SA Today", "status": "ok", "items": 3, "error": ""}
+        {"name": "YouTube · SA Today", "status": "ok", "items": 5, "error": ""}
     ]
     command = commands[0]
     assert "--flat-playlist" in command
-    assert command[command.index("--playlist-end") + 1] == "3"
+    assert command[command.index("--playlist-end") + 1] == str(hotspot_video_sources.CHANNEL_VIDEO_LIMIT)
     assert not any("cookie" in value.casefold() for value in command)
     assert not any(value in {"--output", "-o"} for value in command)
 
     hotspots = tmp_db.list_hotspots(limit=10)
-    assert len(hotspots) == 3
+    assert len(hotspots) == 5
     media = tmp_db.list_hotspot_media(media_kind="video_link", limit=10)
-    assert len(media) == 3
+    assert len(media) == 5
     signals = tmp_db.list_hotspot_signals(limit=10)
-    assert len(signals) == 3
+    assert len(signals) == 5
     assert {signal["source_type"] for signal in signals} == {"youtube"}
     assert all(item["platform"] == "youtube" for item in media)
     assert all(item["rights_tier"] == "yellow" for item in media)
@@ -202,6 +231,6 @@ async def test_main_hotspot_fetch_combines_youtube_channel_results(tmp_db, tmp_p
     )
 
     assert result["video_channels"] == 1
-    assert result["video_new"] == 3
-    assert result["video_media"] == 3
+    assert result["video_new"] == 5
+    assert result["video_media"] == 5
     assert result["source_health"][0]["name"] == "YouTube · SA Today"

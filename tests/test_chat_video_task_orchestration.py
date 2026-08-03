@@ -1,5 +1,3 @@
-import asyncio
-
 from fastapi.testclient import TestClient
 
 
@@ -72,49 +70,10 @@ def test_chat_video_request_returns_job_id_and_does_not_call_the_model(tmp_db, m
     assert second.json()["job_id"] == first.json()["job_id"]
 
 
-def test_chat_video_worker_creates_project_only_after_background_planning(tmp_db, monkeypatch):
-    app, client, headers, event = _client_with_hook(tmp_db)
-    created = client.post("/api/ai/chat/dual-library-video", headers=headers, json={
-        "topic": "南非海外仓不是仓库，而是本地团队",
-        "hotspot_event_ids": [event["id"]], "platform": "douyin",
-        "target_duration_ms": 60_000, "session_id": "worker-session",
-    }).json()["task"]
-    captured = {}
-
-    async def fake_generate(_brief_id, _body, user, source_snapshot=None):
-        captured["snapshot"] = source_snapshot
-        project = tmp_db.create_video_project(
-            created_by=user["id"], source_type="topic_brief_dual_library",
-            source_snapshot=source_snapshot or {}, title="海外仓是本地团队",
-            platform="douyin", target_duration_ms=60_000, target_orientation="portrait",
-        )
-        tmp_db.create_video_project_revision(project["id"], {"scenes": []}, user["id"])
-        return {"project": tmp_db.get_video_project(project["id"], created_by=user["id"])}
-
-    monkeypatch.setattr(app, "_generate_topic_brief_video", fake_generate)
-    claimed = tmp_db.claim_next_chat_video_task("test-worker")
-    assert claimed["id"] == created["id"]
-    asyncio.run(app._run_chat_video_task(claimed, "test-worker"))
-    task = tmp_db.get_chat_video_task(created["id"])
-
-    assert task["status"] == "running"
-    assert task["stage"] == "video_generation"
-    assert task["project_id"] and task["video_job_id"]
-    assert captured["snapshot"]["matched_event_clip_ids"] == [event["id"]]
-    observed = client.get(f"/api/ai/chat/dual-library-video/tasks/{task['id']}", headers=headers)
-    assert observed.status_code == 200
-    assert observed.json()["next_action"]
-
-
-def test_expired_chat_task_is_recoverable_after_worker_restart(tmp_db):
-    _app, _client, _headers, event = _client_with_hook(tmp_db)
-    user = tmp_db.get_user_by_username("task-owner")
-    task, _ = tmp_db.create_or_get_chat_video_task(
-        user["id"], "expired-task", "南非物流", [event["id"]], "douyin", 60_000, "restart",
+def test_legacy_chat_video_task_endpoint_is_gone(tmp_db):
+    _app, client, headers, _event = _client_with_hook(tmp_db)
+    observed = client.get(
+        "/api/ai/chat/dual-library-video/tasks/not-a-real-task",
+        headers=headers,
     )
-    claimed = tmp_db.claim_next_chat_video_task("first-worker", lease_seconds=1)
-    assert claimed["id"] == task["id"]
-    tmp_db.update_chat_video_task(task["id"], lease_expires_at="2000-01-01 00:00:00")
-
-    assert tmp_db.recover_expired_chat_video_tasks() == 1
-    assert tmp_db.get_chat_video_task(task["id"])["status"] == "pending"
+    assert observed.status_code == 404
