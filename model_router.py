@@ -11,47 +11,65 @@ import httpx
 import database as db
 
 
-ROLES = {"planner_text", "vision_tagger", "video_evaluator", "critic", "tts"}
+ROLES = {
+    "planner_text", "chat_text", "vision_tagger", "video_evaluator", "critic", "tts", "asr",
+}
+
+MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 
 DEFAULT_ROUTES = {
+    # Decision / Hook / script planning — smarter Pro model.
     "planner_text": {
-        "role": "planner_text", "provider": "openai_compatible",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen3.7-plus",
-        "capabilities": ["text"], "timeout": 60, "max_tokens": 1800,
-        "cost_profile": "medium", "request_options": {"enable_thinking": True, "thinking_budget": 3000}, "enabled": True,
+        "role": "planner_text", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
+        "capabilities": ["text"], "timeout": 90, "max_tokens": 1800,
+        "cost_profile": "high", "enabled": True,
     },
+    # Chat / platform copy — standard MiMo text.
+    "chat_text": {
+        "role": "chat_text", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
+        "capabilities": ["text"], "timeout": 60, "max_tokens": 2200,
+        "cost_profile": "medium", "enabled": True,
+    },
+    # Vision tagging — mimo-v2.5 multimodal (NOT asr).
     "vision_tagger": {
-        "role": "vision_tagger", "provider": "openai_compatible",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen-vl-plus",
-        "capabilities": ["text", "vision"], "timeout": 45, "max_tokens": 800,
-        # Qwen-VL 的兼容接口以提示词约束 JSON；避免依赖不同版本对
-        # response_format 的支持差异。
+        "role": "vision_tagger", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
+        "capabilities": ["text", "vision"], "timeout": 60, "max_tokens": 900,
         "json_mode": False, "cost_profile": "medium", "enabled": True,
     },
     "video_evaluator": {
-        "role": "video_evaluator", "provider": "openai_compatible",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen-vl-plus",
-        # 百炼 OpenAI 兼容接口采用 max_tokens。这里预留 1800 token，足以
-        # 返回紧凑的结构化质检结论，也不会让失败时的重做建议淹没 JSON 尾部。
+        "role": "video_evaluator", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
         "capabilities": ["text", "vision"], "timeout": 120, "max_tokens": 1800,
         "cost_profile": "medium", "enabled": True,
     },
     "critic": {
-        "role": "critic", "provider": "openai_compatible",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen3.7-plus",
-        "capabilities": ["text"], "timeout": 60, "max_tokens": 1400,
-        "cost_profile": "medium", "request_options": {"enable_thinking": True, "thinking_budget": 2400}, "enabled": True,
+        "role": "critic", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
+        "capabilities": ["text"], "timeout": 90, "max_tokens": 1400,
+        "cost_profile": "high", "enabled": True,
     },
     "tts": {
-        "role": "tts", "provider": "dashscope_tts",
-        "base_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-        "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen3-tts-flash",
+        "role": "tts", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-tts",
         "capabilities": ["audio"], "timeout": 60, "max_tokens": 0,
         "cost_profile": "low", "enabled": True,
+    },
+    # Speech-to-text only — never wire this to vision tagging.
+    "asr": {
+        "role": "asr", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-asr",
+        "capabilities": ["audio"], "timeout": 120, "max_tokens": 0,
+        "cost_profile": "medium", "enabled": True,
     },
 }
 

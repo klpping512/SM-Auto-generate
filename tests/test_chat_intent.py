@@ -251,7 +251,7 @@ def test_ai_chat_broad_market_topic_needs_event_anchor_not_discovery(tmp_db, mon
     assert payload["failure_class"] == "no_event_anchor"
     assert refresh_calls == []
     assert tmp_db.list_hotspot_discovery_requests() == []
-    assert "补采" not in (payload["hotspot_retrieval"].get("message") or "") or "未启动" in payload["hotspot_retrieval"]["message"]
+    assert "未启动" in (payload["hotspot_retrieval"].get("message") or "") or "点选" in (payload["hotspot_retrieval"].get("message") or "")
     assert payload["hotspot_retrieval"].get("funnel", {}).get("passed") == 0
 
 
@@ -266,9 +266,14 @@ def test_ai_chat_evergreen_tries_generic_hooks_but_skips_discovery(tmp_db, monke
             "failure_class": "no_event_anchor",
             "hooks": [],
             "video": {"status": "disabled"},
-            "producible_topics": [{"topic": "德班港拥堵最新：港口拥堵时发货前要核对什么？", "scene": "port"}],
+            "producible_topics": [{
+                "topic": "德班港拥堵最新：港口拥堵时发货前要核对什么？",
+                "scene": "port",
+                "hook_event_id": 42,
+                "hook_title": "德班港拥堵",
+            }],
             "funnel": {"scanned": 1, "passed": 0, "selected": 0},
-            "message": "当前话题缺少具体热点事件锚点，不能保证强相关 Hook；未启动热点补采。",
+            "message": "当前话题没有自动命中可用 Hook。请在下方点选一个库内 Hook。",
         }
 
     async def generated(**_kwargs):
@@ -285,7 +290,7 @@ def test_ai_chat_evergreen_tries_generic_hooks_but_skips_discovery(tmp_db, monke
     assert payload["content_mode"] == "evergreen"
     assert called["hooks"] == 1
     assert payload["hotspot_retrieval"]["status"] == "not_requested"
-    assert payload["result_state"] == "topic_needs_event_anchor"
+    assert payload["result_state"] == "hook_selection_required"
     assert payload["producible_topics"]
 
 
@@ -300,6 +305,16 @@ def test_assess_event_anchor_and_result_states():
         hotspot_retrieval={"status": "not_requested", "failure_class": "no_event_anchor"},
         event_anchor=broad,
     ) == "topic_needs_event_anchor"
+    assert chat_intent.derive_result_state(
+        content_mode="evergreen",
+        evidence_state="insufficient",
+        hotspot_retrieval={
+            "status": "not_requested",
+            "failure_class": "no_event_anchor",
+            "producible_topics": [{"hook_event_id": 1}],
+        },
+        event_anchor=broad,
+    ) == "hook_selection_required"
 
 
 def test_producible_topics_cluster_ready_hooks():
@@ -365,18 +380,16 @@ def test_discovery_status_api_and_misrouted_archive(tmp_db):
 def test_chat_ui_uses_result_state_card_without_conflicting_peer_status():
     page = Path("static/chat.html").read_text(encoding="utf-8")
     assert "function resultStateCard" in page
-    assert "当前情况" in page and "原因" in page and "下一步" in page
     assert "assistantBubbleText" in page
     assert "framework_pending_evidence" in page
-    assert "topic_needs_event_anchor" in page
+    assert "hook_selection_required" in page
+    assert "bindHookToOriginalTopic" in page
     assert "producibleTopicsMarkup" in page
     assert "funnelDetailsMarkup" in page
     assert "promptComparisonEvidence" in page
     assert "/api/hotspot-discovery-requests/" in page
-    # Hotspot banner must not show for not_requested / framework-only paths.
-    assert "retrieval.status==='not_requested'" in page.replace(" ", "")
-    assert "showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'" in page.replace(" ", "")
-    assert "failure_class==='no_event_anchor'" in page.replace(" ", "")
+    assert "useProducibleTopic" not in page
+    assert "已填入可生产选题" not in page
     # Editor transfer carries evidence gate.
     transfer = Path("static/editor-transfer.js").read_text(encoding="utf-8")
     assert "evidence_status" in transfer

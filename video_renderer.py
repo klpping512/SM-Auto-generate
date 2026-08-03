@@ -570,7 +570,7 @@ def synthesize_scene_voiceover(
     import hashlib
 
     provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
-    fallback_enabled = os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0"
+    fallback_enabled = os.environ.get("TTS_FALLBACK_ENABLED", "0") != "0"
     fallback_provider = (os.environ.get("TTS_FALLBACK_PROVIDER", "qwen") or "qwen").strip().lower()
     mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
     mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)

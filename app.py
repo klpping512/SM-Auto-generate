@@ -130,11 +130,18 @@ async def lifespan(app: FastAPI):
     seeded_sources = hotspot_fetcher.seed_default_sources(admin_user["id"] if admin_user else None)
     if seeded_sources:
         logger.info("已补齐 %s 个南非官方热点信源", seeded_sources)
-    # 从环境变量加载 API key
+    # Prefer MiMo for chat/planning; DashScope is optional legacy only.
+    os.environ.setdefault("TTS_PROVIDER", "mimo")
+    os.environ.setdefault("TTS_FALLBACK_ENABLED", "0")
+    mimo_key = os.environ.get("MIMO_API_KEY", "")
+    if mimo_key:
+        logger.info("MiMo API key 已加载（chat/planner/vision/tts）")
+    else:
+        logger.warning("未配置 MIMO_API_KEY：聊天与规划将不可用")
     key = os.environ.get("DASHSCOPE_API_KEY", "")
     if key:
         ai_engine.set_api_key(key)
-        logger.info("百炼 API key 已加载")
+        logger.info("百炼 API key 已加载（仅作可选遗留能力）")
     # 清理卡住的渲染任务（启动时自动清理超时任务）
     video_renderer.cleanup_stale_jobs()
     recovered_asset_jobs = db.recover_interrupted_asset_processing_jobs()
@@ -266,8 +273,8 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     # 引用企业知识库：按分类取文档全文，注入 prompt
     kb_context = db.get_kb_context(req.kb_category_ids) if req.kb_category_ids else ""
 
-    if not ai_engine.DASHSCOPE_API_KEY:
-        logger.warning("百炼 API key 未配置，使用 fallback 模板")
+    if not ai_engine.chat_model_available():
+        logger.warning("MiMo API key 未配置，使用 fallback 模板")
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
         for content in contents:
             if content.platform.value == "xiaohongshu":
@@ -1904,7 +1911,7 @@ async def _generate_topic_brief_video(
             "next_action": "重新锁定强相关热点 Hook，或换用已确认可渲染的事件片段。",
         })
     if not model_router.key_is_available("planner_text"):
-        raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请配置 DASHSCOPE_API_KEY 后重试。")
+        raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请配置 MIMO_API_KEY 后重试。")
     context = _compact_topic_evidence(brief, event, scenes)
     if hotspot_count == 1:
         hotspot_story_contract = (
@@ -3750,16 +3757,20 @@ async def media_capabilities(user=Depends(get_current_user)):
     result["mimo_api_key"] = bool(os.environ.get("MIMO_API_KEY"))
     result["tts_provider"] = os.environ.get("TTS_PROVIDER", "mimo")
     result["tts_fallback_provider"] = os.environ.get("TTS_FALLBACK_PROVIDER", "qwen")
-    result["tts_fallback_enabled"] = os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0"
+    # Qwen quota is exhausted in production; do not advertise fallback by default.
+    result["tts_fallback_enabled"] = os.environ.get("TTS_FALLBACK_ENABLED", "0") != "0"
     result["mimo_tts_model"] = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
     result["mimo_tts_voice"] = os.environ.get("MIMO_TTS_VOICE", video_renderer.MIMO_TTS_VOICE)
-    # Ready for formal video: FFmpeg + MiMo TTS key (DashScope is visual/text, not narration-required).
+    result["chat_model"] = (model_router.get_route("chat_text") or {}).get("model") or "mimo-v2.5"
+    result["planner_model"] = (model_router.get_route("planner_text") or {}).get("model") or "mimo-v2.5-pro"
+    result["vision_model"] = (model_router.get_route("vision_tagger") or {}).get("model") or "mimo-v2.5"
+    # Ready for formal video: FFmpeg + MiMo TTS key.
     media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
     tts_ok = bool(result["mimo_api_key"] or (result["tts_fallback_enabled"] and result["dashscope_key"]))
     result["ready"] = media_ok and tts_ok
     result["voice_options"] = video_renderer.tts_voice_options(
         mimo_available=result["mimo_api_key"],
-        qwen_available=result["dashscope_key"],
+        qwen_available=bool(result["tts_fallback_enabled"] and result["dashscope_key"]),
     )
     result["voices"] = [item["id"] for item in result["voice_options"]]
     result["tts_preview_supported"] = True
@@ -4051,6 +4062,16 @@ async def _retrieve_confirmed_chat_hooks(
         hook_kind=hook_kind,
         require_scene_overlap=use_generic,
     )
+    # Evergreen topics often lack scene keywords; still try generic logistics
+    # openers so one-click production can auto-lock a real Hook.
+    if use_generic and not candidates:
+        candidates, kb_context, brand_evidence, funnel = _marketing_hook_candidates(
+            brief,
+            limit=8,
+            hook_kind="generic_logistics",
+            require_scene_overlap=False,
+        )
+        funnel = {**(funnel or {}), "generic_relaxed": True}
     # 同一聊天 session 内不应连续把同一段 Hook 当开场：对近期已用过的候选
     # 降权（不排除），素材库很小时仍能在没有更优选项时复用。
     recently_used = db.recent_session_hook_event_ids(session_id, user_id) if session_id else set()
@@ -4068,10 +4089,26 @@ async def _retrieve_confirmed_chat_hooks(
             reverse=True,
         )
     selected_event_ids: set[int] = set()
+    selected = []
+    model_meta: dict = {"used": False}
     if candidates:
         selected, model_meta = await _model_decide_marketing_hooks(
             brief, candidates, kb_context, brand_evidence, limit=2,
         )
+        # One-click path: if the planner returns nothing, still auto-lock the
+        # strongest rule candidate instead of bouncing the user to retype.
+        if not selected:
+            fallback = dict(candidates[0])
+            hooks = _select_chat_video_hook_pair(fallback.get("hook_clips") or [])
+            if hooks:
+                fallback["hook_clips"] = hooks
+                fallback["can_render_video"] = True
+                selected = [fallback]
+                model_meta = {
+                    **(model_meta or {}),
+                    "used": False,
+                    "fallback": "auto_lock_top_candidate",
+                }
         for item in selected:
             selected_hooks = _select_chat_video_hook_pair(item.get("hook_clips") or [])
             if not selected_hooks:
@@ -4093,6 +4130,17 @@ async def _retrieve_confirmed_chat_hooks(
             ]
             locked_events = [event for event in locked_events if event]
             delivery_readiness = _chat_video_delivery_readiness(normalized_topic, locked_events)
+            ready_events = [
+                event for event in db.list_hotspot_event_clips()
+                if _is_confirmed_renderable_hotspot_hook(event)
+            ]
+            hotspots_by_id = {
+                int(item["id"]): item
+                for item in db.list_hotspots(limit=200)
+            }
+            producible = producible_topics.recommend_producible_topics(
+                ready_events, limit=5, hotspots_by_id=hotspots_by_id,
+            )
             return {
                 "status": "matched", "topic": normalized_topic, "hooks": hooks, "model": model_meta,
                 "failure_class": None,
@@ -4108,11 +4156,16 @@ async def _retrieve_confirmed_chat_hooks(
                     "source_asset_id": int(selected_hooks[0]["asset_id"]),
                     "delivery_readiness": delivery_readiness,
                 },
+                "producible_topics": producible,
                 "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
                 "message": (
-                    "已由内置模型锁定同一事件的两段已确认 Hook；成片会用双段现场增强开场。"
-                    if hook_count == 2 else
-                    "已由内置模型锁定一段相关、已确认 Hook；成片会以该真实现场开场。"
+                    "已自动锁定热点 Hook；可在卡片中更换，或直接创建 60 秒视频项目。"
+                    if use_generic else
+                    (
+                        "已由内置模型锁定同一事件的两段已确认 Hook；成片会用双段现场增强开场。"
+                        if hook_count == 2 else
+                        "已由内置模型锁定一段相关、已确认 Hook；成片会以该真实现场开场。"
+                    )
                 ),
             }
 
@@ -4135,16 +4188,16 @@ async def _retrieve_confirmed_chat_hooks(
         )
         message = {
             "no_event_anchor": (
-                "当前话题缺少具体热点事件锚点，不能保证强相关 Hook；"
-                "未启动热点补采。请选择下方可生产选题，或补充口岸/港口/道路等具体事件。"
+                "当前话题没有自动命中可用 Hook。"
+                "请在下方点选一个库内 Hook（绑定到你的原主题，无需改写输入框），或补充具体口岸/港口/道路事件后再试。"
             ),
             "gate_blocked": (
                 "库内有候选 Hook，但未通过确认/可播/场景相关度门禁；"
-                "不会用无关事故画面硬配成片。请查看漏斗或改用可生产选题。"
+                "不会用无关事故画面硬配成片。请点选下方可绑定 Hook。"
             ),
             "coverage_gap": (
                 "主题需要时效事件 Hook，但当前库未覆盖；"
-                "因缺少可定向补采的条件或尚未命中，请改用可生产选题。"
+                "请点选下方可绑定 Hook，或等待定向补采。"
             ),
         }.get(failure, "当前没有可用的强相关 Hook。")
         return {

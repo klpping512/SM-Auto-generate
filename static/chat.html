@@ -187,16 +187,18 @@ function quickTopic(topic,btn){
 }
 function autoResize(input){input.style.height='42px';input.style.height=Math.min(input.scrollHeight,112)+'px';}
 
-function hotspotRetrievalMarkup(result){
+function hotspotRetrievalMarkup(result, resultId){
   const retrieval=result?.hotspot_retrieval;
-  if(!retrieval||retrieval.status==='not_requested')return '';
+  if(!retrieval)return '';
   if(retrieval.status==='matched'){
     const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
     const readiness=retrieval.video?.delivery_readiness;
     const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';
-    return `<div class="result-warning"><strong>强相关热点 Hook 已匹配</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>正式成片将锁定以上相关 Hook，并使用 Buffalo 自有素材补足可见执行动作。</p><a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
+    const swap=producibleTopicsMarkup(result?.producible_topics||retrieval.producible_topics||[], resultId, true);
+    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>保留你的原主题叙事；可更换 Hook，或直接创建 60 秒视频项目。</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
   }
-  if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor')return '';
+  if(retrieval.status==='not_requested')return '';
+  if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor'||result?.result_state==='hook_selection_required')return '';
   return `<div class="result-warning" data-discovery-request="${escapeHtml(String(retrieval.request_id||''))}"><strong>文案草稿已生成 · 视频素材补采中</strong><p>${escapeHtml(retrieval.message||'已进入定向采集队列。')}</p><p>视频按钮会在 Hook 就绪后自动开放；可展开详情查看进度。</p></div>`;
 }
 
@@ -215,24 +217,47 @@ function funnelDetailsMarkup(funnel){
   return `<li>漏斗：${items.map(([k,v])=>`${k} ${Number(v||0)}`).join(' · ')}</li>`;
 }
 
-function producibleTopicsMarkup(topics){
+function producibleTopicsMarkup(topics, resultId, asSwap){
   if(!Array.isArray(topics)||!topics.length)return '';
-  const buttons=topics.slice(0,5).map((item,i)=>{
-    const topic=escapeHtml(item.topic||'');
+  const buttons=topics.slice(0,5).map((item)=>{
+    const label=escapeHtml(item.hook_title||item.topic||'可用 Hook');
     const reason=escapeHtml(item.reason||item.scene_label||'');
-    return `<button type="button" class="btn btn-secondary btn-sm" data-producible-topic="${topic}" onclick="useProducibleTopic(this)">${topic}</button><div class="muted" style="font-size:11px;margin:2px 0 8px">${reason}</div>`;
+    const eventId=Number(item.hook_event_id||0);
+    if(!eventId||!resultId)return '';
+    return `<button type="button" class="btn btn-secondary btn-sm" style="min-height:44px;margin:0 8px 8px 0" data-hook-event-id="${eventId}" data-hook-title="${label}" onclick="bindHookToOriginalTopic('${resultId}',${eventId},this)">${label}</button><div class="muted" style="font-size:11px;margin:0 0 8px">${reason}</div>`;
   }).join('');
-  return `<div class="producible-topics" style="margin-top:10px"><strong>当前可生产选题</strong><p style="font-size:12px;margin:4px 0 8px">话题太宽泛时请改用下列有 Hook 锚点的选题，而不是等待无关素材补采。</p>${buttons}</div>`;
+  if(!buttons)return '';
+  const title=asSwap?'更换开场 Hook':'选择开场 Hook（绑定到你的原主题）';
+  const hint=asSwap
+    ?'点选后立即换绑，无需改写输入框或重新发送。'
+    :'点选库内 Hook 绑定到当前主题后，即可创建视频项目；不会改写你的原 prompt。';
+  return `<div class="producible-topics" style="margin-top:10px"><strong>${title}</strong><p style="font-size:12px;margin:4px 0 8px">${hint}</p>${buttons}</div>`;
 }
 
-function useProducibleTopic(btn){
-  const topic=btn?.getAttribute('data-producible-topic')||'';
-  if(!topic)return;
-  const input=document.getElementById('chatInput');
-  if(!input)return;
-  input.value=topic;
-  autoResize(input);input.focus();
-  showToast('已填入可生产选题，发送后将按该事件检索 Hook','info');
+function bindHookToOriginalTopic(resultId, eventId, btn){
+  const result=resultStore.get(resultId);
+  if(!result||!eventId)return;
+  const title=btn?.getAttribute('data-hook-title')||'已选 Hook';
+  const originalTopic=result.hotspot_retrieval?.topic||result.topic||'';
+  result.hotspot_retrieval={
+    ...(result.hotspot_retrieval||{}),
+    status:'matched',
+    failure_class:null,
+    message:`已绑定 Hook「${title}」到原主题，可直接创建视频项目。`,
+    hooks:[{event_clip_id:eventId,title,description:'用户点选绑定的开场 Hook'}],
+    video:{
+      status:'ready',
+      hotspot_event_ids:[Number(eventId)],
+      delivery_readiness:{delivery_ready:true,status:'delivery_ready',message:'已绑定可用 Hook，可创建项目。'},
+    },
+    topic:originalTopic,
+  };
+  result.result_state='formal_content';
+  result.failure_class=null;
+  resultStore.set(resultId,result);
+  const card=document.getElementById(`result-${resultId}`);
+  if(card)card.outerHTML=resultCardMarkup(result,resultId);
+  showToast('已绑定 Hook 到原主题，可创建视频项目','success');
 }
 
 function resultStateCard(result,id){
@@ -241,9 +266,10 @@ function resultStateCard(result,id){
     formal_content:{title:'平台内容已生成',hint:'可发送到编辑器继续修订；抖音视频请创建 60 秒视频项目。'},
     framework_pending_evidence:{title:'对比框架已生成 · 待补资料',hint:'请补充候选服务商、价格/时效来源与测试日期后再生成正式评测。'},
     hotspot_retrieval_pending:{title:'文案草稿已生成 · 视频素材补采中',hint:'等待热点 Hook 就绪后，本卡片会开放「创建60秒视频项目」。'},
-    hook_coverage_gap:{title:'库未覆盖该时效事件',hint:'可等待定向补采，或改用下方已可生产的选题。'},
-    hook_gate_blocked:{title:'有候选但未过质量门禁',hint:'请改用已通过门禁的可生产选题，不要用无关事故画面硬配。'},
-    topic_needs_event_anchor:{title:'话题缺少热点锚点',hint:'请绑定具体事件，或一键选用下方可生产选题。'},
+    hook_coverage_gap:{title:'库未覆盖该时效事件',hint:'可等待定向补采，或点选下方 Hook 绑定到原主题。'},
+    hook_gate_blocked:{title:'有候选但未过质量门禁',hint:'请点选下方已通过门禁的 Hook 绑定到原主题。'},
+    hook_selection_required:{title:'请选择开场 Hook',hint:'系统未自动命中；点选下方 Hook 绑定到你的原主题即可开拍，无需改写输入框。'},
+    topic_needs_event_anchor:{title:'暂无可用 Hook',hint:'库内暂无可用开场；请补充具体口岸/港口/道路事件，或稍后再试。'},
     brand_assets_insufficient:{title:'热点已就绪 · 将按库存自适应出片',hint:'Buffalo 自有动态不足理想数量时，系统会降级规划并继续创建项目；补充素材仅为可选增强。'},
     authenticity_blocked:{title:'内容暂不可使用 · 请补充证据',hint:'补充带来源的资料后重新生成。'},
     generation_unavailable:{title:'文案模型暂不可用',hint:'请检查内容模型配置或稍后重试。'},
@@ -263,10 +289,8 @@ function resultStateCard(result,id){
   const frameworkActions=state==='framework_pending_evidence'||state==='authenticity_blocked'
     ?`<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',0)">编辑对比框架</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',0)">复制框架</button></div>`
     :'';
-  const topicActions=(state==='topic_needs_event_anchor'||state==='hook_coverage_gap'||state==='hook_gate_blocked'||state==='hotspot_retrieval_pending')
-    ?producibleTopicsMarkup(topics):'';
-  // brand_assets_insufficient is advisory only after adaptive planning; keep
-  // optional assets link, never a hard “前往修复” stop.
+  const topicActions=(state==='hook_selection_required'||state==='topic_needs_event_anchor'||state==='hook_coverage_gap'||state==='hook_gate_blocked'||state==='hotspot_retrieval_pending')
+    ?producibleTopicsMarkup(topics,id,false):'';
   const fixLink=(card.fix&&state!=='brand_assets_insufficient')
     ?`<a class="btn btn-secondary btn-sm" href="${escapeHtml(card.fix)}" style="margin-top:8px;display:inline-flex;min-height:44px;align-items:center">前往修复</a>`
     :(state==='brand_assets_insufficient'
@@ -280,7 +304,8 @@ function assistantBubbleText(result){
   if(state==='framework_pending_evidence')return '对比框架已生成 · 待补资料';
   if(state==='authenticity_blocked')return '内容暂不可使用 · 请补充证据';
   if(state==='generation_unavailable')return '文案模型暂不可用 · 未生成正式内容';
-  if(state==='topic_needs_event_anchor')return '话题缺少热点锚点 · 请选用可生产选题';
+  if(state==='hook_selection_required')return '请选择开场 Hook · 绑定后可直接建项';
+  if(state==='topic_needs_event_anchor')return '暂无可用 Hook';
   if(state==='hook_coverage_gap')return '库未覆盖该时效事件';
   if(state==='hook_gate_blocked')return '有候选但未过质量门禁';
   if(state==='hotspot_retrieval_pending')return '文案草稿已生成 · 视频素材补采中';
@@ -300,7 +325,7 @@ function promptComparisonEvidence(){
 function resultCardMarkup(result,id){
   const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
   resultStore.set(id,result);
-  const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.result_state==='brand_assets_insufficient';
+  const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.result_state==='brand_assets_insufficient'||result?.result_state==='hook_selection_required';
   const tabs=outputs.map((o,i)=>`<button class="result-tab ${i===0?'active':''}" onclick="selectResultTab('${id}',${i},this)">${escapeHtml(platformNames[o.platform]||o.platform)}</button>`).join('');
   const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const isDouyin=o.platform==='douyin';const douyinCta=isDouyin?douyinVideoEntryMarkup(o,id,i,result.hotspot_retrieval,result):'';const editorLabel=(result.result_state==='framework_pending_evidence'||result.result_state==='authenticity_blocked')?'编辑对比框架':'发送到编辑器';const actions=isDouyin
     ?`${douyinCta}<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制摘要</button></div>`
@@ -308,7 +333,7 @@ function resultCardMarkup(result,id){
   const bodyText=isDouyin?((o.body||o.content||'').slice(0,220)+((o.body||o.content||'').length>220?'…':'')):(o.body||o.content||'');
   return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(bodyText)}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">提示：${warnings.map(escapeHtml).join('；')}</div>`:''}${actions}</div>`}).join('');
   if(result?.hotspot_retrieval?.request_id)scheduleDiscoveryPoll(id,result.hotspot_retrieval.request_id);
-  return `<div class="result-card" id="result-${id}">${resultStateCard(result,id)}${showHotspotBanner?hotspotRetrievalMarkup(result):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
+  return `<div class="result-card" id="result-${id}">${resultStateCard(result,id)}${showHotspotBanner?hotspotRetrievalMarkup(result,id):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
 }
 function selectResultTab(id,index,btn){const card=document.getElementById(`result-${id}`);if(!card)return;card.querySelectorAll('.result-tab').forEach(b=>b.classList.toggle('active',b===btn));card.querySelectorAll('.result-panel').forEach(p=>p.classList.toggle('active',Number(p.dataset.index)===index));}
 // 抖音：需求入口 → 创建项目后跳转视频工作台（不在聊天内生产）

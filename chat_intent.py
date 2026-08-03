@@ -210,14 +210,23 @@ def derive_result_state(
             return "brand_assets_insufficient"
         return "formal_content"
     if failure == "no_event_anchor" and status in {"", "not_requested"}:
+        topics = retrieval.get("producible_topics") or []
+        if topics:
+            return "hook_selection_required"
         return "topic_needs_event_anchor"
     if failure == "gate_blocked":
+        if retrieval.get("producible_topics"):
+            return "hook_selection_required"
         return "hook_gate_blocked"
     if status in {"queued", "pending", "processing"} or failure == "coverage_gap":
         if failure == "coverage_gap" and status == "not_requested":
+            if retrieval.get("producible_topics"):
+                return "hook_selection_required"
             return "hook_coverage_gap"
         if status in {"queued", "pending", "processing"}:
             return "hotspot_retrieval_pending"
+        if retrieval.get("producible_topics"):
+            return "hook_selection_required"
         return "hook_coverage_gap"
     return "formal_content"
 

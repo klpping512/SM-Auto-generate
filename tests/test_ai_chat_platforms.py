@@ -211,30 +211,24 @@ def test_non_chat_douyin_fallback_uses_the_same_safe_peer_style():
 @pytest.mark.asyncio
 async def test_chat_douyin_prompt_applies_team_copywriting_sop(monkeypatch):
     captured = {}
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
 
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"choices": [{"message": {"content": (
-                '{"title":"南非海外仓怎么了解","body":"想做南非仓配，先把自己的订单节点问清楚。",'
-                '"hashtags":["南非物流"],"scenes":[]}'
-            )}}]}
+    async def fake_complete(messages, *, max_tokens, prompt_version):
+        captured["messages"] = messages
+        captured["max_tokens"] = max_tokens
+        captured["prompt_version"] = prompt_version
+        return (
+            '{"title":"南非海外仓怎么了解","body":"想做南非仓配，先把自己的订单节点问清楚。",'
+            '"hashtags":["南非物流"],"scenes":[]}'
+        )
 
-    class Client:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, _url, **kwargs):
-            captured.update(kwargs)
-            return Response()
-
-    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setattr(ai_engine, "_complete_json_messages", fake_complete)
     await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "帮我生成一个关于南非海外仓的介绍视频"}],
         platforms=["douyin"], topic="南非海外仓介绍",
     )
 
-    system = captured["json"]["messages"][0]["content"]
+    system = captured["messages"][0]["content"]
     assert "同行式沟通" in system
     assert "服务承诺门禁" in system
 
@@ -253,28 +247,28 @@ def test_douyin_scene_normalization_falls_back_to_publishable_timeline():
 
 
 @pytest.mark.asyncio
-async def test_content_generation_uses_dashscope_qwen_json_api(monkeypatch):
+async def test_content_generation_uses_mimo_chat_json_api(monkeypatch):
     captured = {}
-    class Response:
-        def raise_for_status(self): pass
-        def json(self): return {"choices": [{"message": {"content": '{"title":"T","body":"B","hashtags":[]}'}}]}
-    class Client:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, url, headers, json): captured.update({"url":url,"headers":headers,"json":json}); return Response()
-    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
+
+    async def fake_complete(messages, *, max_tokens, prompt_version):
+        captured["messages"] = messages
+        captured["max_tokens"] = max_tokens
+        captured["prompt_version"] = prompt_version
+        return '{"title":"T","body":"B","hashtags":[]}'
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setattr(ai_engine, "_complete_json_messages", fake_complete)
     result = await ai_engine.generate_content("主题", "custom", [Platform.FACEBOOK])
     assert result[0].title == "T"
-    assert captured["json"]["model"] == "qwen-plus"
-    assert captured["json"]["response_format"] == {"type": "json_object"}
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["prompt_version"] == "ai-generate-content-mimo-v1"
+    assert captured["messages"][0]["role"] == "system"
 
 
 @pytest.mark.asyncio
 async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatch):
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
     monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "")
+    monkeypatch.setattr(ai_engine, "chat_model_available", lambda: False)
 
     outputs = await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "生成德班港拥堵预警"}],
@@ -300,14 +294,12 @@ async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatc
 
 @pytest.mark.asyncio
 async def test_chat_model_failure_uses_the_same_safe_fallback_for_a_generic_warehouse_request(monkeypatch):
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
 
-    class FailingClient:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, *_args, **_kwargs): raise RuntimeError("temporary outage")
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("temporary outage")
 
-    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", lambda **_kwargs: FailingClient())
+    monkeypatch.setattr(ai_engine, "_complete_json_messages", boom)
     output = (await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "帮我生成一个关于南非海外仓的介绍视频"}],
         platforms=["douyin"],
@@ -324,7 +316,7 @@ async def test_chat_model_failure_uses_the_same_safe_fallback_for_a_generic_ware
 
 @pytest.mark.asyncio
 async def test_chat_model_operational_claims_are_replaced_before_the_video_button(monkeypatch):
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
     unsafe = {
         "title": "Beitbridge边境排队？南非清关时效这样看",
         "body": "把运单号发我，我们立刻调最新通关状态，同步南非本地合作方动态。",
@@ -332,17 +324,10 @@ async def test_chat_model_operational_claims_are_replaced_before_the_video_butto
         "scenes": [{"scene": 1, "duration": 5, "voiceover": "马上私信单号，优先为您核查进度。", "text_overlay": "实时进展"}],
     }
 
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"choices": [{"message": {"content": __import__("json").dumps(unsafe, ensure_ascii=False)}}]}
+    async def fake_complete(*_args, **_kwargs):
+        return __import__("json").dumps(unsafe, ensure_ascii=False)
 
-    class Client:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, *_args, **_kwargs): return Response()
-
-    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(ai_engine, "_complete_json_messages", fake_complete)
     output = (await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "Beitbridge 边境排队会不会影响到货？"}],
         platforms=["douyin"], topic="Beitbridge 边境排队",
@@ -358,7 +343,7 @@ async def test_chat_model_operational_claims_are_replaced_before_the_video_butto
 
 @pytest.mark.asyncio
 async def test_chat_sanitizer_keeps_useful_copy_and_removes_only_unsafe_sentence(monkeypatch):
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
     draft = {
         "title": "从0到1进入南非市场，先拆这四个物流节点",
         "body": "进入南非市场，不是先找一句口号，而是先拆清运输、入库、分拣和末端交付。评论区留言单号，我们帮你查实时进度。",
@@ -369,17 +354,10 @@ async def test_chat_sanitizer_keeps_useful_copy_and_removes_only_unsafe_sentence
         ],
     }
 
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"choices": [{"message": {"content": __import__("json").dumps(draft, ensure_ascii=False)}}]}
+    async def fake_complete(*_args, **_kwargs):
+        return __import__("json").dumps(draft, ensure_ascii=False)
 
-    class Client:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, *_args, **_kwargs): return Response()
-
-    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(ai_engine, "_complete_json_messages", fake_complete)
     output = (await ai_engine.chat_platforms(
         messages=[{"role": "user", "content": "请围绕从0到1开拓南非市场创作一篇内容"}],
         platforms=["douyin"], topic="从0到1开拓南非市场",

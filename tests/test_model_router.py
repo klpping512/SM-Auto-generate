@@ -6,26 +6,27 @@ import json
 def test_router_reads_key_from_environment_and_never_returns_secret(tmp_db, monkeypatch):
     import model_router
 
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "do-not-return-this-secret")
+    monkeypatch.setenv("MIMO_API_KEY", "do-not-return-this-secret")
     route = model_router.get_route("vision_tagger")
 
-    assert route["api_key_env"] == "DASHSCOPE_API_KEY"
-    assert route["model"] == "qwen-vl-plus"
+    assert route["api_key_env"] == "MIMO_API_KEY"
+    assert route["model"] == "mimo-v2.5"
     assert "do-not-return-this-secret" not in str(route)
     assert "api_key" not in route
 
 
-def test_reasoning_routes_default_to_qwen37_plus_with_bounded_thinking(tmp_db):
+def test_reasoning_routes_default_to_mimo_pro(tmp_db):
     import model_router
 
     planner = model_router.get_route("planner_text")
     critic = model_router.get_route("critic")
+    chat = model_router.get_route("chat_text")
 
-    assert planner["model"] == "qwen3.7-plus"
-    assert planner["request_options"] == {"enable_thinking": True, "thinking_budget": 3000}
-    assert critic["model"] == "qwen3.7-plus"
-    assert critic["request_options"]["enable_thinking"] is True
-    assert model_router.required_output_budget("planner_text", 1000) == 4000
+    assert planner["model"] == "mimo-v2.5-pro"
+    assert planner["provider"] == "mimo"
+    assert critic["model"] == "mimo-v2.5-pro"
+    assert chat["model"] == "mimo-v2.5"
+    assert model_router.required_output_budget("planner_text", 1000) == 1000
 
 
 def test_reasoning_split_is_sent_for_compatible_text_route(tmp_db):
@@ -52,7 +53,7 @@ def test_visible_text_content_removes_only_leading_legacy_thinking_block():
 async def test_text_json_mode_is_part_of_request_and_cache_identity(tmp_db, monkeypatch):
     import model_router
 
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
     requests = []
 
     def handler(request: httpx.Request):
@@ -74,6 +75,7 @@ async def test_text_json_mode_is_part_of_request_and_cache_identity(tmp_db, monk
     body = json.loads(requests[0].content)
     assert body["response_format"] == {"type": "json_object"}
     assert result["content"] == '{"approved":true}'
+    assert requests[0].headers.get("api-key") == "test-key"
 
 
 def test_route_scoped_job_id_changes_when_text_model_route_changes(tmp_db):
@@ -182,7 +184,7 @@ def test_model_route_admin_api_never_exposes_environment_secret(tmp_db, monkeypa
 async def test_text_call_uses_compatible_endpoint_and_cache(tmp_db, monkeypatch):
     import model_router
 
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
     requests = []
 
     def handler(request: httpx.Request):
@@ -215,10 +217,10 @@ async def test_text_call_uses_compatible_endpoint_and_cache(tmp_db, monkeypatch)
     assert first["cache_hit"] is False
     assert second["cache_hit"] is True
     assert len(requests) == 1
-    assert requests[0].url.path == "/compatible-mode/v1/chat/completions"
+    assert requests[0].url.path.endswith("/chat/completions")
+    assert requests[0].headers.get("api-key") == "test-key"
     body = json.loads(requests[0].content)
-    assert body["enable_thinking"] is True
-    assert body["thinking_budget"] == 3000
+    assert body["model"] == "mimo-v2.5-pro"
     assert tmp_db.get_model_budget("sample-call")["calls_used"] == 1
 
 
@@ -227,7 +229,7 @@ def test_video_evaluator_route_is_multimodal_and_swappable(tmp_db):
 
     route = model_router.get_route("video_evaluator")
 
-    assert route["model"] == "qwen-vl-plus"
+    assert route["model"] == "mimo-v2.5"
     assert {"text", "vision"}.issubset(route["capabilities"])
     assert route["enabled"] is True
 

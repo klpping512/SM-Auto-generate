@@ -1,8 +1,9 @@
-"""AI content generation using Alibaba Cloud Model Studio Qwen."""
+"""AI content generation using MiMo (primary) with legacy DashScope helpers retained."""
 import asyncio
 import httpx
 import json
 import logging
+import os
 import re
 from models import Platform, GeneratedContent
 from topic_library import PLATFORM_PROMPTS
@@ -83,15 +84,61 @@ def _format_asset_catalog(assets: list[dict]) -> str:
             lines.append(f"[{cat}/{cat_names.get(cat, cat)}] " + " | ".join(groups[cat]))
     return "\n".join(lines)
 
-# 百炼文本模型（OpenAI 兼容接口）。
+# Chat / content generation defaults to MiMo via model_router (chat_text).
+# DASHSCOPE_API_KEY is retained only as a legacy alias for older tests/callers.
 DASHSCOPE_API_KEY = ""
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen-plus"
 
 
 def set_api_key(key: str):
+    """Legacy setter kept for bootstrap compatibility; chat now prefers MIMO_API_KEY."""
     global DASHSCOPE_API_KEY
     DASHSCOPE_API_KEY = key
+
+
+def chat_model_available() -> bool:
+    """True when MiMo chat_text (or legacy DashScope key) can serve copy generation."""
+    try:
+        import model_router
+        if model_router.key_is_available("chat_text"):
+            return True
+    except Exception:
+        pass
+    return bool(DASHSCOPE_API_KEY or os.environ.get("MIMO_API_KEY"))
+
+
+async def _complete_json_messages(
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    prompt_version: str,
+) -> str:
+    """Run a JSON chat completion through the MiMo chat_text route."""
+    import uuid
+
+    import model_router
+
+    if not model_router.key_is_available("chat_text"):
+        raise RuntimeError("聊天模型未配置：请设置 MIMO_API_KEY")
+    job_id = model_router.route_scoped_job_id(
+        f"ai-chat-{uuid.uuid4().hex[:12]}", "chat_text"
+    )
+    model_router.create_budget(
+        job_id,
+        max_calls=4,
+        max_input_tokens=12_000,
+        max_output_tokens=model_router.required_output_budget("chat_text", max_tokens),
+    )
+    result = await model_router.call_text(
+        job_id,
+        "chat_text",
+        messages,
+        prompt_version=prompt_version,
+        max_output_tokens=max_tokens,
+        json_mode=True,
+    )
+    return str(result.get("content") or "")
 
 
 async def generate_content(
@@ -165,40 +212,26 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
 再次强调：scenes 中的 asset_id 必须是素材目录中的真实 ID，不能为 null（最后一个场景除外）。"""
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{QWEN_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": QWEN_MODEL,
-                        "messages": [
-                            {"role": "system", "content": prompt_config["system"]},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": 0.7,
-                        "max_tokens": prompt_config["max_len"],
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content_text = data["choices"][0]["message"]["content"]
-
-                parsed = _parse_json_response(content_text)
-                results.append(GeneratedContent(
-                    platform=platform,
-                    title=parsed.get("title", topic),
-                    body=parsed.get("body", content_text),
-                    hashtags=parsed.get("hashtags", []),
-                    image_pages=parsed.get("image_pages", []) if platform == Platform.XIAOHONGSHU else [],
-                    duration_target=DOUYIN_TARGET_SECONDS if platform == Platform.DOUYIN else None,
-                    scenes=_normalize_douyin_scenes(parsed.get("scenes"), topic, {a["id"] for a in (assets or [])}) if platform == Platform.DOUYIN else [],
-                    music_suggestion=parsed.get("music_suggestion", "") if platform == Platform.DOUYIN else "",
-                ))
-                logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
+            content_text = await _complete_json_messages(
+                [
+                    {"role": "system", "content": prompt_config["system"]},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=prompt_config["max_len"],
+                prompt_version="ai-generate-content-mimo-v1",
+            )
+            parsed = _parse_json_response(content_text)
+            results.append(GeneratedContent(
+                platform=platform,
+                title=parsed.get("title", topic),
+                body=parsed.get("body", content_text),
+                hashtags=parsed.get("hashtags", []),
+                image_pages=parsed.get("image_pages", []) if platform == Platform.XIAOHONGSHU else [],
+                duration_target=DOUYIN_TARGET_SECONDS if platform == Platform.DOUYIN else None,
+                scenes=_normalize_douyin_scenes(parsed.get("scenes"), topic, {a["id"] for a in (assets or [])}) if platform == Platform.DOUYIN else [],
+                music_suggestion=parsed.get("music_suggestion", "") if platform == Platform.DOUYIN else "",
+            ))
+            logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
         except Exception as e:
             logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%s", platform.value, topic, e)
             results.append(_fallback_content(platform, topic, category))
@@ -790,128 +823,89 @@ async def _chat_one_platform(
     )
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + "\n" + config["system"] + parameter_prompt}] + messages
 
-    if not DASHSCOPE_API_KEY:
+    if not chat_model_available():
         return _safe_chat_fallback(platform, topic, messages)
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{QWEN_BASE_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": QWEN_MODEL,
-                    "messages": api_messages,
-                    "temperature": 0.7,
-                    "max_tokens": config["max_len"],
-                    "response_format": {"type": "json_object"},
-                },
+        raw = await _complete_json_messages(
+            api_messages,
+            max_tokens=config["max_len"],
+            prompt_version="ai-chat-platform-mimo-v1",
+        )
+        parsed = _parse_json_response(raw)
+        body = parsed.get("body") or raw
+        title = parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), platform_names.get(platform, platform))
+        hashtags = _normalize_hashtags(parsed.get("hashtags"), body)
+        source_text = " ".join(item.get("content", "") for item in messages) + " " + topic
+        unsupported_claims = _unsupported_claim_warnings(body, source_text)
+        unsupported_operational_claims = _unsupported_operational_claim_warnings(body)
+        needs_twitter_trim = platform == "twitter" and len(body) > 280
+        if unsupported_claims or unsupported_operational_claims or needs_twitter_trim:
+            constraints = ["Remove every unsupported numeric claim, vague time range, percentage, price, statistic, and unsupported attribution such as 'official data shows' or 'industry reports'. Keep numbered action-list labels, but make no claim whose source was not supplied by the user."]
+            if unsupported_operational_claims:
+                constraints.append("Remove every unverified operational or delivery claim: do not state that Buffalo has already acted, provides a self-operated team or warehouse, prioritizes a shipment, tracks in real time, guarantees delivery, or that congestion will not affect lead time. Replace such statements with conditional planning guidance and ‘以订单节点和最新通关状态为准’." )
+            if platform == "twitter":
+                constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
+            repaired_raw = await _complete_json_messages(
+                [
+                    {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. Preserve this platform format exactly: {config['format']} Language: {language_rules.get(platform, '')} " + " ".join(constraints)},
+                    {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
+                ],
+                max_tokens=180 if platform == "twitter" else config["max_len"],
+                prompt_version="ai-chat-platform-repair-mimo-v1",
             )
-            resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
-            parsed = _parse_json_response(raw)
-            body = parsed.get("body") or raw
-            title = parsed.get("title") or next((line.strip("# *") for line in body.splitlines() if line.strip()), platform_names.get(platform, platform))
-            hashtags = _normalize_hashtags(parsed.get("hashtags"), body)
-            source_text = " ".join(item.get("content", "") for item in messages) + " " + topic
-            unsupported_claims = _unsupported_claim_warnings(body, source_text)
-            unsupported_operational_claims = _unsupported_operational_claim_warnings(body)
-            needs_twitter_trim = platform == "twitter" and len(body) > 280
-            if unsupported_claims or unsupported_operational_claims or needs_twitter_trim:
-                constraints = ["Remove every unsupported numeric claim, vague time range, percentage, price, statistic, and unsupported attribution such as 'official data shows' or 'industry reports'. Keep numbered action-list labels, but make no claim whose source was not supplied by the user."]
-                if unsupported_operational_claims:
-                    constraints.append("Remove every unverified operational or delivery claim: do not state that Buffalo has already acted, provides a self-operated team or warehouse, prioritizes a shipment, tracks in real time, guarantees delivery, or that congestion will not affect lead time. Replace such statements with conditional planning guidance and ‘以订单节点和最新通关状态为准’." )
-                if platform == "twitter":
-                    constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
-                repair_resp = await client.post(
-                    f"{QWEN_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": QWEN_MODEL,
-                        "messages": [
-                            {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. Preserve this platform format exactly: {config['format']} Language: {language_rules.get(platform, '')} " + " ".join(constraints)},
-                            {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 180 if platform == "twitter" else config["max_len"],
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                repair_resp.raise_for_status()
-                repaired_raw = repair_resp.json()["choices"][0]["message"]["content"]
-                repaired = _parse_json_response(repaired_raw)
-                body = repaired.get("body") or repaired_raw
-                title = repaired.get("title") or title
-                hashtags = _normalize_hashtags(repaired.get("hashtags"), body) or hashtags
-                raw = repaired_raw
-            if _platform_format_warnings(platform, body):
-                format_resp = await client.post(
-                    f"{QWEN_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": QWEN_MODEL,
-                        "messages": [
-                            {"role": "system", "content": f"Rewrite for {platform_names.get(platform, platform)}. Return strict JSON with title, body, hashtags. Mandatory format: {config['format']} Language: {language_rules.get(platform, '')} Do not add any unsupported real-time data, vague time ranges, statistics, or source attribution."},
-                            {"role": "user", "content": body},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": config["max_len"],
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                format_resp.raise_for_status()
-                format_raw = format_resp.json()["choices"][0]["message"]["content"]
-                formatted = _parse_json_response(format_raw)
-                body = formatted.get("body") or format_raw
-                title = formatted.get("title") or title
-                hashtags = _normalize_hashtags(formatted.get("hashtags"), body) or hashtags
-                raw = format_raw
-            if platform == "twitter" and len(body) > 280:
-                body = _truncate_twitter_body(body)
-            # 提示词和一次模型重写仍无法保证模型放弃虚构的“已启用/可保证”
-            # 表述时，用可审计的产品事实兜底。不能把未经证据支持的文案继续
-            # 展示给用户，尤其不能让其出现在视频生成按钮旁。
-            scene_claim_text = " ".join(
-                str(scene.get(key) or "")
-                for scene in (parsed.get("scenes") or []) if isinstance(scene, dict)
-                for key in ("visual", "voiceover", "text_overlay")
+            repaired = _parse_json_response(repaired_raw)
+            body = repaired.get("body") or repaired_raw
+            title = repaired.get("title") or title
+            hashtags = _normalize_hashtags(repaired.get("hashtags"), body) or hashtags
+            raw = repaired_raw
+        if _platform_format_warnings(platform, body):
+            format_raw = await _complete_json_messages(
+                [
+                    {"role": "system", "content": f"Rewrite for {platform_names.get(platform, platform)}. Return strict JSON with title, body, hashtags. Mandatory format: {config['format']} Language: {language_rules.get(platform, '')} Do not add any unsupported real-time data, vague time ranges, statistics, or source attribution."},
+                    {"role": "user", "content": body},
+                ],
+                max_tokens=config["max_len"],
+                prompt_version="ai-chat-platform-format-mimo-v1",
             )
-            # 标题、发布文案、标签和预览分镜都在同一个用户可见卡片上；任一位置
-            # 出现没有证据的服务承诺，就整体降级为中性提示，不能只清洗 body。
-            tag_text = " ".join(str(tag) for tag in hashtags)
-            safe_subject = _conservative_chat_subject(topic, messages)
-            title, title_sanitized = _sanitize_operational_copy(title, safe_subject)
-            body, body_sanitized = _sanitize_operational_copy(
-                body,
-                f"围绕「{safe_subject}」，先说明能被资料和画面支持的事实，再给出可执行的核对步骤。",
-            )
-            hashtags = [
-                tag for tag in hashtags
-                if not _unsupported_operational_claim_warnings(str(tag))
-            ] or ["南非物流"]
-            use_safe_fallback = title_sanitized or body_sanitized or bool(
-                _unsupported_operational_claim_warnings(scene_claim_text)
-                or _unsupported_operational_claim_warnings(tag_text)
-            )
-            quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
-            quality_warnings.extend(
-                f"仍包含{item}，请人工核实" for item in _unsupported_operational_claim_warnings(body)
-            )
-            quality_warnings.extend(_platform_format_warnings(platform, body))
-            normalized_scenes = _normalize_douyin_scenes(
-                parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])},
-            ) if platform == "douyin" else []
-            if use_safe_fallback:
-                quality_warnings.append("已删除草稿中无证据支持的服务承诺，保留其余可用内容")
-            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings, "source": "model_sanitized" if use_safe_fallback else "model"}
+            formatted = _parse_json_response(format_raw)
+            body = formatted.get("body") or format_raw
+            title = formatted.get("title") or title
+            hashtags = _normalize_hashtags(formatted.get("hashtags"), body) or hashtags
+            raw = format_raw
+        if platform == "twitter" and len(body) > 280:
+            body = _truncate_twitter_body(body)
+        scene_claim_text = " ".join(
+            str(scene.get(key) or "")
+            for scene in (parsed.get("scenes") or []) if isinstance(scene, dict)
+            for key in ("visual", "voiceover", "text_overlay")
+        )
+        tag_text = " ".join(str(tag) for tag in hashtags)
+        safe_subject = _conservative_chat_subject(topic, messages)
+        title, title_sanitized = _sanitize_operational_copy(title, safe_subject)
+        body, body_sanitized = _sanitize_operational_copy(
+            body,
+            f"围绕「{safe_subject}」，先说明能被资料和画面支持的事实，再给出可执行的核对步骤。",
+        )
+        hashtags = [
+            tag for tag in hashtags
+            if not _unsupported_operational_claim_warnings(str(tag))
+        ] or ["南非物流"]
+        use_safe_fallback = title_sanitized or body_sanitized or bool(
+            _unsupported_operational_claim_warnings(scene_claim_text)
+            or _unsupported_operational_claim_warnings(tag_text)
+        )
+        quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
+        quality_warnings.extend(
+            f"仍包含{item}，请人工核实" for item in _unsupported_operational_claim_warnings(body)
+        )
+        quality_warnings.extend(_platform_format_warnings(platform, body))
+        normalized_scenes = _normalize_douyin_scenes(
+            parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])},
+        ) if platform == "douyin" else []
+        if use_safe_fallback:
+            quality_warnings.append("已删除草稿中无证据支持的服务承诺，保留其余可用内容")
+        return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings, "source": "model_sanitized" if use_safe_fallback else "model"}
     except Exception as e:
         logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
         return _safe_chat_fallback(platform, topic, messages)
