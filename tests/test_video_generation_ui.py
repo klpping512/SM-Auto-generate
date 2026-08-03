@@ -29,9 +29,11 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "owned_only" not in page
     assert "deliveryReadiness?.delivery_ready??true" in page
     assert "等待热点 Hook" in page
-    assert "补充 Buffalo 素材" in page
+    assert "可选：补充" in page
+    assert "自适应" in page
     assert "文案草稿已生成 · 视频素材补采中" in page
-    assert "才能创建视频项目" in page
+    assert "创建60秒视频项目" in page
+    assert "前往修复" not in page or "brand_assets_insufficient" in page
     assert "resultStateCard" in page
     assert "当前情况" not in page or "result-state-hint" in page
     assert "source_type: 'chat'" not in page

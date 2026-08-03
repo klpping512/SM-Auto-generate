@@ -244,7 +244,7 @@ function resultStateCard(result,id){
     hook_coverage_gap:{title:'库未覆盖该时效事件',hint:'可等待定向补采，或改用下方已可生产的选题。'},
     hook_gate_blocked:{title:'有候选但未过质量门禁',hint:'请改用已通过门禁的可生产选题，不要用无关事故画面硬配。'},
     topic_needs_event_anchor:{title:'话题缺少热点锚点',hint:'请绑定具体事件，或一键选用下方可生产选题。'},
-    brand_assets_insufficient:{title:'需要补充品牌素材',hint:'热点 Hook 已匹配，请先补充 Buffalo 自有素材。',fix:'/assets.html'},
+    brand_assets_insufficient:{title:'热点已就绪 · 将按库存自适应出片',hint:'Buffalo 自有动态不足理想数量时，系统会降级规划并继续创建项目；补充素材仅为可选增强。'},
     authenticity_blocked:{title:'内容暂不可使用 · 请补充证据',hint:'补充带来源的资料后重新生成。'},
     generation_unavailable:{title:'文案模型暂不可用',hint:'请检查内容模型配置或稍后重试。'},
   };
@@ -256,6 +256,8 @@ function resultStateCard(result,id){
   if(result?.evidence_state)details.push(`证据：${result.evidence_state.evidence_state||'unknown'}`);
   if(result?.hotspot_retrieval?.request_id)details.push(`补采请求 #${result.hotspot_retrieval.request_id}`);
   if(result?.hotspot_retrieval?.message)details.push(result.hotspot_retrieval.message);
+  const adaptation=result?.hotspot_retrieval?.video?.delivery_readiness?.adaptation;
+  if(adaptation?.adapted)details.push(`自适应：${adaptation.message||(adaptation.strategies||[]).join('、')||'按现有库存降级'}`);
   const funnelHtml=funnelDetailsMarkup(result?.hotspot_retrieval?.funnel);
   const topics=result?.producible_topics||result?.hotspot_retrieval?.producible_topics||[];
   const frameworkActions=state==='framework_pending_evidence'||state==='authenticity_blocked'
@@ -263,7 +265,13 @@ function resultStateCard(result,id){
     :'';
   const topicActions=(state==='topic_needs_event_anchor'||state==='hook_coverage_gap'||state==='hook_gate_blocked'||state==='hotspot_retrieval_pending')
     ?producibleTopicsMarkup(topics):'';
-  const fixLink=card.fix?`<a class="btn btn-secondary btn-sm" href="${escapeHtml(card.fix)}" style="margin-top:8px;display:inline-flex;min-height:44px;align-items:center">前往修复</a>`:'';
+  // brand_assets_insufficient is advisory only after adaptive planning; keep
+  // optional assets link, never a hard “前往修复” stop.
+  const fixLink=(card.fix&&state!=='brand_assets_insufficient')
+    ?`<a class="btn btn-secondary btn-sm" href="${escapeHtml(card.fix)}" style="margin-top:8px;display:inline-flex;min-height:44px;align-items:center">前往修复</a>`
+    :(state==='brand_assets_insufficient'
+      ?`<a class="btn btn-secondary btn-sm" href="/assets.html" style="margin-top:8px;display:inline-flex;min-height:44px;align-items:center">可选：补充 Buffalo 素材</a>`
+      :'');
   return `<div class="result-state-card" data-result-state="${escapeHtml(state)}"><strong>${escapeHtml(card.title)}</strong><p class="result-state-hint" style="margin:8px 0 0;font-size:13px;line-height:1.55;color:var(--text-secondary)">${escapeHtml(card.hint)}</p>${fixLink}${frameworkActions}${topicActions}${details.length||funnelHtml?`<details class="result-state-details"><summary>查看详情</summary><ul>${details.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}${funnelHtml}</ul></details>`:''}</div>`;
 }
 
@@ -276,7 +284,7 @@ function assistantBubbleText(result){
   if(state==='hook_coverage_gap')return '库未覆盖该时效事件';
   if(state==='hook_gate_blocked')return '有候选但未过质量门禁';
   if(state==='hotspot_retrieval_pending')return '文案草稿已生成 · 视频素材补采中';
-  if(state==='brand_assets_insufficient')return '脚本已生成 · 需要补充品牌素材';
+  if(state==='brand_assets_insufficient')return '脚本已生成 · 将按库存自适应出片';
   if(result?.outputs?.length>1)return `已按 ${result.outputs.length} 个平台分别生成内容。`;
   return '平台内容已生成';
 }
@@ -324,12 +332,13 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
   }
   const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
   const videoReady=hotspotRetrieval?.status==='matched'&&hotspotRetrieval?.video?.status==='ready'&&(deliveryReadiness?.delivery_ready??true);
+  const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
   const scriptState=classifyDouyinScriptState({
     durationTarget: output.duration_target,
     scenes: output.scenes||[],
     videoWorkflow: {
       status: videoReady ? 'ready' : 'blocked',
-      block_reason: deliveryReadiness?.message || (hotspotRetrieval?.status==='matched'?'补充 Buffalo 素材':'等待热点 Hook'),
+      block_reason: deliveryReadiness?.message || (hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过':'等待热点 Hook'),
       target_duration_ms: 60000,
     },
     importedFromChat: true,
@@ -339,15 +348,18 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
       <a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center" href="/video-migrate.html?from=chat&result=${encodeURIComponent(resultId)}&index=${index}">打开历史草稿迁移</a></div>`;
   }
   if (!videoReady || !scriptState.canProduce) {
-    const reason=deliveryReadiness?.message || scriptState.blockReason || (hotspotRetrieval?.status==='matched'?'补充 Buffalo 素材后再创建视频项目':'等待热点 Hook 就绪后再创建视频项目');
-    const fix=hotspotRetrieval?.status==='matched'
-      ? `<a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center" href="/assets.html">补充 Buffalo 素材</a>`
-      : '';
-    return `<div class="douyin-video-entry"><p class="result-state-hint">${escapeHtml(reason)}</p>${fix}</div>`;
+    const reason=deliveryReadiness?.message || scriptState.blockReason || (hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过，暂不可创建':'等待热点 Hook 就绪后再创建视频项目');
+    return `<div class="douyin-video-entry"><p class="result-state-hint">${escapeHtml(reason)}</p></div>`;
   }
+  const adaptHint=adapted
+    ? (deliveryReadiness?.adaptation?.message || deliveryReadiness?.message || '将按现有库存自适应规划并继续出片')
+    : '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划';
+  const optionalAssets=adapted
+    ? `<a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center;margin-left:8px" href="/assets.html">可选：补充素材</a>`
+    : '';
   return `<div class="douyin-video-entry">
-    <p class="result-state-hint">主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划</p>
-    <button class="btn btn-primary" style="min-height:44px;margin-top:8px" id="generate-video-${resultId}-${index}" onclick="createSixtySecondVideoProject('${resultId}', ${index})">创建60秒视频项目</button>
+    <p class="result-state-hint">${escapeHtml(adaptHint)}</p>
+    <button class="btn btn-primary" style="min-height:44px;margin-top:8px" id="generate-video-${resultId}-${index}" onclick="createSixtySecondVideoProject('${resultId}', ${index})">创建60秒视频项目</button>${optionalAssets}
     <div id="render-status-${resultId}-${index}" class="render-status" style="display:none;margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
   </div>`;
 }

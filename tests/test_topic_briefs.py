@@ -279,7 +279,7 @@ def test_generate_topic_brief_uses_one_model_plan_for_a_verified_sixty_second_pr
 
     assert response.status_code == 200, response.json()
     payload = response.json()
-    assert payload["coverage"] == {"hotspot_video": 2, "owned_video": 5, "duration_ms": 52000}
+    assert payload["coverage"] == {"hotspot_video": 2, "owned_video": 5, "image": 0, "duration_ms": 52000}
     revision = payload["project"]["current_revision"]
     assert len(revision["payload"]["scenes"]) == 8
     assert revision["payload"]["scenes"][0]["voiceover"].startswith("第1段")

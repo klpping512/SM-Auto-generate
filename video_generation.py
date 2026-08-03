@@ -197,7 +197,12 @@ def route_match_quality(scene_reports: list[dict], threshold: float = 35) -> Qua
 
 
 def hotspot_evidence_gate(script: dict) -> list[str]:
-    """热点跟进的成片前硬约束，防止静态拼贴冒充真实素材视频。"""
+    """热点跟进的成片前硬约束，防止静态拼贴冒充真实素材视频。
+
+    When ``adaptation.adapted`` is set, owned inventory and duration floors are
+    softened so thin Buffalo stock degrades the plan instead of blocking render.
+    Hook absence remains a hard failure.
+    """
     if str(script.get("source_type") or "") != "hotspot_followup":
         return []
     scenes = [item for item in script.get("scenes") or [] if isinstance(item, dict)]
@@ -208,15 +213,26 @@ def hotspot_evidence_gate(script: dict) -> list[str]:
         int(item.get("duration_ms") or round(float(item.get("duration") or 0) * 1000))
         for item in scenes if item.get("evidence_type") == "image"
     )
+    adapted = bool((script.get("adaptation") or {}).get("adapted"))
     issues = []
-    if total_ms < 60_000:
-        issues.append(f"热点跟进成片必须至少 60 秒，当前仅 {total_ms / 1000:g} 秒")
-    if hotspot_count < 1:
-        issues.append("至少需要 1 段已确认热点视频")
-    if owned_count < 4:
-        issues.append(f"至少 4 段 Buffalo 动态视频，当前仅 {owned_count} 段")
-    if total_ms and image_ms / total_ms > 0.15:
-        issues.append(f"静态图片占比不能超过 15%，当前为 {image_ms / total_ms:.0%}")
+    if adapted:
+        if total_ms < 15_000:
+            issues.append(f"自适应成片过短，当前仅 {total_ms / 1000:g} 秒")
+        if hotspot_count < 1:
+            issues.append("至少需要 1 段已确认热点视频")
+        if owned_count < 1 and not any(item.get("evidence_type") == "image" for item in scenes):
+            issues.append("自适应成片至少需要 1 段 Buffalo 自有动态或图片过渡")
+        if total_ms and image_ms / total_ms > 0.45:
+            issues.append(f"自适应模式下静态图片占比不能超过 45%，当前为 {image_ms / total_ms:.0%}")
+    else:
+        if total_ms < 60_000:
+            issues.append(f"热点跟进成片必须至少 60 秒，当前仅 {total_ms / 1000:g} 秒")
+        if hotspot_count < 1:
+            issues.append("至少需要 1 段已确认热点视频")
+        if owned_count < 4:
+            issues.append(f"至少 4 段 Buffalo 动态视频，当前仅 {owned_count} 段")
+        if total_ms and image_ms / total_ms > 0.15:
+            issues.append(f"静态图片占比不能超过 15%，当前为 {image_ms / total_ms:.0%}")
     for first, second in zip(scenes, scenes[1:]):
         if first.get("evidence_type") == second.get("evidence_type") == "image":
             issues.append("静态图片不能连续作为主体镜头")
@@ -366,6 +382,16 @@ def _filter_expected_dual_library_editorial_notes(report: dict, script: dict) ->
 def _formal_dual_library_duration_issue(report: dict, script: dict) -> str | None:
     """Keep a C-end dual-library promise honest at the technical quality gate."""
     if str(script.get("source_type") or "") != "topic_brief_dual_library":
+        return None
+    if bool((script.get("adaptation") or {}).get("adapted")):
+        # Adapted plans intentionally shorten; provenance already surfaces the
+        # inventory compromise. Only reject trivially short renders.
+        try:
+            duration = float(report.get("duration"))
+        except (TypeError, ValueError):
+            return "成片时长未检测到，无法确认自适应交付"
+        if duration < 15.0:
+            return f"自适应成片仅 {duration:.1f} 秒，过短无法验收"
         return None
     try:
         duration = float(report.get("duration"))
@@ -643,17 +669,27 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         issues = list(report.get("planning_issues") or [])
         hard_failures = []
         target_ms = int(script.get("duration_target_ms") or 60_000)
-        min_scenes, max_scenes = video_renderer.formal_scene_bounds(target_ms)
+        adapted = bool((script.get("adaptation") or {}).get("adapted"))
+        min_scenes, max_scenes = video_renderer.formal_scene_bounds(target_ms, adapted=adapted)
         if not min_scenes <= len(scenes) <= max_scenes:
             hard_failures.append(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
         if str(script.get("source_type") or "") == "topic_brief_dual_library":
-            if not (
+            if adapted:
+                if target_ms < 15_000 or target_ms > video_renderer.FORMAL_MAX_DURATION_MS:
+                    hard_failures.append("自适应双素材成片时长超出可验收范围")
+            elif not (
                 video_renderer.FORMAL_MIN_DURATION_MS
                 <= target_ms
                 <= video_renderer.FORMAL_MAX_DURATION_MS
             ):
                 hard_failures.append("正式双素材成片必须在 50–90 秒之间")
-            if not (
+            if adapted:
+                if not (4 <= len(scenes) <= video_renderer.FORMAL_MAX_SCENES):
+                    hard_failures.append(
+                        f"自适应双素材成片需要 4–"
+                        f"{video_renderer.FORMAL_MAX_SCENES} 个完整分镜"
+                    )
+            elif not (
                 video_renderer.FORMAL_MIN_SCENES
                 <= len(scenes)
                 <= video_renderer.FORMAL_MAX_SCENES

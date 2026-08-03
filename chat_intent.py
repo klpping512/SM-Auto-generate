@@ -204,6 +204,8 @@ def derive_result_state(
     if status == "matched":
         video = retrieval.get("video") or {}
         readiness = video.get("delivery_readiness") or {}
+        # Soft inventory adaptation keeps delivery_ready=true; only hard
+        # planning failures surface as brand_assets_insufficient.
         if brand_assets_insufficient or (readiness and not readiness.get("delivery_ready", True)):
             return "brand_assets_insufficient"
         return "formal_content"

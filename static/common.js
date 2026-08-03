@@ -326,7 +326,7 @@ function classifyDouyinScriptState({
             canProduce: workflowReady,
             blockReason: workflowReady
                 ? ''
-                : (videoWorkflow?.block_reason || '正式成片需要强相关热点 Hook 和可用 Buffalo 自有素材'),
+                : (videoWorkflow?.block_reason || '正式成片需要强相关热点 Hook；品牌素材不足时将自适应降级出片'),
             targetSeconds: FORMAL_TARGET_SECONDS,
         };
     }
@@ -373,10 +373,14 @@ function formatRenderProvenance(qualityReport, fallbackScenes) {
     const hotspotFallback = sceneList.filter(scene => scene?.event_clip_id || scene?.evidence_type === 'hotspot_video').length;
     const ownedFallback = sceneList.filter(scene => scene?.asset_id && !scene?.event_clip_id && scene?.evidence_type !== 'hotspot_video').length;
     const sourceText = `热点 Hook 母片 ${Number.isFinite(hotspotCount) ? hotspotCount : hotspotFallback} · Buffalo 自有 ${Number.isFinite(ownedCount) ? ownedCount : ownedFallback}`;
+    const adaptation = report.adaptation || finalQuality.adaptation || {};
+    const adaptText = adaptation.adapted
+        ? `<br/>自适应降级：${escapeHtml(adaptation.message || (adaptation.strategies || []).join('、') || '按现有库存成片')}`
+        : '';
     const fallbackWarn = tts.fallback_used
         ? '<div class="render-review-summary tts-fallback-warn">TTS 已发生回退：MiMo → Qwen。请在验收页确认听感后再继续。</div>'
         : '';
-    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}${tts.fallback_used ? ' · 回退已使用' : ''}</div>${fallbackWarn}`;
+    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}${adaptText}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}${tts.fallback_used ? ' · 回退已使用' : ''}</div>${fallbackWarn}`;
 }
 
 // ==================== Video project nav badge (no floating panel) ====================

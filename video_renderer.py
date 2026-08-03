@@ -146,8 +146,14 @@ def resolve_tts_selection(
     return "mimo", MIMO_TTS_VOICE
 
 
-def formal_scene_bounds(target_duration_ms: int) -> tuple[int, int]:
-    """Return min/max scene counts for a target duration."""
+def formal_scene_bounds(target_duration_ms: int, *, adapted: bool = False) -> tuple[int, int]:
+    """Return min/max scene counts for a target duration.
+
+    Adapted chat plans may shrink structure when Buffalo inventory is thin;
+    keep a lower floor so production continues instead of hard-stopping.
+    """
+    if adapted:
+        return 4, FORMAL_MAX_SCENES
     if int(target_duration_ms) >= FORMAL_MIN_DURATION_MS:
         return FORMAL_MIN_SCENES, FORMAL_MAX_SCENES
     return 4, 8
@@ -396,7 +402,10 @@ def normalize_script(
             "event_clip_id": event_clip_id,
             "brand_endcard_path": str(raw.get("brand_endcard_path") or "")[:240],
         })
-    min_scenes, max_scenes = formal_scene_bounds(target)
+    min_scenes, max_scenes = formal_scene_bounds(
+        target,
+        adapted=bool((script.get("adaptation") or {}).get("adapted")),
+    )
     if not min_scenes <= len(scenes) <= max_scenes:
         raise ValueError(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
     if asset_lookup is not None:

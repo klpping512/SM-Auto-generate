@@ -1867,6 +1867,7 @@ async def _generate_topic_brief_video(
         scenes = hotspot_video_planner.plan_followup_scenes(
             planning_brief, related_events, owned_segments, target_duration_ms=base_duration_ms,
             owned_images=owned_images,
+            allow_adaptation=True,
         )
     except ValueError as exc:
         # Planner input originates from verified Hooks and reviewed internal
@@ -1874,24 +1875,33 @@ async def _generate_topic_brief_video(
         # coverage gate, never an opaque server failure in the chat flow.
         logger.info("双素材视频规划未通过素材门禁: %s", exc)
         raise HTTPException(409, {
-            "message": "当前已锁定热点，但可用自有镜头不足以稳定生成正式视频。",
+            "message": "当前已锁定热点，但可用素材组合无法形成可渲染分镜。",
             "reason": str(exc)[:240],
-            "next_action": "请补充至少四段未重复、每段不少于 3 秒的 Buffalo 自有视频，或换用已有可用素材的物流节点。",
+            "next_action": "请确认 Hook 仍可播放，或补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
         }) from exc
     hotspot_count = sum(item.get("evidence_type") == "hotspot_video" for item in scenes)
     owned_count = sum(item.get("evidence_type") == "owned_video" for item in scenes)
+    image_count = sum(item.get("evidence_type") == "image" for item in scenes)
     planned_duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     # 品牌 CTA 会在下方统一追加；准入时应按终片时长判断，而不是把尚未追加的
     # 固定结尾误判为“素材不足”。
     final_planned_duration_ms = planned_duration_ms + sum(
         int(item["duration_ms"]) for item in hotspot_video_planner.BRAND_ENDCARD_SCENES
     )
-    if hotspot_count < 1 or owned_count < 4 or not 50_000 <= final_planned_duration_ms <= 90_000:
+    adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
+    # Hook is the hard gate. Thin owned inventory is adaptation, not a block.
+    if hotspot_count < 1 or not scenes:
         raise HTTPException(409, {
-            "message": "证据不足，不能生成正式 50–90 秒成片。",
-            "coverage": {"hotspot_video": hotspot_count, "owned_video": owned_count, "duration_ms": final_planned_duration_ms},
-            "required": {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"},
-            "next_action": "补充已确认权利且直接相关的热点媒体，或将选题改为现有 Buffalo 素材能证明的物流节点。",
+            "message": "证据不足：缺少可用热点 Hook 镜头，不能生成成片。",
+            "coverage": {
+                "hotspot_video": hotspot_count,
+                "owned_video": owned_count,
+                "image": image_count,
+                "duration_ms": final_planned_duration_ms,
+            },
+            "required": {"hotspot_video": 1, "owned_video": "adaptive"},
+            "adaptation": adaptation,
+            "next_action": "重新锁定强相关热点 Hook，或换用已确认可渲染的事件片段。",
         })
     if not model_router.key_is_available("planner_text"):
         raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请配置 DASHSCOPE_API_KEY 后重试。")
@@ -2059,12 +2069,25 @@ async def _generate_topic_brief_video(
         "topic_brief_id": brief_id, "hotspot_event_id": event["id"], "brief": planning_brief,
         "model": model_router.get_route("planner_text").get("model"), "model_cache_hit": result.get("cache_hit", False),
         "copywriting_sop": douyin_copywriting_sop.metadata(),
+        "adaptation": adaptation,
+        "provenance": {
+            "hotspot_video": hotspot_count,
+            "owned_video": owned_count,
+            "image": image_count,
+            "duration_ms": duration_ms,
+            "adapted": bool(adaptation.get("adapted")),
+            "strategies": list(adaptation.get("strategies") or []),
+        },
     }
     if source_snapshot:
         project_snapshot["chat"] = source_snapshot
     revision_payload = {
         "title": generated["title"], "platform": body.platform, "duration_target_ms": duration_ms,
-        "target_duration_ms": duration_ms, "brief": {**planning_brief, "angle": generated["angle"]}, "scenes": scenes,
+        "target_duration_ms": duration_ms,
+        "source_type": "topic_brief_dual_library",
+        "brief": {**planning_brief, "angle": generated["angle"]}, "scenes": scenes,
+        "adaptation": adaptation,
+        "provenance": project_snapshot["provenance"],
     }
     if target_project_id and target_revision_id:
         updated_revision = db.update_video_project_revision_payload(
@@ -2086,7 +2109,18 @@ async def _generate_topic_brief_video(
         db.create_video_project_revision(project["id"], revision_payload, user["id"])
         project = db.get_video_project(project["id"], created_by=user["id"])
     db.add_audit_log(user["id"], user["username"], "generate_topic_brief_video", target=project["id"], detail=f"brief={brief_id}; model_plan")
-    return {"project": project, "model": {"cache_hit": result.get("cache_hit", False), "usage": result.get("usage")}, "coverage": {"hotspot_video": hotspot_count, "owned_video": owned_count, "duration_ms": duration_ms}}
+    return {
+        "project": project,
+        "model": {"cache_hit": result.get("cache_hit", False), "usage": result.get("usage")},
+        "coverage": {
+            "hotspot_video": hotspot_count,
+            "owned_video": owned_count,
+            "image": image_count,
+            "duration_ms": duration_ms,
+        },
+        "adaptation": adaptation,
+        "provenance": project_snapshot["provenance"],
+    }
 
 
 def _chat_dual_library_idempotency_key(
@@ -2233,9 +2267,15 @@ def _build_video_generation_handlers(static_dir: Path):
             **(report.get("chat_generation") or {}),
             "model": result.get("model") or {},
             "coverage": result.get("coverage") or {},
+            "adaptation": result.get("adaptation") or {},
+            "provenance": result.get("provenance") or {},
             "next_step": "建项并进入质量门禁",
             "stage": video_generation.PipelineStage.SCRIPTING.value,
         }
+        if result.get("adaptation"):
+            report["adaptation"] = result["adaptation"]
+        if result.get("provenance"):
+            report["provenance"] = result["provenance"]
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
@@ -2302,6 +2342,7 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
     })
     scenes = hotspot_video_planner.plan_followup_scenes(
         brief, related_events, owned_segments, owned_images=owned_images,
+        allow_adaptation=True,
     )
     hotspot_video_count = sum(item.get("evidence_type") == "hotspot_video" for item in scenes)
     owned_video_count = sum(item.get("evidence_type") == "owned_video" for item in scenes)
@@ -2309,10 +2350,12 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
     planned_duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     cta_duration_ms = sum(int(item["duration_ms"]) for item in hotspot_video_planner.BRAND_ENDCARD_SCENES)
     final_duration_ms = planned_duration_ms + cta_duration_ms
+    adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
     return {
         "event": _decorate_hotspot_event(event),
         "brief": brief,
         "scenes": scenes,
+        "adaptation": adaptation,
         "evidence_summary": {
             "hotspot_video": hotspot_video_count,
             "owned_video": owned_video_count,
@@ -2320,7 +2363,8 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
             "planned_duration_ms": planned_duration_ms,
             "cta_duration_ms": cta_duration_ms,
             "duration_ms": final_duration_ms,
-            "ready": (
+            "ready": hotspot_video_count >= 1 and bool(scenes),
+            "ideal_ready": (
                 hotspot_video_count >= 1 and owned_video_count >= 4
                 and image_count <= 3
                 and (not final_duration_ms or image_count * hotspot_video_planner.CONTEXT_IMAGE_DURATION_MS / final_duration_ms <= 0.15)
@@ -4177,11 +4221,16 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
 
 
 def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dict:
-    """Preflight the formal 50–90s plan without creating a project or calling a model."""
+    """Preflight the formal 50–90s plan without creating a project or calling a model.
+
+    Hook absence remains a hard stop. Thin Buffalo inventory no longer blocks
+    create — the planner adapts and returns visible adaptation metadata.
+    """
     if not locked_events:
         return {
             "status": "needs_hook", "delivery_ready": False,
             "message": "尚未锁定可用于正式成片的热点 Hook。",
+            "adaptation": {"adapted": False, "strategies": []},
         }
     primary = locked_events[0]
     owned_segments = [
@@ -4226,6 +4275,7 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
             owned_segments,
             target_duration_ms=60_000 - cta_duration_ms,
             owned_images=owned_images,
+            allow_adaptation=True,
         )
         planner_issue = ""
     except ValueError as exc:
@@ -4233,35 +4283,43 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         planner_issue = str(exc)[:240]
     hotspot_count = sum(scene.get("evidence_type") == "hotspot_video" for scene in scenes)
     owned_count = sum(scene.get("evidence_type") == "owned_video" for scene in scenes)
+    image_count = sum(scene.get("evidence_type") == "image" for scene in scenes)
     duration_ms = sum(int(scene.get("duration_ms") or 0) for scene in scenes) + cta_duration_ms
-    delivery_ready = bool(
-        not planner_issue
-        and hotspot_count >= 1
-        and owned_count >= 4
-        and 50_000 <= duration_ms <= 90_000
-    )
+    adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
     coverage = {
         "hotspot_video": hotspot_count,
         "owned_video": owned_count,
+        "image": image_count,
         "duration_ms": duration_ms,
     }
-    if delivery_ready:
+    # Hard gate: locked Hook must yield at least one hotspot scene. Owned < 4
+    # is adaptation, not a block.
+    delivery_ready = bool(not planner_issue and hotspot_count >= 1)
+    if delivery_ready and not adaptation.get("adapted"):
         message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
         status = "delivery_ready"
+    elif delivery_ready:
+        message = (
+            f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
+            f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
+        )
+        status = "delivery_ready_adapted"
     elif planner_issue:
-        message = "热点 Hook 已匹配，但当前 Buffalo 素材无法形成不重复的正式成片。"
+        message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
         status = "needs_owned_media"
     else:
-        message = "热点 Hook 已匹配；正式成片还需要更多匹配当前物流节点的 Buffalo 自有动态素材。"
+        message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
         status = "needs_owned_media"
     return {
         "status": status,
         "delivery_ready": delivery_ready,
         "coverage": coverage,
-        "required": {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"},
+        "required": {"hotspot_video": 1, "owned_video": "adaptive", "duration_ms": "50000–90000"},
+        "ideal": {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"},
         "logistics_nodes": nodes,
         "message": message,
         "planner_issue": planner_issue or None,
+        "adaptation": adaptation,
     }
 
 
@@ -4350,6 +4408,9 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
                 item["title"], item.get("image_pages"), STATIC_DIR,
             )
     readiness = ((hotspot_retrieval or {}).get("video") or {}).get("delivery_readiness") or {}
+    # Only treat as insufficient when Hook matched but adaptive planning still
+    # cannot produce a renderable plan (delivery_ready=false). Thin owned stock
+    # with delivery_ready=true is adaptation, not a chat stop state.
     brand_assets_insufficient = bool(
         (hotspot_retrieval or {}).get("status") == "matched"
         and readiness
@@ -4538,7 +4599,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
     readiness = _chat_video_delivery_readiness(body.topic.strip(), ordered_events)
     if not readiness.get("delivery_ready"):
         raise HTTPException(409, {
-            "message": readiness.get("message") or "当前 Buffalo 自有素材不足以生成正式成片",
+            "message": readiness.get("message") or "热点 Hook 未就绪，无法创建视频项目",
             "delivery_readiness": readiness,
         })
     try:
@@ -4565,6 +4626,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "poll_url": f"/api/video-generation/jobs/{existing_job['id']}",
             "status": "queued",
             "message": "已恢复同一个视频生成任务",
+            "delivery_readiness": readiness,
         }
 
     topic = body.topic.strip()
@@ -4593,6 +4655,13 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "tts_provider": tts_provider,
         "voice": voice,
         "username": user["username"],
+        "adaptation": readiness.get("adaptation") or {},
+        "delivery_readiness": {
+            "status": readiness.get("status"),
+            "delivery_ready": True,
+            "coverage": readiness.get("coverage") or {},
+            "message": readiness.get("message"),
+        },
         "pipeline": [
             "topic_brief", "hook_locking", "scripting", "project_building",
             "script_quality_check", "asset_matching", "match_quality_check",
@@ -4641,6 +4710,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         target=project["id"],
         detail=f"queued; brief={brief['id']}; hooks={','.join(str(item) for item in locked_hook_ids)}",
     )
+    adapted = bool((readiness.get("adaptation") or {}).get("adapted"))
     return {
         "project": db.get_video_project(project["id"], created_by=user["id"]),
         "job": job,
@@ -4649,7 +4719,12 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "topic_brief": brief,
         "poll_url": f"/api/video-generation/jobs/{job['id']}",
         "status": "queued",
-        "message": "视频生成任务已创建，脚本规划和质检将在后台串行执行",
+        "message": (
+            "视频项目已创建；将按现有库存自适应规划并后台生产"
+            if adapted
+            else "视频生成任务已创建，脚本规划和质检将在后台串行执行"
+        ),
+        "delivery_readiness": readiness,
     }
 
 

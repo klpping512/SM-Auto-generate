@@ -265,8 +265,11 @@ def test_chat_retrieval_uses_one_confirmed_hook_when_no_second_clip_exists(tmp_d
     assert result["video"]["status"] == "ready"
     assert result["video"]["hotspot_event_ids"] == [event["id"]]
     assert "一段相关" in result["message"]
-    assert result["video"]["delivery_readiness"]["status"] == "needs_owned_media"
-    assert result["video"]["delivery_readiness"]["delivery_ready"] is False
+    readiness = result["video"]["delivery_readiness"]
+    assert readiness["delivery_ready"] is True
+    assert readiness["status"] in {"delivery_ready", "delivery_ready_adapted"}
+    assert readiness["coverage"]["hotspot_video"] >= 1
+    assert "adaptation" in readiness
 
 
 def test_chat_retrieval_marks_delivery_ready_before_user_clicks_generate(tmp_db, monkeypatch):
@@ -305,6 +308,7 @@ def test_chat_retrieval_marks_delivery_ready_before_user_clicks_generate(tmp_db,
     assert readiness["coverage"]["hotspot_video"] >= 1
     assert readiness["coverage"]["owned_video"] >= 4
     assert 50_000 <= readiness["coverage"]["duration_ms"] <= 90_000
+    assert readiness.get("adaptation", {}).get("adapted") is False
 
 
 def test_chat_retrieval_can_reuse_the_same_hook_for_two_relevant_logistics_topics(tmp_db, monkeypatch):

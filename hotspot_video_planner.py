@@ -415,6 +415,8 @@ def _limit_distinct_hotspot_hooks(selected_events: list[tuple[int, dict, list[st
 def plan_followup_scenes(
     brief: dict, hotspot_events: list[dict], owned_segments: list[dict], target_duration_ms: int = 60_000,
     owned_images: list[dict] | None = None,
+    *,
+    allow_adaptation: bool = False,
 ) -> list[dict]:
     # A Qwen + critic approved set has already passed factual relevance review.
     # Preserve that decision rather than applying a second keyword-only filter
@@ -478,12 +480,12 @@ def plan_followup_scenes(
         used_actions.add(action)
         distinct_owned.append(item)
     owned = distinct_owned[:owned_limit]
-    # 静态图只做节奏过渡：单张 2 秒、最多 3 张、不可相邻。它们不替代实拍证据，
-    # 但比空白 PPT 卡更自然，也让图库中的照片真正参与成片。
-    # Formal C-end videos must stay on auditable moving footage. Automatic
-    # image inserts repeatedly forced the writer into short generic captions
-    # and weakened the user's requested logistics proposition.
-    context_images = []
+    # Ideal formal plans avoid automatic image inserts. Adaptive chat plans may
+    # re-enable up to three stills as rhythm bridges when owned footage is thin.
+    if allow_adaptation and len(owned) < 4:
+        context_images = context_images[:3]
+    else:
+        context_images = []
 
     # Do not schedule a source that is already known to be too short.  This is
     # intentionally before the duration calculation so a 1-second segment can
@@ -523,6 +525,10 @@ def plan_followup_scenes(
         if image_index < len(context_images) and position in {0, 2, 4}:
             slots.append(("image", context_images[image_index]))
             image_index += 1
+    # Adaptive: if owned footage is sparse, append remaining stills as bridges.
+    while allow_adaptation and image_index < len(context_images):
+        slots.append(("image", context_images[image_index]))
+        image_index += 1
 
     for position, (kind, payload) in enumerate(slots, 1):
         if kind == "hotspot":
@@ -588,7 +594,8 @@ def plan_followup_scenes(
         # 挤占实拍镜头的最低可用时长。先移除可选图片；仍超预算时，所有剩余
         # 槽位都是真实视频，统一按 3 秒下限收缩，渲染器便不会收到会被迫循环
         # 或只剩一闪而过的真实片段。
-        scenes = [scene for scene in scenes if scene.get("evidence_type") != "image"]
+        if not allow_adaptation:
+            scenes = [scene for scene in scenes if scene.get("evidence_type") != "image"]
     if sum(int(scene["duration_ms"]) for scene in scenes) > target_duration_ms:
         scenes = rebalance_scenes_to_budget(scenes, target_duration_ms, minimum_scene_ms=3_000)
     for scene in scenes:
@@ -598,6 +605,54 @@ def plan_followup_scenes(
     if not usage["passed"]:
         raise ValueError("成片素材重复硬门禁未通过：" + "；".join(usage["issues"]))
     return scenes
+
+
+def describe_plan_adaptation(
+    scenes: list[dict],
+    *,
+    ideal_owned: int = 4,
+    ideal_min_scenes: int = 7,
+) -> dict:
+    """Summarize how the plan differs from the ideal dual-library inventory."""
+    hotspot_count = sum(scene.get("evidence_type") == "hotspot_video" for scene in scenes)
+    owned_count = sum(scene.get("evidence_type") == "owned_video" for scene in scenes)
+    image_count = sum(scene.get("evidence_type") == "image" for scene in scenes)
+    duration_ms = sum(int(scene.get("duration_ms") or 0) for scene in scenes)
+    strategies: list[str] = []
+    adapted = False
+    if owned_count < ideal_owned:
+        adapted = True
+        strategies.append("reduce_owned_requirement")
+    if image_count:
+        adapted = True
+        strategies.append("use_owned_images_as_bridges")
+    if len(scenes) < ideal_min_scenes:
+        adapted = True
+        strategies.append("shorten_structure")
+    if adapted:
+        strategies.append("brand_endcard_close")
+    return {
+        "adapted": adapted,
+        "strategies": list(dict.fromkeys(strategies)),
+        "coverage": {
+            "hotspot_video": hotspot_count,
+            "owned_video": owned_count,
+            "image": image_count,
+            "scene_count": len(scenes),
+            "duration_ms": duration_ms,
+        },
+        "ideal": {
+            "hotspot_video": 1,
+            "owned_video": ideal_owned,
+            "scene_count": f"{ideal_min_scenes}–10",
+            "duration_ms": "50000–90000",
+        },
+        "message": (
+            "库存不足，已按现有 Hook + Buffalo 素材自适应规划并继续生产。"
+            if adapted
+            else "库存满足理想双素材结构。"
+        ),
+    }
 
 
 def append_brand_endcard_scenes(scenes: list[dict]) -> list[dict]:

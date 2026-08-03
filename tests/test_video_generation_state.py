@@ -283,6 +283,25 @@ def test_hotspot_followup_evidence_gate_requires_sixty_seconds_and_dynamic_video
     assert any("静态图片占比" in issue for issue in issues)
 
 
+def test_hotspot_followup_evidence_gate_softens_owned_floor_when_adapted():
+    from video_generation import hotspot_evidence_gate
+
+    issues = hotspot_evidence_gate({
+        "source_type": "hotspot_followup",
+        "adaptation": {"adapted": True, "strategies": ["reduce_owned_requirement"]},
+        "duration_target_ms": 30_000,
+        "scenes": [
+            {"duration_ms": 10_000, "evidence_type": "hotspot_video"},
+            {"duration_ms": 10_000, "evidence_type": "owned_video"},
+            {"duration_ms": 8_000, "evidence_type": "owned_video"},
+            {"duration_ms": 2_000, "evidence_type": "image"},
+        ],
+    })
+
+    assert not any("至少 4 段 Buffalo 动态视频" in issue for issue in issues)
+    assert not any("必须至少 60 秒" in issue for issue in issues)
+
+
 def test_hotspot_followup_evidence_gate_rejects_legacy_infographic_scene():
     from video_generation import hotspot_evidence_gate
 
@@ -300,6 +319,20 @@ def test_hotspot_followup_evidence_gate_rejects_legacy_infographic_scene():
     })
 
     assert any("已禁用" in issue for issue in issues)
+
+
+def test_describe_plan_adaptation_marks_thin_owned_inventory():
+    from hotspot_video_planner import describe_plan_adaptation
+
+    adaptation = describe_plan_adaptation([
+        {"evidence_type": "hotspot_video", "duration_ms": 7000},
+        {"evidence_type": "owned_video", "duration_ms": 7000},
+        {"evidence_type": "image", "duration_ms": 2000},
+    ])
+
+    assert adaptation["adapted"] is True
+    assert "reduce_owned_requirement" in adaptation["strategies"]
+    assert "use_owned_images_as_bridges" in adaptation["strategies"]
 
 
 @pytest.mark.parametrize(
