@@ -16,12 +16,12 @@
 </head>
 <body>
 <div class="app-layout" id="app"></div>
-<script src="/static/common.js?v=5"></script>
+<script src="/static/common.js?v=8"></script>
 <script>
 const PAGE_ID = 'home';
-const platformColors = { xiaohongshu: '#FF2442', douyin: '#000', facebook: '#1877F2', twitter: '#1DA1F2', reddit: '#FF4500' };
-const platformNames = { xiaohongshu: '小红书', douyin: '抖音', facebook: 'Facebook', twitter: 'Twitter', reddit: 'Reddit' };
-const platformIcons = { xiaohongshu: 'simple-icons:xiaohongshu', douyin: 'ri:tiktok-fill', facebook: 'ri:facebook-box-fill', twitter: 'ri:twitter-x-fill', reddit: 'ri:reddit-fill' };
+const platformColors = { wechat_mp:'#07C160',xiaohongshu: '#FF2442', douyin: '#000', facebook: '#1877F2', twitter: '#1DA1F2', reddit: '#FF4500' };
+const platformNames = { wechat_mp:'微信公众号',xiaohongshu: '小红书', douyin: '抖音', facebook: 'Facebook', twitter: 'Twitter', reddit: 'Reddit' };
+const platformIcons = { wechat_mp:'ri:wechat-fill',xiaohongshu: 'simple-icons:xiaohongshu', douyin: 'ri:tiktok-fill', facebook: 'ri:facebook-box-fill', twitter: 'ri:twitter-x-fill', reddit: 'ri:reddit-fill' };
 
 function getWeekRange() {
     const now = new Date(), mon = new Date(now);
@@ -36,8 +36,6 @@ async function init() {
     const ws = data.weekly_stats || {};
     const qs = data.queue_stats;
 
-    // 计算模拟环比
-    const pubChange = ws.published > 0 ? '+12%' : '0%';
     const successRate = qs.total > 0 ? Math.round(qs.published / qs.total * 100) : 0;
 
     document.getElementById('app').innerHTML = `
@@ -64,7 +62,7 @@ async function init() {
                     <div>
                         <div style="font-size:12px;opacity:0.7;margin-bottom:6px;">已发布</div>
                         <div style="font-size:36px;font-weight:700;line-height:1;">${ws.published || 0}</div>
-                        <span style="font-size:11px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:999px;margin-top:4px;display:inline-block;">${pubChange} 环比</span>
+                        <span style="font-size:11px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:999px;margin-top:4px;display:inline-block;">来自真实队列</span>
                     </div>
                     <div>
                         <div style="font-size:12px;opacity:0.7;margin-bottom:6px;">总创建</div>
@@ -78,6 +76,15 @@ async function init() {
                         <div style="font-size:12px;opacity:0.7;margin-bottom:6px;">最活跃平台</div>
                         <div style="font-size:20px;font-weight:700;margin-top:8px;">${platformNames[ws.top_platform] || ws.top_platform || '-'}</div>
                     </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:24px;">
+                <div class="card-header"><span class="card-title">人员产出与痛点</span><span style="font-size:11px;color:var(--text-muted);">口径：队列状态与账号状态，不使用 AI 推测</span></div>
+                <div class="card-body" style="padding:0;overflow:auto;">
+                    <table class="data-table"><thead><tr><th>人员</th><th>已发布干货</th><th>审核中</th><th>总创建</th><th>当前痛点</th></tr></thead><tbody>
+                    ${(data.team_performance||[]).map(person=>`<tr><td><div style="font-weight:700;">${escapeHtml(person.display_name||person.username)}</div><div style="font-size:10px;color:var(--text-muted);">@${escapeHtml(person.username)}</div></td><td><b style="color:#16a34a;">${person.published}</b></td><td>${person.pending_review}</td><td>${person.total}</td><td>${person.pain_points.length?person.pain_points.map(p=>`<span class="badge badge-${p.type==='failed'||p.type==='rejected'?'red':'yellow'}" style="margin-right:5px;">${p.label} ${p.count}</span>`).join(''):'<span class="badge badge-green">暂无阻塞</span>'}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-state">暂无人员数据</td></tr>'}
+                    </tbody></table>
                 </div>
             </div>
 

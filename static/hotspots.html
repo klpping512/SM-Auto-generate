@@ -29,9 +29,16 @@ const sourcePurpose={
   'Department of Transport':'道路、港口、货运与交通运行信息',
   'South African Government':'政府声明、部门公告和政策信息',
   'South African Reserve Bank':'汇率、利率、支付与宏观金融背景',
+  'Moneyweb':'财经与企业新闻，覆盖 Transnet、港口、燃油与供应链成本',
+  'BusinessTech':'商业与民生新闻，覆盖电商、快递、道路与基础设施',
+  'Daily Maverick':'深度时事报道，覆盖港口拥堵、铁路与边境口岸事件',
+  'The Citizen':'综合新闻，覆盖罢工、封路、天气等履约影响事件',
+  'The South African':'综合新闻与民生话题，补充 C 端视角热点',
   'YouTube · SA Today':'南非公开视频热点发现，只读取最近单视频元数据',
   'YouTube · South Africa Now':'南非公开视频热点发现，只读取最近单视频元数据',
-  'YouTube · SABC Digital News':'南非公开视频热点发现，只读取最近单视频元数据'
+  'YouTube · SABC Digital News':'南非公开视频热点发现，只读取最近单视频元数据',
+  'YouTube · eNCA':'南非 24 小时新闻台，现场类新闻视频密度高',
+  'YouTube · Newzroom Afrika':'南非 24 小时新闻台，现场类新闻视频密度高'
 };
 
 function icon(path){return `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;}
@@ -285,7 +292,7 @@ async function pollFetchStatus(){
 }
 
 function openCollectionGuide(){
-  document.getElementById('collectionDrawer').innerHTML=`<header><div><span>采集规则</span><h2>系统如何抓取热点</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content"><ol class="collection-steps"><li><strong>1. 读取官方 Feed 与公开视频频道</strong><p>官方新闻最多启用 5 个 HTTPS 信源；三个 YouTube 频道各读取最近 3 条单视频元数据，不下载频道。</p></li><li><strong>2. 用固定关键词筛选南非物流相关条目</strong><p>匹配南非、港口、海关、货运、仓库等词；抓取不调用文本大模型。</p></li><li><strong>3. 打开原文并发现正文媒体</strong><p>保存证据快照，并从文章主体发现图片、网页视频和 YouTube 嵌入；Logo、广告和头像会被过滤。</p></li><li><strong>4. 媒体与事实分开处理</strong><p>版权不明确的媒体不会自动下载。图片和视频都要完成权利确认，下载分析后才能进入成片。</p></li></ol><div class="rule-note"><strong>为什么这样做</strong><p>热点负责提供真实语境，自有素材负责展示 Buffalo 的日常履约流程。两者不会被拼成虚假的“新闻现场”。</p></div></div>`;
+  document.getElementById('collectionDrawer').innerHTML=`<header><div><span>采集规则</span><h2>系统如何抓取热点</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content"><ol class="collection-steps"><li><strong>1. 读取可信 Feed 与公开视频频道</strong><p>新闻类最多启用 12 个 HTTPS 信源（政府源 + 主流媒体源）；已配置的 YouTube 频道各读取最近 8 条单视频元数据，不下载频道。</p></li><li><strong>2. 用固定关键词筛选南非物流相关条目</strong><p>匹配南非主要城市、港口、海关、货运、仓储、卡车、铁路、罢工、封路、燃油等词；抓取不调用文本大模型。</p></li><li><strong>3. 打开原文并发现正文媒体</strong><p>保存证据快照，并从文章主体发现图片、网页视频和 YouTube 嵌入；Logo、广告和头像会被过滤。</p></li><li><strong>4. 媒体与事实分开处理</strong><p>版权不明确的媒体不会自动下载。图片和视频都要完成权利确认，下载分析后才能进入成片。</p></li></ol><div class="rule-note"><strong>为什么这样做</strong><p>热点负责提供真实语境，自有素材负责展示 Buffalo 的日常履约流程。两者不会被拼成虚假的“新闻现场”。</p></div></div>`;
   openDrawer('collectionDrawer');
 }
 
@@ -298,7 +305,7 @@ function renderSourceManager(){
   const displaySources=[...configured,...videoHealthSources];
   const hasFailures=sourceHealth().some(item=>item.status==='error');
   const mediaFailures=fetchRun?.result?.media_errors||[];
-  document.getElementById('sourceDrawer').innerHTML=`<header><div><span>最多启用 5 个</span><h2>可信信源与健康状态</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content">${hasFailures&&admin?'<button class="btn btn-primary source-retry" type="button" onclick="closeDrawers();fetchLatest()">重新抓取全部启用信源</button>':''}<div class="source-list">${displaySources.map(source=>{const health=healthByName(source.name);return `<article><div><strong>${escapeHtml(source.name)}</strong><span class="health-dot ${health?.status==='ok'?'ok':health?.status==='error'?'error':'idle'}">${health?.status==='ok'?'正常':health?.status==='error'?'失败':'未检测'}</span></div><p>${escapeHtml(sourcePurpose[source.name]||'管理员配置的公开可信来源')}</p><small>${escapeHtml(source.feed_url||'等待下一次抓取检测')}</small>${health?.error?`<p class="source-error">失败原因：${escapeHtml(health.error)}</p>`:''}${admin&&source.feed_url?`<label class="source-toggle"><input type="checkbox" ${source.enabled?'checked':''} onchange="toggleSource(${source.id},this.checked)"/><span>${source.enabled?'已启用':'已停用'}</span></label>`:''}</article>`;}).join('')||'<p class="drawer-empty">尚未配置可信源。</p>'}</div>${mediaFailures.length?`<div class="media-failure-note"><strong>可选配图失败 ${mediaFailures.length} 项</strong><p>事实来源仍然有效，只是开放许可补充配图没有成功下载。</p></div>`:''}${admin?`<form class="source-form" onsubmit="addSource(event)"><h3>添加信源</h3><label>名称<input class="input" id="sourceName" required maxlength="100"/></label><label>RSS / Atom HTTPS 地址<input class="input" id="sourceUrl" type="url" required placeholder="https://example.org/feed.xml"/></label><label>允许的原文域名<input class="input" id="sourceDomains" placeholder="example.org，多个用逗号分隔"/></label><button class="btn btn-primary" type="submit">添加并启用</button></form>`:''}<div class="rule-note"><strong>判定口径</strong><p>“正常”只代表 Feed 能读取并完成解析，不代表每次都一定有符合关键词的新热点。</p></div></div>`;
+  document.getElementById('sourceDrawer').innerHTML=`<header><div><span>最多启用 12 个</span><h2>可信信源与健康状态</h2></div><button onclick="closeDrawers()" aria-label="关闭">×</button></header><div class="drawer-content">${hasFailures&&admin?'<button class="btn btn-primary source-retry" type="button" onclick="closeDrawers();fetchLatest()">重新抓取全部启用信源</button>':''}<div class="source-list">${displaySources.map(source=>{const health=healthByName(source.name);return `<article><div><strong>${escapeHtml(source.name)}</strong><span class="health-dot ${health?.status==='ok'?'ok':health?.status==='error'?'error':health?.status==='blocked'?'idle':'idle'}">${health?.status==='ok'?'正常':health?.status==='error'?'失败':health?.status==='blocked'?'受限':'未检测'}</span></div><p>${escapeHtml(sourcePurpose[source.name]||'管理员配置的公开可信来源')}</p><small>${escapeHtml(source.feed_url||'等待下一次抓取检测')}</small>${health?.error?`<p class="source-error">${health?.status==='blocked'?'受限说明':'失败原因'}：${escapeHtml(health.error)}</p>`:''}${admin&&source.feed_url?`<label class="source-toggle"><input type="checkbox" ${source.enabled?'checked':''} onchange="toggleSource(${source.id},this.checked)"/><span>${source.enabled?'已启用':'已停用'}</span></label>`:''}</article>`;}).join('')||'<p class="drawer-empty">尚未配置可信源。</p>'}</div>${mediaFailures.length?`<div class="media-failure-note"><strong>可选配图失败 ${mediaFailures.length} 项</strong><p>事实来源仍然有效，只是开放许可补充配图没有成功下载。</p></div>`:''}${admin?`<form class="source-form" onsubmit="addSource(event)"><h3>添加信源</h3><label>名称<input class="input" id="sourceName" required maxlength="100"/></label><label>RSS / Atom HTTPS 地址<input class="input" id="sourceUrl" type="url" required placeholder="https://example.org/feed.xml"/></label><label>允许的原文域名<input class="input" id="sourceDomains" placeholder="example.org，多个用逗号分隔"/></label><button class="btn btn-primary" type="submit">添加并启用</button></form>`:''}<div class="rule-note"><strong>判定口径</strong><p>“正常”只代表 Feed 能读取并完成解析，不代表每次都一定有符合关键词的新热点。</p></div></div>`;
 }
 
 async function addSource(event){

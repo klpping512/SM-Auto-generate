@@ -16,7 +16,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=5"></script>
+<script src="/static/common.js?v=8"></script>
 <script>
 const PAGE_ID = 'queue';
 const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
@@ -80,6 +80,14 @@ function render() {
                     const s = statusMap[item.status] || statusMap.draft;
                     const tags = (item.hashtags||[]).map(h=>`#${escapeHtml(h)}`).join(' ');
                     const copyText = encodeURIComponent(`${item.title}\n\n${item.body}\n\n${(item.hashtags||[]).map(h=>'#'+h).join(' ')}`);
+                    const atts = JSON.parse(item.attachments || '[]');
+                    const videoAtt = atts.find(a => a.type === 'video');
+                    const videoUrl = videoAtt ? '/static/' + videoAtt.path.replace(/^uploads\//, 'uploads/') : '';
+                    const truth = item.verification_status === 'verified'
+                        ? '<span class="badge badge-success">来源已覆盖</span>'
+                        : item.verification_status === 'not_required'
+                            ? '<span class="badge badge-neutral">无需事实来源</span>'
+                            : '<span class="badge badge-warning">缺少事实证据</span>';
                     return `<div class="card fade-in" style="border-left:4px solid ${s.border};overflow:hidden;">
                         <div style="padding:16px 20px;display:flex;align-items:center;gap:16px;">
                             <div style="flex:1;min-width:0;">
@@ -88,6 +96,7 @@ function render() {
                                         <iconify-icon icon="${p.icon}" width="12"></iconify-icon> ${escapeHtml(p.name)}
                                     </span>
                                     <span class="badge ${s.cls}">${s.label}</span>
+                                    ${truth}
                                 </div>
                                 <div style="font-size:14px;font-weight:700;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.title)}</div>
                                 <div style="font-size:13px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.body.substring(0,120))}${item.body.length>120?'...':''}</div>
@@ -104,9 +113,11 @@ function render() {
                             </div>
                             <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
                                 <button class="btn btn-ghost btn-sm" onclick="copyContent('${copyText}')" title="复制文案"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
+                                ${videoUrl?`<button class="btn btn-ghost btn-sm" style="color:#6366f1;" onclick="window.open('${videoUrl}','_blank')" title="预览视频"><iconify-icon icon="mdi:video-outline" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='pending_review' && canReview?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="reviewItem(${item.id},'approve')" title="通过审核"><iconify-icon icon="mdi:check-circle-outline" width="16"></iconify-icon></button><button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="openRejectModal(${item.id})" title="驳回"><iconify-icon icon="mdi:close-circle-outline" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="publishItem(${item.id})" title="自动发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
                                 ${(item.platform==='xiaohongshu'||item.platform==='douyin') && (item.status==='queued'||item.status==='failed')?`<button class="btn btn-ghost btn-sm" style="color:#8B5CF6;" onclick="manualPublish(${item.id})" title="打开浏览器手动发布"><iconify-icon icon="mdi:open-in-new" width="16"></iconify-icon></button>`:''}
+                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'published')" title="标记已发布"><iconify-icon icon="mdi:check-bold" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='failed'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'queued')" title="重试"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon></button>`:''}
                                 <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteItem(${item.id})" title="删除"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
                             </div>
@@ -182,7 +193,7 @@ function pollManual(sid, tries, notifiedReady) {
             }
             if (s.status === 'published') { showToast('发布成功'); init(); return; }
             if (s.status === 'error') { showToast('失败：'+(s.error||'未知错误'),'error'); init(); return; }
-            if (s.status === 'closed') { showToast('浏览器已关闭（未检测到发布）','info'); return; }
+            if (s.status === 'closed') { showToast('浏览器已关闭，请确认发布成功后在队列页面手动标记','info'); init(); return; }
             pollManual(sid, tries + 1, notifiedReady);
         } catch(e) { pollManual(sid, tries + 1, notifiedReady); }
     }, 3000);

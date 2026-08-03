@@ -28,7 +28,17 @@ async function apiFetch(url, options = {}) {
     }
     if (!resp.ok) {
         let msg = `请求失败 (${resp.status})`;
-        try { const err = await resp.json(); msg = err.detail || msg; } catch {}
+        try {
+            const err = await resp.json();
+            const detail = err.detail;
+            if (typeof detail === 'string' && detail.trim()) msg = detail;
+            else if (detail && typeof detail.message === 'string' && detail.message.trim()) msg = detail.message;
+            else if (Array.isArray(detail)) {
+                const messages = detail.map(item => String(item?.msg || '')).filter(Boolean);
+                if (messages.length) msg = `请求参数有误：${messages.join('；')}`;
+            }
+            else if (detail != null) msg = JSON.stringify(detail);
+        } catch {}
         throw new Error(msg);
     }
     return resp;
@@ -69,11 +79,12 @@ function showToast(message, type = 'success') {
 const NAV_ITEMS = [
     { section: '核心' },
     { id: 'chat', label: 'AI 对话', href: '/chat.html' },
+    { id: 'hotspots', label: '热点选题', href: '/hotspots.html' },
+    { id: 'assets', label: '内容资产', href: '/assets.html' },
     { id: 'editor', label: '内容编辑器', href: '/editor.html' },
     { id: 'queue', label: '发布队列', href: '/queue.html' },
     { section: '分析' },
     { id: 'home', label: '经营驾驶舱', href: '/home.html' },
-    { id: 'assets', label: '内容资产', href: '/assets.html' },
     { id: 'calendar', label: '发布日历', href: '/calendar.html' },
     { section: '资源' },
     { id: 'knowledge', label: '企业知识库', href: '/knowledge.html' },
@@ -87,6 +98,7 @@ const NAV_ITEMS = [
 // 内联 SVG 路径（24x24 viewBox, fill="currentColor"）— 不再依赖 iconify CDN
 const NAV_ICONS = {
     'AI 对话':     '<path d="M4 3h16a2 2 0 012 2v11a2 2 0 01-2 2H9l-5 4v-4a2 2 0 01-2-2V5a2 2 0 012-2zm3 6h10V7H7v2zm0 4h7v-2H7v2z"/>',
+    '热点选题':    '<path d="M12 2a7 7 0 00-4 12.74V18h8v-3.26A7 7 0 0012 2zm2 11.5-.9.52V16h-2.2v-1.98l-.9-.52A5 5 0 1114 13.5zM9 20h6v2H9v-2z"/>',
     '经营驾驶舱': '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
     '内容编辑器':  '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
     '内容资产':    '<path d="M6 2a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6zm0 2h7v5h5v11H6V4z"/>',
@@ -144,6 +156,109 @@ function renderSidebar(activeId) {
     </aside>`;
 }
 
+// ==================== Persistent Video Task Center ====================
+const VIDEO_STAGE_LABELS = {
+    queued: '等待处理', topic_brief: '整理主题简报', hook_locking: '锁定热点 Hook',
+    scripting: '生成正式脚本', project_building: '建项入库',
+    planning: '整理脚本', script_quality_check: '检查脚本',
+    asset_matching: '匹配素材', match_quality_check: '检查素材匹配',
+    preview_rendering: '生成预览', preview_quality_check: '检查预览',
+    final_rendering: '生成高清成片', final_quality_check: '最终质量检查', manual_accepted: '人工验收已记录（未发布）',
+    succeeded: '已完成', needs_review: '需要确认', cancel_requested: '正在停止',
+    canceled: '已取消', failed: '失败'
+};
+let videoTaskPollTimer = null;
+let videoTaskPollFailures = 0;
+
+function ensureVideoTaskCenter() {
+    if (document.getElementById('videoTaskCenter')) return;
+    const center = document.createElement('section');
+    center.id = 'videoTaskCenter';
+    center.className = 'video-task-center';
+    center.innerHTML = `
+        <button class="video-task-toggle" type="button" aria-expanded="false" onclick="toggleVideoTaskCenter()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 4h11a2 2 0 012 2v3l5-2.5v11L17 15v3a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zm2 3v10h9V7H6z"/></svg>
+            <span>视频任务</span><b id="videoTaskCount">0</b>
+        </button>
+        <div class="video-task-panel" id="videoTaskPanel" hidden>
+            <header><strong>视频生成任务</strong><button type="button" onclick="toggleVideoTaskCenter(false)" aria-label="关闭">×</button></header>
+            <div id="videoTaskList" class="video-task-list"><p>暂无生成任务</p></div>
+        </div>`;
+    document.body.appendChild(center);
+}
+
+function toggleVideoTaskCenter(force) {
+    const panel = document.getElementById('videoTaskPanel');
+    const button = document.querySelector('.video-task-toggle');
+    if (!panel || !button) return;
+    const shouldOpen = typeof force === 'boolean' ? force : panel.hidden;
+    panel.hidden = !shouldOpen;
+    button.setAttribute('aria-expanded', String(shouldOpen));
+}
+
+function videoTaskMarkup(job) {
+    const status = job.status || 'pending';
+    const isPausedMatch = status === 'needs_review' && job.stage === 'match_quality_check';
+    const stage = isPausedMatch ? '匹配质量不足，等待人工处理' : (VIDEO_STAGE_LABELS[job.stage] || job.stage || '处理中');
+    const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
+    const canCancel = ['pending', 'running', 'needs_review', 'cancel_requested'].includes(status) && status !== 'cancel_requested';
+    return `<article class="video-task-item" data-job-id="${escapeHtml(job.id)}">
+        <a href="/video-project.html?id=${encodeURIComponent(job.project_id)}"><strong>${escapeHtml(stage)}</strong><span>${progress}%</span></a>
+        <div class="video-task-progress"><i style="width:${progress}%"></i></div>
+        <footer><span>${escapeHtml(status === 'needs_review' ? '质量未达标，请确认问题' : status)}</span>
+        ${canCancel ? `<button type="button" onclick="cancelVideoGeneration('${escapeHtml(job.id)}')">取消生成</button>` : ''}</footer>
+    </article>`;
+}
+
+async function refreshVideoTaskCenter() {
+    if (!localStorage.getItem('token')) return [];
+    ensureVideoTaskCenter();
+    try {
+        const response = await apiFetch('/api/video-generation/jobs/active');
+        const jobs = await response.json();
+        videoTaskPollFailures = 0;
+        const list = document.getElementById('videoTaskList');
+        const count = document.getElementById('videoTaskCount');
+        count.textContent = String(jobs.length);
+        count.hidden = jobs.length === 0;
+        list.innerHTML = jobs.length ? jobs.map(videoTaskMarkup).join('') : '<p>暂无进行中的视频任务</p>';
+        const hasMovingJob = jobs.some(job => ['pending', 'running', 'cancel_requested'].includes(job.status));
+        if (hasMovingJob && !videoTaskPollTimer) {
+            videoTaskPollTimer = window.setInterval(refreshVideoTaskCenter, 2000);
+        } else if (!hasMovingJob && videoTaskPollTimer) {
+            window.clearInterval(videoTaskPollTimer);
+            videoTaskPollTimer = null;
+        }
+        window.dispatchEvent(new CustomEvent('video-tasks-updated', {detail: jobs}));
+        return jobs;
+    } catch (error) {
+        videoTaskPollFailures += 1;
+        if (videoTaskPollFailures >= 3) {
+            if (videoTaskPollTimer) window.clearInterval(videoTaskPollTimer);
+            videoTaskPollTimer = null;
+            const list = document.getElementById('videoTaskList');
+            if (list) list.innerHTML = '<p class="video-task-offline">本地服务已断开，请重启 8080 后刷新页面</p>';
+        }
+        return [];
+    }
+}
+
+async function cancelVideoGeneration(jobId) {
+    try {
+        await apiFetch(`/api/video-generation/jobs/${encodeURIComponent(jobId)}/cancel`, {method: 'POST'});
+        showToast('已提交取消请求', 'info');
+        await refreshVideoTaskCenter();
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+function initVideoTaskCenter() {
+    if (!localStorage.getItem('token')) return;
+    ensureVideoTaskCenter();
+    refreshVideoTaskCenter();
+}
+
 // 页面初始化
 document.addEventListener('DOMContentLoaded', () => {
     if (!document.querySelector('link[href*="design-system.css"]')) {
@@ -152,4 +267,5 @@ document.addEventListener('DOMContentLoaded', () => {
         link.href = '/static/design-system.css?v=5';
         document.head.prepend(link);
     }
+    initVideoTaskCenter();
 });

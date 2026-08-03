@@ -868,3 +868,18 @@ textarea.input {
         padding-right: 16px;
     }
 }
+
+/* 跨页面视频生成任务中心 */
+.video-task-center{position:fixed;right:22px;bottom:24px;top:auto;z-index:90;font-size:12px}
+.video-task-toggle{height:38px;display:flex;align-items:center;gap:7px;padding:0 12px;border:1px solid var(--border-line);border-radius:8px;background:#fff;color:var(--text-primary);box-shadow:var(--shadow-md);cursor:pointer}
+.video-task-toggle b{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--primary);color:#fff;font-size:10px;line-height:18px;text-align:center}
+.video-task-panel{position:absolute;right:0;bottom:46px;top:auto;width:min(360px,calc(100vw - 32px));max-height:min(480px,calc(100vh - 150px));overflow:auto;border:1px solid var(--border-line);border-radius:10px;background:#fff;box-shadow:0 18px 48px rgba(25,20,14,.16)}
+.video-task-panel[hidden]{display:none}
+.video-task-panel>header{height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;border-bottom:1px solid var(--border-light)}
+.video-task-panel>header button{border:0;background:transparent;font-size:20px;color:var(--text-muted);cursor:pointer}
+.video-task-list{padding:10px}.video-task-list>p{padding:22px 8px;text-align:center;color:var(--text-muted)}
+.video-task-item{padding:10px;border:1px solid var(--border-light);border-radius:7px;margin-bottom:8px;background:var(--bg-subcard)}
+.video-task-item>a{display:flex;justify-content:space-between;color:var(--text-primary);text-decoration:none}.video-task-item>a span{color:var(--text-muted)}
+.video-task-progress{height:5px;margin:9px 0;background:#e9e4db;border-radius:3px;overflow:hidden}.video-task-progress i{display:block;height:100%;background:var(--primary)}
+.video-task-item footer{display:flex;align-items:center;justify-content:space-between;color:var(--text-muted)}.video-task-item footer button{border:0;background:transparent;color:#a33;font-size:11px;cursor:pointer}
+@media(max-width:760px){.video-task-center{right:12px;bottom:84px;top:auto;}.video-task-toggle span{display:none}}

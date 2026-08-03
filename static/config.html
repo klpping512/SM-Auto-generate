@@ -16,7 +16,7 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=5"></script>
+<script src="/static/common.js?v=8"></script>
 <script>
 const PAGE_ID = 'config';
 
@@ -65,6 +65,18 @@ function render() {
                         <button class="btn btn-primary" onclick="saveNotification()">保存通知配置</button>
                         <button class="btn btn-secondary" onclick="testNotification('email')">发送测试邮件</button>
                     </div>
+                </div>
+            </div>
+
+            <!-- 可替换模型角色 -->
+            <div class="card" style="margin-bottom:20px;">
+                <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#EFF6FF;display:flex;align-items:center;gap:10px;">
+                    <iconify-icon icon="mdi:source-branch" width="22" style="color:#2563EB;"></iconify-icon>
+                    <span style="font-size:15px;font-weight:700;">可替换模型角色</span>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">规划、视觉标注、质检和语音分别路由。密钥只读取环境变量名，页面不会保存真实 Key。</p>
+                    <div id="modelRoutes" style="display:grid;gap:10px;">正在读取...</div>
                 </div>
             </div>
             </div>
@@ -121,7 +133,7 @@ function render() {
                 <div style="padding:16px 24px;border-bottom:1px solid var(--border-light);background:#F3E8FF;display:flex;align-items:center;gap:10px;">
                     <iconify-icon icon="mdi:movie-open-play" width="22" style="color:#7C3AED;"></iconify-icon><span style="font-size:15px;font-weight:700;">抖音视频生成</span>
                 </div>
-                <div class="card-body"><p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">MiMo v2.5 TTS 负责旁白，FFmpeg 负责竖屏 MP4 合成。密钥只保存在服务运行环境。</p><div style="display:flex;gap:8px;"><input id="mimoKey" type="password" class="input" placeholder="MiMo API Key"/><button class="btn btn-primary" onclick="saveMimoKey()">保存</button></div><div id="mediaCaps" style="font-size:12px;margin-top:12px;color:var(--text-secondary);">正在检测...</div></div>
+                <div class="card-body"><p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">百炼 Qwen TTS 负责旁白，FFmpeg 负责竖屏 MP4 合成。密钥只保存在服务运行环境。</p><div style="display:flex;gap:8px;"><input id="dashscopeKey" type="password" class="input" placeholder="百炼 API Key"/><button class="btn btn-primary" onclick="saveDashscopeKey()">保存</button></div><div id="mediaCaps" style="font-size:12px;margin-top:12px;color:var(--text-secondary);">正在检测...</div></div>
             </div>
 
             <!-- 系统信息 -->
@@ -162,10 +174,15 @@ async function testNotification(channel = 'all') {
     } catch(e) { showToast('发送失败: ' + e.message, 'error'); }
 }
 
-async function saveMimoKey(){const key=document.getElementById('mimoKey').value.trim();if(!key){showToast('请输入 MiMo API Key','error');return;}try{await apiFetch('/api/config/mimo-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});document.getElementById('mimoKey').value='';showToast('MiMo Key 已加载');loadCapabilities();}catch(e){showToast(e.message,'error');}}
-async function loadCapabilities(){try{const r=await apiFetch('/api/media/capabilities');const c=await r.json();const mark=v=>v?'✅':'❌';document.getElementById('mediaCaps').innerHTML=`${mark(c.ffmpeg)} FFmpeg &nbsp; ${mark(c.ffprobe)} ffprobe &nbsp; ${mark(c.mimo_key)} MiMo Key<br/><strong>${c.ready?'视频生成已就绪':'请补齐缺失项后再生成视频'}</strong>`;}catch(e){document.getElementById('mediaCaps').textContent='能力检测失败';}}
+async function saveDashscopeKey(){const key=document.getElementById('dashscopeKey').value.trim();if(!key){showToast('请输入百炼 API Key','error');return;}try{await apiFetch('/api/config/dashscope-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});document.getElementById('dashscopeKey').value='';showToast('百炼 Key 已加载');loadCapabilities();}catch(e){showToast(e.message,'error');}}
+async function loadCapabilities(){try{const r=await apiFetch('/api/media/capabilities');const c=await r.json();const mark=v=>v?'✅':'❌';document.getElementById('mediaCaps').innerHTML=`${mark(c.ffmpeg)} FFmpeg &nbsp; ${mark(c.ffprobe)} ffprobe &nbsp; ${mark(c.dashscope_key)} 百炼 Key<br/><strong>${c.ready?'视频生成已就绪':'请补齐缺失项后再生成视频'}</strong>`;}catch(e){document.getElementById('mediaCaps').textContent='能力检测失败';}}
 
-render();loadCapabilities();
+const MODEL_ROLE_LABELS={planner_text:'脚本规划',vision_tagger:'视觉标注',video_evaluator:'视频成片质检',critic:'质量审查',tts:'语音合成'};
+let modelRoutes={};
+async function loadModelRoutes(){try{const pairs=await Promise.all(Object.keys(MODEL_ROLE_LABELS).map(async role=>{const r=await apiFetch(`/api/model-routes/${role}`);return [role,await r.json()];}));modelRoutes=Object.fromEntries(pairs);document.getElementById('modelRoutes').innerHTML=pairs.map(([role,item])=>`<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px"><div><strong style="font-size:13px">${MODEL_ROLE_LABELS[role]}</strong><div style="font-size:11px;color:var(--text-muted);margin-top:3px">${role} · ${item.enabled?`${item.provider} / ${item.model||'待配置'}`:'已停用'} · Key: ${item.api_key_env}</div></div><button class="btn btn-secondary btn-sm" onclick="editModelRoute('${role}')">更换</button></div>`).join('');}catch(e){document.getElementById('modelRoutes').textContent='模型路由读取失败：'+e.message;}}
+async function editModelRoute(role){const current=modelRoutes[role];if(!current)return;const provider=prompt('兼容服务商标识',current.provider);if(!provider)return;const base_url=prompt('OpenAI 兼容 HTTPS 基础地址',current.base_url);if(!base_url)return;const model=prompt('模型名称',current.model);if(!model)return;const api_key_env=prompt('密钥环境变量名（不填写真实 Key）',current.api_key_env);if(!api_key_env)return;const optionsText=prompt('请求选项 JSON（例如 {"enable_thinking":true,"thinking_budget":3000}）',JSON.stringify(current.request_options||{}));if(optionsText===null)return;let request_options={};try{request_options=JSON.parse(optionsText||'{}');}catch(e){showToast('请求选项必须是合法 JSON','error');return;}const enabled=confirm('点击“确定”启用这个角色；点击“取消”将停用');try{await apiFetch(`/api/model-routes/${role}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider,base_url,api_key_env,model,capabilities:current.capabilities,timeout:current.timeout,max_tokens:current.max_tokens,cost_profile:current.cost_profile,request_options,enabled})});showToast(`${MODEL_ROLE_LABELS[role]}路由已更新`);loadModelRoutes();}catch(e){showToast(e.message,'error');}}
+
+render();loadCapabilities();loadModelRoutes();
 </script>
 </body>
 </html>

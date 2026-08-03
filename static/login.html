@@ -68,24 +68,68 @@
         <div class="login-brand-line"></div>
     </div>
     <div class="card login-card">
-        <h2 style="font-size:18px;font-weight:800;margin-bottom:24px;">登录工作台</h2>
+        <div style="display:flex;gap:8px;margin-bottom:24px;" role="tablist" aria-label="登录与注册">
+            <button id="loginTab" class="btn btn-primary" style="flex:1;justify-content:center;" onclick="setMode('login')">登录</button>
+            <button id="signupTab" class="btn btn-secondary" style="flex:1;justify-content:center;" onclick="setMode('signup')">注册账号</button>
+        </div>
         <div id="errorMsg" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;font-size:13px;padding:10px 12px;border-radius:var(--radius-md);margin-bottom:16px;"></div>
         <div style="display:flex;flex-direction:column;gap:16px;">
             <div>
                 <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">用户名</label>
                 <input id="username" class="input" placeholder="输入用户名" autofocus/>
             </div>
+            <div id="displayNameField" hidden>
+                <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">姓名</label>
+                <input id="displayName" class="input" maxlength="40" placeholder="用于区分团队成员"/>
+            </div>
             <div>
                 <label style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">密码</label>
                 <input id="password" type="password" class="input" placeholder="输入密码"/>
             </div>
-            <button id="loginBtn" class="btn btn-primary btn-lg" style="width:100%;justify-content:center;" onclick="doLogin()">登录</button>
+            <button id="loginBtn" class="btn btn-primary btn-lg" style="width:100%;justify-content:center;" onclick="submitForm()">登录</button>
         </div>
-        <p style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:16px;">默认管理员: admin / admin123</p>
+        <p id="formHint" style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:16px;">使用自己的账号进入独立运营空间</p>
     </div>
 </div>
 <script>
 if (localStorage.getItem('token')) window.location.href = '/home.html';
+let mode = 'login';
+
+function setMode(nextMode) {
+    mode = nextMode;
+    const signup = mode === 'signup';
+    document.getElementById('displayNameField').hidden = !signup;
+    document.getElementById('loginTab').className = signup ? 'btn btn-secondary' : 'btn btn-primary';
+    document.getElementById('signupTab').className = signup ? 'btn btn-primary' : 'btn btn-secondary';
+    document.getElementById('loginTab').style.cssText = 'flex:1;justify-content:center;';
+    document.getElementById('signupTab').style.cssText = 'flex:1;justify-content:center;';
+    document.getElementById('loginBtn').textContent = signup ? '创建个人账号' : '登录';
+    document.getElementById('formHint').textContent = signup ? '注册后可建立属于自己的多平台账号矩阵' : '使用自己的账号进入独立运营空间';
+    document.getElementById('errorMsg').style.display = 'none';
+}
+
+async function submitForm() {
+    if (mode === 'signup') return doSignup();
+    return doLogin();
+}
+
+async function doSignup() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const displayName = document.getElementById('displayName').value.trim();
+    const errDiv = document.getElementById('errorMsg');
+    const btn = document.getElementById('loginBtn');
+    if (!username || !password || !displayName) { errDiv.textContent = '请填写姓名、用户名和密码'; errDiv.style.display = 'block'; return; }
+    btn.disabled = true; btn.textContent = '创建中...'; errDiv.style.display = 'none';
+    try {
+        const resp = await fetch('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, display_name: displayName }) });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '注册失败');
+        setMode('login');
+        errDiv.style.display = 'block'; errDiv.style.background = '#F0FDF4'; errDiv.style.borderColor = '#BBF7D0'; errDiv.style.color = '#166534'; errDiv.textContent = '注册成功，请登录';
+    } catch (e) { errDiv.textContent = e.message; errDiv.style.display = 'block'; }
+    finally { btn.disabled = false; if (mode === 'signup') btn.textContent = '创建个人账号'; }
+}
 
 async function doLogin() {
     const username = document.getElementById('username').value.trim();
@@ -105,7 +149,7 @@ async function doLogin() {
     finally { btn.disabled = false; btn.textContent = '登录'; }
 }
 
-document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') submitForm(); });
 </script>
 </body>
 </html>

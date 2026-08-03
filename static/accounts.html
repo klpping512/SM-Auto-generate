@@ -16,18 +16,18 @@
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=5"></script>
+<script src="/static/common.js?v=8"></script>
 <script>
 const PAGE_ID = 'accounts';
-const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
-const platformIcons = { xiaohongshu:'simple-icons:xiaohongshu',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
-const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
+const platformNames = { wechat_mp:'微信公众号',wechat_channels:'微信视频号',xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const platformIcons = { wechat_mp:'ri:wechat-fill',wechat_channels:'ri:wechat-channels-fill',xiaohongshu:'simple-icons:xiaohongshu',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
+const platformColors = { wechat_mp:'#07C160',wechat_channels:'#07C160',xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
 const requiredFields = {
     facebook: [['page_id','主页 ID'],['page_access_token','主页访问令牌 (Page Access Token)']],
     twitter:  [['access_token','用户访问令牌 (OAuth2 access_token)']],
     reddit:   [['client_id','App Client ID'],['client_secret','App Client Secret'],
                ['refresh_token','Refresh Token'],['user_agent','User-Agent'],['subreddit','目标 Subreddit']],
-    xiaohongshu: [], douyin: [],
+    xiaohongshu: [], douyin: [], wechat_mp: [], wechat_channels: [],
 };
 
 let accounts = [];
@@ -337,7 +337,8 @@ function onPlatformChange() {
 async function addStep1Next() {
     const platform = document.getElementById('newPlatform').value;
     const name = document.getElementById('newName').value.trim() || (platformNames[platform] + '账号');
-    const accountId = (platform + '_' + Date.now().toString(36)).slice(0, 20);
+    const typedId = document.getElementById('newAccountId').value.trim();
+    const accountId = (typedId || platform + '_' + Date.now().toString(36)).slice(0, 80);
     if (!name) { showToast('请填写账号名称', 'error'); return; }
     const isRpa = ['xiaohongshu', 'douyin'].includes(platform);
     // 创建账号

@@ -21,6 +21,7 @@
 .chat-bubble{max-width:min(720px,82%);padding:12px 15px;border:1px solid var(--border);background:#fff;border-radius:4px 12px 12px 12px;font-size:14px;line-height:1.75;white-space:pre-wrap;box-shadow:var(--shadow-sm)}
 .chat-row.user .chat-bubble{background:#171717;color:#fff;border-color:#171717;border-radius:12px 4px 12px 12px}
 .result-card{margin-top:10px;border:1px solid rgba(185,138,76,.4);background:#fcfaf6;border-radius:7px;white-space:normal;overflow:hidden}.result-tabs{display:flex;gap:4px;padding:8px 10px;border-bottom:1px solid var(--border-light);background:#fff;overflow-x:auto}.result-tab{border:1px solid var(--border);background:#fff;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;white-space:nowrap}.result-tab.active{background:#211f1c;border-color:#211f1c;color:#fff}.result-panel{display:none;padding:14px 16px}.result-panel.active{display:block}.result-title{font-weight:900;font-size:15px;margin-bottom:8px}.result-body{font-size:13px;color:var(--text-secondary);white-space:pre-wrap;max-height:280px;overflow:auto}.result-tags{font-size:11px;color:var(--primary-hover);margin-top:9px}.result-warning{margin-top:9px;padding:7px 9px;border-radius:5px;background:#fff3dc;color:#9a5b00;font-size:11px}.result-actions{display:flex;gap:8px;margin-top:12px}
+.result-note{margin-top:9px;padding:7px 9px;border-radius:5px;background:#edf7f1;color:#2e6b48;font-size:11px}.result-note p{margin:4px 0 0}
 .composer{flex-shrink:0;background:#fff;border:1px solid var(--border);border-top:3px solid var(--primary);border-radius:var(--radius-lg);box-shadow:0 10px 30px rgba(48,40,28,.07);padding:0 14px 10px}
 .topic-picker{border-bottom:1px solid var(--border-light)}.topic-picker summary{height:42px;display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:12px;font-weight:800;color:var(--text-secondary)}.topic-picker summary::-webkit-details-marker{display:none}.topic-picker summary:after{content:'⌄';margin-left:auto;color:var(--text-muted);transition:transform .2s}.topic-picker[open] summary:after{transform:rotate(180deg)}.topic-count{font-weight:500;color:var(--text-muted)}.selected-topic-label{display:none;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--primary-light);color:var(--primary-hover);border-radius:999px;padding:4px 9px;font-weight:700}.selected-topic-label.show{display:inline-block}
 .topic-panel{padding:0 0 12px}.topic-categories{display:flex;gap:6px;overflow-x:auto;padding:1px 0 9px;scrollbar-width:none}.topic-categories::-webkit-scrollbar{display:none}.topic-category{white-space:nowrap;border:1px solid var(--border);background:var(--bg-subcard);padding:6px 10px;border-radius:5px;font-size:11px;color:var(--text-secondary);cursor:pointer}.topic-category.active{background:#211f1c;color:#fff;border-color:#211f1c}.topic-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.quick-topic{border:1px solid var(--border-light);background:#fff;padding:8px 10px;border-radius:5px;font-size:11px;text-align:left;color:var(--text-secondary);cursor:pointer;transition:.16s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.quick-topic:hover,.quick-topic.selected{border-color:var(--primary);background:var(--primary-light);color:var(--primary-hover)}
@@ -52,18 +53,23 @@
 .render-success video{display:block;margin:8px 0}
 .render-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
 .render-error{padding:8px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#dc2626;font-size:12px}
+.render-review-summary{display:grid;gap:6px;margin-top:6px;font-size:12px;line-height:1.55}
+.render-review-summary details{color:var(--text-secondary)}
+.typing-status{margin-left:8px;color:var(--text-muted);font-size:12px;vertical-align:middle}
 
 </style>
 </head>
 <body>
 <div class="app-layout" id="app"></div>
 <div id="toastContainer" class="toast-container"></div>
-<script src="/static/common.js?v=5"></script>
+<script src="/static/common.js?v=8"></script>
 <script src="/static/editor-transfer.js?v=2"></script>
 <script>
 const PAGE_ID='chat';
 const platformNames={xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit'};
-const selectedPlatforms=new Set();
+// 用户从“帮我生成视频”进入时，不应先被迫理解平台设置；默认以本产品的
+// 短视频主路径抖音承接，用户仍可一键改选或增加其他平台。
+const selectedPlatforms=new Set(['douyin']);
 const CHAT_SESSIONS_KEY='logiflowChatSessionsV2';
 const CURRENT_SESSION_KEY='logiflowCurrentChatSession';
 let chatSessions=[];
@@ -95,7 +101,7 @@ async function init(){
           <select id="toneSelect" class="select"><option value="professional">专业严谨</option><option value="friendly">亲切自然</option><option value="urgent">紧急通知</option></select>
           <select id="lengthSelect" class="select"><option value="short">短文案</option><option value="medium" selected>中文案</option><option value="long">长文案</option></select>
           <span class="params-divider"></span><span class="platform-label" style="font-size:11px;color:var(--text-muted);font-weight:700;">目标平台</span>
-          ${Object.entries(platformNames).map(([k,v])=>`<button class="platform-chip" data-platform="${k}" onclick="togglePlatform('${k}',this)">${v}</button>`).join('')}
+          ${Object.entries(platformNames).map(([k,v])=>`<button class="platform-chip ${selectedPlatforms.has(k)?'active':''}" data-platform="${k}" onclick="togglePlatform('${k}',this)">${v}</button>`).join('')}
         </div>
         <div class="chat-input-row"><textarea id="chatInput" class="input input-glow" placeholder="描述你想写什么，或先从上方选择主题…" oninput="autoResize(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea><button id="sendBtn" class="btn btn-primary btn-glow send-btn" onclick="sendMessage()" aria-label="发送"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg></button></div>
         <div class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行</div>
@@ -180,21 +186,32 @@ function quickTopic(topic,btn){
 }
 function autoResize(input){input.style.height='42px';input.style.height=Math.min(input.scrollHeight,112)+'px';}
 
+function hotspotRetrievalMarkup(result){const retrieval=result?.hotspot_retrieval;if(!retrieval||retrieval.status==='not_requested')return '';if(retrieval.status==='matched'){const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');const readiness=retrieval.video?.delivery_readiness;const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';return `<div class="result-warning"><strong>强相关热点 Hook 已匹配</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>正式成片将锁定以上相关 Hook，并使用 Buffalo 自有素材补足可见执行动作。</p><a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;}return `<div class="result-warning"><strong>正在补采相关热点素材</strong><p>${escapeHtml(retrieval.message||'已进入定向采集队列。')}</p><p>为保证每条视频都有相关热点素材，视频按钮会在至少一段已确认 Hook 入库前保持禁用；图文可继续生成。</p></div>`;}
+
 function resultCardMarkup(result,id){
   const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
   resultStore.set(id,result);
   const tabs=outputs.map((o,i)=>`<button class="result-tab ${i===0?'active':''}" onclick="selectResultTab('${id}',${i},this)">${escapeHtml(platformNames[o.platform]||o.platform)}</button>`).join('');
-  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const douyinScenes=o.platform==='douyin'&&o.scenes?.length?douyinScenesMarkup(o,id,i):'';return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(o.body||o.content||'')}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">⚠ ${warnings.map(escapeHtml).join('；')}</div>`:''}${douyinScenes}<div class="result-actions"><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',${i})">发送到编辑器</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制</button></div></div>`}).join('');
-  return `<div class="result-card" id="result-${id}"><div class="result-tabs">${tabs}</div>${panels}</div>`;
+  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const douyinScenes=o.platform==='douyin'&&o.scenes?.length?douyinScenesMarkup(o,id,i,result.hotspot_retrieval):'';return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(o.body||o.content||'')}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">提示：${warnings.map(escapeHtml).join('；')}</div>`:''}${douyinScenes}<div class="result-actions"><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',${i})">发送到编辑器</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制</button></div></div>`}).join('');
+  return `<div class="result-card" id="result-${id}">${hotspotRetrievalMarkup(result)}<div class="result-tabs">${tabs}</div>${panels}</div>`;
 }
 function selectResultTab(id,index,btn){const card=document.getElementById(`result-${id}`);if(!card)return;card.querySelectorAll('.result-tab').forEach(b=>b.classList.toggle('active',b===btn));card.querySelectorAll('.result-panel').forEach(p=>p.classList.toggle('active',Number(p.dataset.index)===index));}
 // 抖音成片相关函数
-const VOICES = ['冰糖', '茉莉', '苏打', '白桦'];
-let renderPollers = {};
+const VOICES = ['Cherry'];
+let videoProjectPollers = {};
 
-function douyinScenesMarkup(output, resultId, index) {
+function douyinScenesMarkup(output, resultId, index, hotspotRetrieval) {
   const scenes = output.scenes || [];
   if (!scenes.length) return '';
+  const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
+  const videoReady=hotspotRetrieval?.status==='matched'&&hotspotRetrieval?.video?.status==='ready'&&(deliveryReadiness?.delivery_ready??true);
+  const videoBlocked=!videoReady;
+  const videoLabel=videoReady?'生成视频':(hotspotRetrieval?.status==='matched'?'补充 Buffalo 素材':'正在补采热点素材');
+  // 对话卡里的六格只是写作预览。用户点“生成视频”后会由内置模型锁定
+  // 一至两段 Hook，并按正式双素材计划生成约 60 秒成片，不能把预览长度误当交付长度。
+  const sceneLabel=videoReady
+    ? `脚本预览 · 正式双素材成片约 ${Math.round((hotspotRetrieval?.video?.target_duration_ms||60000)/1000)} 秒`
+    : `脚本预览 · ${output.duration_target || 30}秒`;
   
   const scenesHtml = scenes.map((s, i) => {
     return `
@@ -211,7 +228,7 @@ function douyinScenesMarkup(output, resultId, index) {
   
   return `
     <div class="douyin-scenes">
-      <div class="scenes-header">🎬 抖音脚本 · ${scenes.length} 个分镜 · ${output.duration_target || 30}秒</div>
+      <div class="scenes-header">${sceneLabel}</div>
       ${scenesHtml}
       <div class="render-panel">
         <div class="render-voice-select">
@@ -220,7 +237,7 @@ function douyinScenesMarkup(output, resultId, index) {
             ${VOICES.map(v => `<option value="${v}">${v}</option>`).join('')}
           </select>
         </div>
-        <button class="btn btn-primary" onclick="startDouyinRender('${resultId}', ${index})">🎬 一键成片</button>
+        <button class="btn btn-primary" id="generate-video-${resultId}-${index}" onclick="startDouyinRender('${resultId}', ${index})" ${videoBlocked?`disabled title="${escapeHtml(deliveryReadiness?.message||'等待至少一段强相关、已确认的热点 Hook')}`:''}>${videoLabel}</button>
         <div id="render-status-${resultId}-${index}" class="render-status" style="display:none;"></div>
       </div>
     </div>
@@ -229,74 +246,102 @@ function douyinScenesMarkup(output, resultId, index) {
 
 async function startDouyinRender(resultId, index) {
   const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
-  if (statusDiv && statusDiv.dataset.rendering === '1') {
-    showToast('该内容正在渲染中，请等待完成后再操作', 'error');
-    return;
-  }
+  const result = resultStore.get(resultId);
+  const hotspotRetrieval = result?.hotspot_retrieval;
+  const dualLibraryVideo = hotspotRetrieval?.video;
   const output = outputById(resultId, index);
   if (!output || !output.scenes?.length) {
     showToast('没有可渲染的抖音脚本', 'error');
     return;
   }
+  if (hotspotRetrieval?.status !== 'matched' || dualLibraryVideo?.status !== 'ready') {
+    showToast('正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能生成视频', 'error');
+    return;
+  }
+  if (dualLibraryVideo.delivery_readiness && !dualLibraryVideo.delivery_readiness.delivery_ready) {
+    showToast(dualLibraryVideo.delivery_readiness.message || '当前 Buffalo 自有素材不足以形成正式成片', 'error');
+    return;
+  }
 
   const voiceSelect = document.getElementById(`voice-${resultId}-${index}`);
-  const voice = voiceSelect?.value || '冰糖';
+  const voice = voiceSelect?.value || 'Cherry';
+  output.voice = voice;
 
   if (statusDiv) statusDiv.dataset.rendering = '1';
   statusDiv.style.display = 'block';
-  statusDiv.innerHTML = '<div class="render-progress"><i style="width:5%"></i></div><div class="render-status-text">正在提交渲染任务...</div>';
+  statusDiv.innerHTML = '<div class="render-progress"><i style="width:5%"></i></div><div class="render-status-text">正在创建视频项目…</div>';
   
   try {
-    const resp = await apiFetch('/api/douyin/render', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        title: output.title,
-        scenes: output.scenes,
-        voice: voice,
-        music_suggestion: output.music_suggestion || ''
-      })
-    });
-    const data = await resp.json();
-    
-    if (data.job_id) {
-      showToast('渲染任务已提交', 'success');
-      pollRenderStatus(data.job_id, resultId, index);
-    } else {
-      throw new Error(data.detail || '提交失败');
+    if (output.video_generation_job_id && output.video_project_id) {
+      pollRenderStatus(output.video_generation_job_id, output.video_project_id, resultId, index);
+      return;
     }
+    statusDiv.innerHTML = '<div class="render-progress"><i style="width:5%"></i></div><div class="render-status-text">已锁定热点 Hook，正在创建视频任务…</div>';
+    const taskResponse = await apiFetch('/api/ai/chat/dual-library-video', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          topic: hotspotRetrieval.topic || selectedTopic || output.title || '南非物流热点',
+          hotspot_event_ids: dualLibraryVideo.hotspot_event_ids,
+          platform: 'douyin',
+          target_duration_ms: 60000,
+          session_id: currentSessionId,
+          idempotency_key: `chat-video-${currentSessionId}-${resultId}-${index}`,
+        })
+      });
+    const taskResult = await taskResponse.json();
+    if (!taskResult.job?.id || !taskResult.project?.id) throw new Error('未能创建视频任务');
+    output.video_project_id = taskResult.project.id;
+    output.video_generation_job_id = taskResult.job.id;
+    output.chat_video_task_id = '';
+    saveSessions();
+    showToast(taskResult.created ? '视频任务已开始' : '已恢复正在进行的视频任务', 'success');
+    refreshVideoTaskCenter();
+    pollRenderStatus(taskResult.job.id, taskResult.project.id, resultId, index);
   } catch (e) {
     if (statusDiv) statusDiv.dataset.rendering = '';
-    statusDiv.innerHTML = `<div class="render-error">❌ ${escapeHtml(e.message)}</div>`;
+    statusDiv.innerHTML = `<div class="render-error">${escapeHtml(e.message)}</div>`;
   }
 }
 
-function pollRenderStatus(jobId, resultId, index) {
+function pollRenderStatus(jobId, projectId, resultId, index) {
   const statusDiv = document.getElementById(`render-status-${resultId}-${index}`);
   const key = `${resultId}-${index}`;
-  
-  if (renderPollers[key]) clearInterval(renderPollers[key]);
-  
-  renderPollers[key] = setInterval(async () => {
+  if (videoProjectPollers[key]) clearInterval(videoProjectPollers[key]);
+
+  const poll = async () => {
     try {
-      const resp = await apiFetch(`/api/douyin/render/${jobId}`);
+      const resp = await apiFetch(`/api/video-generation/jobs/${jobId}`);
       const job = await resp.json();
-      
       const progress = job.progress || 0;
-      const stage = job.stage || '处理中';
-      const isPending = job.status === 'pending';
+      const stage = VIDEO_STAGE_LABELS[job.stage] || job.stage || '处理中';
+      const previewUrl = job.preview_url || job.output_url;
+      if (previewUrl) {
+        const output = outputById(resultId, index);
+        if (output && (!output.rendered_video || output.rendered_video.preview_only)) {
+          const previewVideo = {type:'video',url:previewUrl,path:job.preview_path || job.output_path || previewUrl,filename:(output.title || 'douyin') + '-preview.mp4',preview_only:true,quality_status:'preview'};
+          output.rendered_video = previewVideo;
+          output.attachments = [...(output.attachments || []).filter(item => item.type !== 'video'), previewVideo];
+          saveSessions();
+        }
+      }
 
       statusDiv.innerHTML = `
-        <div class="render-progress"><i style="width:${isPending ? 5 : progress}%"></i></div>
-        <div class="render-status-text">${isPending ? '排队等待中（前面有任务正在渲染）…' : escapeHtml(stage) + ' ' + progress + '%'}</div>
+        <div class="render-progress"><i style="width:${progress}%"></i></div>
+        <div class="render-status-text">${escapeHtml(stage)} ${progress}%</div>
+        <div class="render-actions"><a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">查看项目</a>
+        ${previewUrl?`<a class="btn btn-secondary btn-sm" href="${escapeHtml(previewUrl)}" download>下载预览</a><button class="btn btn-primary btn-sm" onclick="sendToEditor('${resultId}',${index})">发送到编辑器</button>`:''}
+        ${['pending','running','needs_review'].includes(job.status)?`<button class="btn btn-ghost btn-sm" onclick="cancelVideoGeneration('${jobId}')">取消生成</button>`:''}</div>
+        ${previewUrl?`<video src="${escapeHtml(previewUrl)}" controls style="max-width:100%;max-height:300px;border-radius:8px;margin-top:8px;"></video><div class="render-review-summary">预览已生成，可先查看或发送到编辑器；质检仍在后台继续，当前不可发布。</div>`:''}
       `;
-      
+
       if (job.status === 'succeeded') {
-        clearInterval(renderPollers[key]);
-        delete renderPollers[key];
+        clearInterval(videoProjectPollers[key]);
+        delete videoProjectPollers[key];
         statusDiv.dataset.rendering = '';
-        
-        const videoUrl = job.rendered_video?.url || job.output_url || ('/static/' + job.output_path);
+        const videoUrl = job.output_url;
+        const publication = job.quality_report?.publication || {};
+        const manualPreview = publication.publish_allowed === false;
         const renderedVideo = { type: 'video', url: videoUrl, path: job.output_path || videoUrl, filename: (job.title || 'douyin') + '.mp4' };
 
         // 关键：把成片回写到 resultStore 的 output，sendToEditor / buildDraft 才能带上视频
@@ -308,26 +353,40 @@ function pollRenderStatus(jobId, resultId, index) {
 
         statusDiv.innerHTML = `
           <div class="render-success">
-            ✅ 成片完成！
+            ${manualPreview?'内部预览已生成':'成片已通过质量检查'}
             <div class="render-actions">
               <video src="${escapeHtml(videoUrl)}" controls style="max-width:100%;max-height:300px;border-radius:8px;margin:8px 0;"></video>
               <div>
                 <a href="${escapeHtml(videoUrl)}" download class="btn btn-secondary btn-sm">下载 MP4</a>
-                <button class="btn btn-primary btn-sm" onclick="sendDouyinToQueue('${resultId}', ${index})">发布到抖音</button>
+                ${manualPreview?'':`<button class="btn btn-primary btn-sm" onclick="sendDouyinToQueue('${resultId}', ${index})">发布到抖音</button>`}
               </div>
+              ${manualPreview?'<div class="render-review-summary">外部语义质检未完成，当前预览仅供人工检查，不可发布。</div>':''}
             </div>
           </div>
         `;
-      } else if (job.status === 'failed') {
-        clearInterval(renderPollers[key]);
-        delete renderPollers[key];
+      } else if (job.status === 'needs_review') {
+        clearInterval(videoProjectPollers[key]);
+        delete videoProjectPollers[key];
         statusDiv.dataset.rendering = '';
-        statusDiv.innerHTML = `<div class="render-error">❌ 渲染失败：${escapeHtml(job.error || '未知错误')}</div>`;
+        const issues = [...new Set(job.quality_report?.gate?.issues || [])];
+        const labels = {script_quality_check:'脚本需要调整',match_quality_check:'缺少可用动态素材',preview_quality_check:'预览需要复核'};
+        const headline = labels[job.stage] || '生成任务需要确认';
+        const primary = issues.slice(0, 2).map(issue=>`<div>${escapeHtml(issue)}</div>`).join('') || '<div>请查看项目中的检查结果。</div>';
+        const remaining = issues.length > 2 ? `<details><summary>查看其余 ${issues.length-2} 项</summary><div>${issues.slice(2).map(issue=>escapeHtml(issue)).join('；')}</div></details>` : '';
+        const manualPreview = job.quality_report?.publication?.review_mode === 'manual_preview';
+        statusDiv.innerHTML = `<div class="render-error"><strong>${escapeHtml(headline)}</strong><div class="render-review-summary">${primary}${remaining}</div>${previewUrl?`<video src="${escapeHtml(previewUrl)}" controls style="max-width:100%;max-height:300px;border-radius:8px;margin:8px 0;"></video>`:''}<div class="render-actions">${manualPreview?'':`<button class="btn btn-primary btn-sm" onclick="startDouyinRender('${resultId}',${index})">按当前规则重新生成</button>`}${previewUrl?`<button class="btn btn-secondary btn-sm" onclick="sendToEditor('${resultId}',${index})">发送到编辑器</button>`:''}<a class="btn btn-secondary btn-sm" href="/video-project.html?id=${encodeURIComponent(projectId)}">检查分镜</a></div></div>`;
+      } else if (['failed','canceled'].includes(job.status)) {
+        clearInterval(videoProjectPollers[key]);
+        delete videoProjectPollers[key];
+        statusDiv.dataset.rendering = '';
+        statusDiv.innerHTML = `<div class="render-error">${job.status==='canceled'?'生成已取消':'生成失败：'+escapeHtml(job.error_message || '未知错误')}</div>`;
       }
     } catch (e) {
-      // 继续轮询
+      clearInterval(videoProjectPollers[key]);
     }
-  }, 2000);
+  };
+  poll();
+  videoProjectPollers[key] = setInterval(poll, 2000);
 }
 
 // 抖音发布：视频 + 文案（标题/正文/话题）一起进审核队列
@@ -359,16 +418,17 @@ function appendMessage(role,text,result=null,scroll=true){
   const resultId=`r${Date.now()}${Math.random().toString(36).slice(2,6)}`;const card=result?resultCardMarkup(result,resultId):'';const displayText=result?(result.outputs?.length>1?`已按 ${result.outputs.length} 个平台分别生成内容。`:'已生成平台内容。'):text;
   row.innerHTML=`<div class="chat-avatar">${role==='user'?'我':'AI'}</div><div class="chat-bubble">${escapeHtml(displayText)}${card}</div>`;box.appendChild(row);if(scroll)box.scrollTop=box.scrollHeight;
 }
-function addTyping(){const row=document.createElement('div');row.id='typingRow';row.className='chat-row assistant';row.innerHTML='<div class="chat-avatar">AI</div><div class="chat-bubble"><span class="typing"><i></i><i></i><i></i></span></div>';document.getElementById('chatMessages').appendChild(row);}
+function addTyping(){const row=document.createElement('div');row.id='typingRow';row.className='chat-row assistant';row.innerHTML='<div class="chat-avatar">AI</div><div class="chat-bubble"><span class="typing"><i></i><i></i><i></i></span><span class="typing-status" id="typingStatus">正在并行核对热点 Hook 和生成脚本…</span></div>';document.getElementById('chatMessages').appendChild(row);}
+function setTypingStatus(message){const label=document.getElementById('typingStatus');if(label)label.textContent=message;}
 
 async function sendMessage(topic=''){
   const input=document.getElementById('chatInput');const msg=input.value.trim();if(!msg)return;
   if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}
-  const chosenTopic=topic||selectedTopic;input.value='';autoResize(input);selectedTopic='';document.getElementById('selectedTopicLabel').classList.remove('show');document.getElementById('composerHint').textContent='Enter 发送 · Shift + Enter 换行';appendMessage('user',msg);chatHistory.push({role:'user',content:msg});saveSessions();addTyping();setSending(true);
-  try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:'',command:null,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms),topic:chosenTopic})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}
-  catch(e){document.getElementById('typingRow')?.remove();appendMessage('assistant','请求失败：'+e.message);showToast('AI 请求失败','error');}finally{setSending(false);}
+  const chosenTopic=topic||selectedTopic;input.value='';autoResize(input);selectedTopic='';document.getElementById('selectedTopicLabel').classList.remove('show');document.getElementById('composerHint').textContent='Enter 发送 · Shift + Enter 换行';appendMessage('user',msg);chatHistory.push({role:'user',content:msg});saveSessions();addTyping();const typingTimers=[window.setTimeout(()=>setTypingStatus('正在匹配可用的双素材库 Hook，请稍候…'),8000),window.setTimeout(()=>setTypingStatus('仍在生成内容；完成后会明确显示可生成或采集排队，无需重复提交。'),30000)];setSending(true);
+  try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:'',command:null,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms),topic:chosenTopic,session_id:currentSessionId})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}
+  catch(e){document.getElementById('typingRow')?.remove();appendMessage('assistant','请求失败：'+e.message);showToast('AI 请求失败','error');}finally{typingTimers.forEach(timer=>window.clearTimeout(timer));setSending(false);}
 }
-async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms)})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}
+async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms),session_id:currentSessionId})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}
 function outputById(id,index){const result=resultStore.get(id);return result?.outputs?.[index]||result;}
 function sendToEditor(id,index=0){
   const draft=EditorTransfer.buildDraft(resultStore.get(id),index,Array.from(selectedPlatforms));if(!draft){showToast('没有可导入的内容','error');return;}
