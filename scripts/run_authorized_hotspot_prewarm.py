@@ -46,7 +46,7 @@ async def main() -> int:
     if not admin:
         raise SystemExit("缺少 admin 用户，无法记录热点预热")
     fetched = await hotspot_fetcher.fetch_hotspots(
-        PROJECT_ROOT / "static", created_by=admin["id"], video_channels=hotspot_fetcher.DEFAULT_VIDEO_CHANNELS,
+        PROJECT_ROOT / "static", created_by=admin["id"], video_channels=hotspot_fetcher.configured_video_channels(),
     )
     # Existing metadata was collected before the organization-level approval
     # switch existed.  The user confirmed all currently configured sources are

@@ -41,6 +41,20 @@ SECOND_ROUND_SELLER_SCENARIOS = (
     "帮我生成一条 60 秒抖音视频：南非物流突发延误怎么办？讲一套备用供应链方案，避免全盘停摆。",
 )
 
+# 第三轮取自《十个主题优化版》里业务同事真实写的选题，按卖家在聊天框里
+# 自然提问的口吻改写，用来检验系统面对真实业务选题（而不是围着已有热点
+# 反推的问法）时能不能选到相关 Hook。三条覆盖三种不同的库内匹配预期，
+# 便于把「系统能力问题」和「热点素材库内容太薄」区分开：
+#   1. 路况货损  —— 库内有大量货车侧翻/事故镜头，预期强匹配。
+#   2. 海关查验  —— 库内有边境卡车排队镜头，预期中等匹配。
+#   3. 旺季爆仓  —— 库内没有任何仓储画面，预期匹配不到；此时正确行为是
+#      如实拒绝或转入定向采集，而不是硬套一条无关热点。
+REAL_TOPIC_SELLER_SCENARIOS = (
+    "南非那边路况差、分拣搬运也粗暴，我这批货老是破损。帮我做一条 60 秒视频，讲发南非的包装该怎么加固。",
+    "南非海关查验率听说有三到五成，我这票货怕被扣。帮我生成一条 60 秒视频，讲发货前要把哪些单证和编码核对清楚。",
+    "南非黑五旺季要爆仓了，我不知道该提前多久备货。帮我做一条 60 秒视频，讲旺季备货节奏该怎么安排。",
+)
+
 
 def selected_seller_scenarios(
     start_index: int, limit: int, scenarios: tuple[str, ...] = SELLER_SCENARIOS,
@@ -79,26 +93,6 @@ async def _wait_for_terminal_job(
         await asyncio.sleep(poll_seconds)
         elapsed += poll_seconds
     return {"status": "timeout", "stage": "polling_timeout"}
-
-
-async def _wait_for_chat_video_task(
-    client: httpx.AsyncClient, task_id: str, headers: dict[str, str], poll_seconds: float, timeout_seconds: int,
-) -> dict[str, Any]:
-    elapsed = 0.0
-    while elapsed <= timeout_seconds:
-        response = await _request(
-            client, "GET", f"/api/ai/chat/dual-library-video/tasks/{task_id}", headers=headers,
-        )
-        if response.status_code != 200:
-            return {"status": "poll_failed", "error": _result_error(response)}
-        task = response.json()
-        if task.get("project_id") and task.get("video_job_id"):
-            return task
-        if task.get("status") in {"failed", "needs_review", "canceled"}:
-            return task
-        await asyncio.sleep(poll_seconds)
-        elapsed += poll_seconds
-    return {"status": "timeout", "stage": "task_planning_timeout"}
 
 
 async def run(
@@ -145,33 +139,26 @@ async def run(
                     rows.append(row)
                     continue
                 row["hook_ids"] = hook_ids
-                task_response = await _request(client, "POST", "/api/ai/chat/dual-library-video", headers=headers, json={
+                job_response = await _request(client, "POST", "/api/ai/chat/dual-library-video", headers=headers, json={
                     "topic": question, "hotspot_event_ids": hook_ids, "platform": "douyin",
                     "target_duration_ms": 60_000, "session_id": f"cend-e2e-{index}",
                     "idempotency_key": f"cend-e2e-{index}",
                 })
-                if task_response.status_code != 202:
-                    row.update({"status": "task_create_failed", "error": _result_error(task_response)})
+                if job_response.status_code != 202:
+                    row.update({"status": "task_create_failed", "error": _result_error(job_response)})
                     rows.append(row)
                     continue
-                task_id = str((task_response.json().get("task") or {}).get("id") or "")
-                if not task_id:
-                    row.update({"status": "task_create_failed", "error": "接口没有返回聊天视频任务 ID"})
+                # The endpoint creates the project/job synchronously and returns
+                # them directly (same contract static/chat.html's pollRenderStatus
+                # relies on) — it does not wrap them in a pollable "task" object.
+                job_payload = job_response.json()
+                project_id = str((job_payload.get("project") or {}).get("id") or "")
+                job_id = str((job_payload.get("job") or {}).get("id") or job_payload.get("job_id") or "")
+                if not project_id or not job_id:
+                    row.update({"status": "task_create_failed", "error": "接口没有返回视频项目/任务 ID"})
                     rows.append(row)
                     continue
-                row["task_id"] = task_id
-                task = await _wait_for_chat_video_task(client, task_id, headers, poll_seconds, timeout_seconds)
-                if not task.get("project_id") or not task.get("video_job_id"):
-                    row.update({
-                        "status": task.get("status") or "task_planning_failed",
-                        "stage": task.get("stage"),
-                        "error": task.get("error_message") or task.get("error") or "聊天视频任务未创建渲染任务",
-                    })
-                    rows.append(row)
-                    continue
-                project_id = str(task["project_id"])
                 row["project_id"] = project_id
-                job_id = str(task["video_job_id"])
                 row["job_id"] = job_id
                 job = await _wait_for_terminal_job(client, job_id, headers, poll_seconds, timeout_seconds)
                 row.update({
@@ -200,13 +187,21 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--start-index", type=int, default=1, help="从第几条自然用户问法开始")
     parser.add_argument("--second-round", action="store_true", help="执行用户指定的四个第二轮主题")
+    parser.add_argument("--real-topics", action="store_true", help="执行《十个主题优化版》改写的真实业务选题")
     args = parser.parse_args()
+    if args.real_topics:
+        scenarios = REAL_TOPIC_SELLER_SCENARIOS
+    elif args.second_round:
+        scenarios = SECOND_ROUND_SELLER_SCENARIOS
+    else:
+        scenarios = SELLER_SCENARIOS
+    bound = len(scenarios)
     result = asyncio.run(run(
         args.base_url, timeout_seconds=max(30, args.timeout_seconds),
         poll_seconds=max(0.5, args.poll_seconds),
-        limit=max(1, min(4 if args.second_round else 10, args.limit)),
-        start_index=max(1, min(4 if args.second_round else 10, args.start_index)),
-        scenarios=SECOND_ROUND_SELLER_SCENARIOS if args.second_round else SELLER_SCENARIOS,
+        limit=max(1, min(bound, args.limit)),
+        start_index=max(1, min(bound, args.start_index)),
+        scenarios=scenarios,
     ))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["completed"] + result["needs_review"] == result["requested"] else 1
