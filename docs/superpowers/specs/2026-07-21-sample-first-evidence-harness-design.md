@@ -60,11 +60,17 @@
 |---|---|---|
 | SAnews（南非政府新闻机构） | `https://www.sanews.gov.za/south-africa-news-stories.xml` | 综合政务、社会事件、交通与公共服务热点 |
 | SARS（南非税务局） | `https://www.sars.gov.za/feed/?post_type=latest_news` | 海关、边境、税务与跨境履约风险 |
-| Statistics South Africa | `https://www.statssa.gov.za/?feed=rss2` | 零售、消费、就业和经济数据 |
+| Department of Transport | `https://www.transport.gov.za/?feed=rss2` | 道路、港口、货运与交通运行信息 |
 | South African Government | `https://www.gov.za/news-feed` | 政府声明、部门公告和政策信息 |
 | South African Reserve Bank | `https://www.resbank.co.za/bin/sarb/solr/publications/rss` | 汇率、利率、支付与宏观金融背景 |
 
 “5 个”是同时启用的硬上限，不是必须凑满的数量。管理员启用第 6 个来源时，系统必须拒绝并提示先停用现有来源；单个来源抓取失败不得阻塞其余来源。来源入选必须满足：HTTPS、可验证发布机构、稳定时间字段、正文可回溯、允许域名明确。RSS 文章默认只作为事实来源；媒体是否可以进入素材库需要单独记录许可。SAnews 明确允许媒体免费使用其站内故事、图片及其他材料，但系统仍需保存来源并由人工确认具体素材的使用边界；其余来源不因“官方”身份自动获得媒体复用许可。
+
+实现验证时，Statistics South Africa 的公开地址向本地抓取器返回 Incapsula HTML 而非 RSS，无法稳定解析，因此不再作为默认启用源；替换为可实际读取的南非交通部 RSS。抓取器同时兼容 XML 声明前的空白字符。
+
+#### 二级热点发现源
+
+IOL South Africa News（`https://iol.co.za/news/south-africa/`，RSS：`https://www.iol.co.za/rss`）作为 `secondary_discovery` 保存，只承担本地热点发现，不占用 5 个官方证据源名额。IOL 内容来自自有采编及多家通讯社聚合，且其条款要求商业使用内容或 RSS 取得许可，因此系统只保存标题、原文 URL、发布者和时间；不得自动抓取全文、不得下载图片或视频、不得作为具体事实的唯一证据。进入内容证据包前，关键事实必须回查对应官方机构或第二个独立来源。
 
 ### 5.2 事实证据包
 
