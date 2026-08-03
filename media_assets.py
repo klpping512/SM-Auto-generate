@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,7 +17,8 @@ import database as db
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm"}
 MAX_IMAGE = 15 * 1024 * 1024
-MAX_VIDEO = 500 * 1024 * 1024
+MAX_VIDEO = 2 * 1024 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 CATEGORIES = {"warehouse", "delivery", "customs", "brand", "staff", "facility", "customer", "other"}
 
 # 子目录名 / 文件名关键词 → 分类映射。子目录优先于文件名。
@@ -28,7 +30,10 @@ CATEGORY_KEYWORDS = {
         "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
         "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描",
     ),
-    "delivery": ("配送", "快递", "物流", "运输", "派送", "delivery", "courier", "shipping", "logistics"),
+    "delivery": (
+        "配送", "快递", "物流", "运输", "派送", "卡车", "货车", "拖车", "厢式车",
+        "delivery", "courier", "shipping", "logistics", "truck", "van", "trailer",
+    ),
     "customs": ("清关", "海关", "报关", "通关", "customs", "clearance"),
     "brand": ("品牌", "商标", "brand", "logo", "标识"),
     "staff": (
@@ -81,6 +86,28 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+async def stream_upload_to_path(upload, target: Path, max_size: int, chunk_size: int = UPLOAD_CHUNK_SIZE) -> int:
+    """Stream an UploadFile-like object to disk without retaining the whole file in memory."""
+    total = 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("wb") as handle:
+            while True:
+                chunk = await upload.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_size:
+                    raise ValueError("素材超过大小限制")
+                handle.write(chunk)
+        if total == 0:
+            raise ValueError("素材为空")
+        return total
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+
+
 def _probe(path: Path) -> dict:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -114,7 +141,17 @@ def _thumbnail(source: Path, target: Path, file_type: str):
     )
 
 
-def ingest_file(source: Path, static_dir: Path, category="other", origin="upload", created_by=None, move=False, import_root: Path | None = None, name: str | None = None) -> dict:
+def ingest_file(
+    source: Path,
+    static_dir: Path,
+    category="other",
+    origin="upload",
+    created_by=None,
+    move=False,
+    import_root: Path | None = None,
+    name: str | None = None,
+    storage_mode: str = "copy",
+) -> dict:
     source = source.resolve()
     ext = source.suffix.lower()
     if ext not in IMAGE_EXTS | VIDEO_EXTS:
@@ -156,8 +193,12 @@ def ingest_file(source: Path, static_dir: Path, category="other", origin="upload
     stored.parent.mkdir(parents=True, exist_ok=True)
     if move:
         shutil.move(str(source), stored)
-    else:
+    elif storage_mode == "hardlink":
+        os.link(source, stored)
+    elif storage_mode == "copy":
         shutil.copy2(source, stored)
+    else:
+        raise ValueError("不支持的素材存储方式")
     thumb_rel = Path("assets") / "thumbnails" / f"{stored.stem}.jpg"
     try:
         _thumbnail(stored, static_dir / thumb_rel, file_type)
@@ -183,5 +224,6 @@ def public_asset(asset: dict) -> dict:
     item["url"] = "/static/" + item["filepath"]
     item["thumbnail_url"] = "/static/" + item["thumbnail"] if item.get("thumbnail") else None
     item["mime"] = mimetypes.guess_type(item["filepath"])[0]
+    item["library_origin"] = "hotspot" if item.get("hotspot_id") else "owned"
+    item["source_label"] = "热点素材" if item["library_origin"] == "hotspot" else "Buffalo 原有素材"
     return item
-

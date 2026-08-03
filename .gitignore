@@ -2,18 +2,23 @@ __pycache__/
 *.pyc
 *.db
 .env
+.env.save
 *.log
 .DS_Store
 nohup.out
 uploads/
+# 运行时数据：数据库文件、ASR 模型、生成样本、质检产物、JWT 密钥
+data/
 
-# 素材库视频文件（太大不进 git）
-static/assets/import/
-static/assets/library/
-static/assets/thumbnails/
+# 素材库文件（太大不进 git，实测 static/assets/ 约 13GB）
+static/assets/
 *.mov
 *.MOV
 *.mp4
 *.MP4
 static/chat.html.bak
 video_renderer.py.bak
+
+# 调试截图、本地工具状态目录
+static/debug/
+.superpowers/

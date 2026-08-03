@@ -1,27 +1,27 @@
 """事件级双素材库匹配；纯本地证据排序，不调用模型。"""
 from __future__ import annotations
 
-import re
+import hotspot_lexicon
 
 
 def _terms(event: dict) -> set[str]:
     raw = " ".join(str(event.get(key) or "") for key in ("title_zh", "title_en", "location"))
     raw += " " + " ".join(str(value) for value in event.get("keywords", []))
-    return set(re.findall(r"[a-z][a-z'-]{2,}", raw.casefold()))
+    return hotspot_lexicon.extract_terms(raw)
 
 
 def _rank(event: dict, segments: list[dict], origin: str) -> list[dict]:
     wanted = _terms(event)
     scored = []
     for segment in segments:
-        text = " ".join(str(segment.get(key) or "") for key in ("description", "transcript", "ocr_text")).casefold()
-        hits = sorted(wanted & set(re.findall(r"[a-z][a-z'-]{2,}", text)))
+        text = " ".join(str(segment.get(key) or "") for key in ("description", "transcript", "ocr_text"))
+        hits = sorted(wanted & hotspot_lexicon.extract_terms(text))
         if not hits:
             continue
         item = dict(segment)
         item["library_origin"] = origin
         item["match_score"] = round(min(1.0, len(hits) / max(1, len(wanted))), 3)
-        item["match_reasons"] = [f"关键词匹配：{'、'.join(hits)}"]
+        item["match_reasons"] = [f"关键词匹配：{'、'.join(hits[:12])}"]
         scored.append(item)
     return sorted(scored, key=lambda item: (-item["match_score"], int(item.get("id") or 0)))[:3]
 

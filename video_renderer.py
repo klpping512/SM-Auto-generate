@@ -1,4 +1,4 @@
-"""MiMo TTS and deterministic FFmpeg vertical-video rendering."""
+"""Qwen TTS and deterministic FFmpeg vertical-video rendering."""
 from __future__ import annotations
 
 import base64
@@ -6,15 +6,143 @@ import json
 import os
 import shutil
 import subprocess
+import re
+import signal
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 import database as db
+from video_clip_refs import ClipReferenceError, resolve_clip_ref
+from video_composition_policy import (
+    is_explanation_scene,
+    source_usage_report,
+    subtitle_timeline_report,
+)
+from video_duration_budget import rebalance_scenes_to_budget, platform_budget_ms
 
-MIMO_URL = "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
-VOICES = {"冰糖", "茉莉", "苏打", "白桦"}
+QWEN_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+VOICES = {"Cherry"}
+TTS_BREATHING_ROOM_SECONDS = 0.35
+# Qwen 同一音色会随停顿和专有名词改变实际语速。真实短 Hook 不能循环，
+# 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
+# 必须失败，而不是把听感明显失真的旁白强塞进现场画面。
+MAX_NATURAL_TTS_SPEEDUP = 1.25
+# A completed sentence may breathe briefly, but multi-second silent tails make
+# otherwise-grounded real footage look stalled and lower the audio QA result.
+MAX_TRAILING_NARRATION_GAP_SECONDS = 0.75
+TTS_MAX_ATTEMPTS = 3
+TTS_RETRY_DELAY_SECONDS = 1.0
+# A short video must read as one native mobile format.  Showing a complete
+# landscape source inside a blurred portrait shell technically keeps 9:16
+# output, but viewers still experience it as a horizontal card between vertical
+# scenes.  Every production beat therefore fills one portrait frame; source
+# edges may be cropped, never letterboxed or inset.
+PORTRAIT_FRAME_POLICY = "full_bleed_center_crop"
+
+
+def normalize_tts_voice(voice: str | None) -> str:
+    """将历史项目的已下线音色安全迁移到当前提供方默认音色。"""
+    candidate = str(voice or "").strip()
+    return candidate if candidate in VOICES else sorted(VOICES)[0]
+
+
+class RenderCanceled(RuntimeError):
+    """Raised when a running render is canceled cooperatively."""
+
+
+_ACTIVE_PROCESSES: dict[str, set[subprocess.Popen]] = {}
+_ACTIVE_PROCESSES_LOCK = threading.Lock()
+
+
+def _scene_tts_concurrency() -> int:
+    try:
+        return max(1, min(8, int(os.environ.get("SCENE_TTS_CONCURRENCY", "3"))))
+    except ValueError:
+        return 3
+
+
+def _scene_ffmpeg_concurrency() -> int:
+    try:
+        return max(1, min(4, int(os.environ.get("SCENE_FFMPEG_CONCURRENCY", "2"))))
+    except ValueError:
+        return 2
+
+
+def cancel_render(job_id: str) -> bool:
+    """Terminate every active FFmpeg process group for a render job."""
+    with _ACTIVE_PROCESSES_LOCK:
+        processes = list(_ACTIVE_PROCESSES.get(job_id) or ())
+    if not processes:
+        return False
+    terminated = False
+    for process in processes:
+        if process.poll() is not None:
+            continue
+        try:
+            process_group = os.getpgid(process.pid)
+            os.killpg(process_group, signal.SIGTERM)
+            if hasattr(process, "wait"):
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process_group, signal.SIGKILL)
+            terminated = True
+        except ProcessLookupError:
+            continue
+    return terminated
+
+
+def run_cancelable_process(
+    job_id: str,
+    command: list[str],
+    *,
+    timeout: float = 180,
+    cancel_check: Callable[[], bool] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a command in its own process group with bounded cancellation checks."""
+    if cancel_check and cancel_check():
+        raise RenderCanceled("视频生成已取消")
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    with _ACTIVE_PROCESSES_LOCK:
+        _ACTIVE_PROCESSES.setdefault(job_id, set()).add(process)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if cancel_check and cancel_check():
+                cancel_render(job_id)
+                raise RenderCanceled("视频生成已取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                cancel_render(job_id)
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode:
+            raise subprocess.CalledProcessError(
+                process.returncode, command, output=stdout, stderr=stderr
+            )
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        with _ACTIVE_PROCESSES_LOCK:
+            active = _ACTIVE_PROCESSES.get(job_id)
+            if active is not None:
+                active.discard(process)
+                if not active:
+                    _ACTIVE_PROCESSES.pop(job_id, None)
 
 # 与 media_assets.CATEGORY_KEYWORDS 保持同步，用于渲染兜底时的场景关键词→分类匹配
 CATEGORY_KEYWORDS = {
@@ -88,103 +216,469 @@ def _match_asset_by_scene(scene_visual: str, available_assets: list[dict],
     return None
 
 
-def normalize_script(script: dict, asset_ids: set[int]) -> dict:
+def normalize_script(
+    script: dict,
+    asset_ids: set[int],
+    *,
+    asset_lookup: dict[int, dict] | None = None,
+    event_lookup: dict[int, dict] | None = None,
+    platform: str = "douyin",
+    target_duration_ms: int | None = None,
+) -> dict:
+    target = platform_budget_ms(platform, target_duration_ms or script.get("duration_target_ms") or 30_000)
     scenes = []
+    repairs: list[str] = []
     for index, raw in enumerate(script.get("scenes") or []):
         if not isinstance(raw, dict):
             continue
+        voiceover = str(raw.get("voiceover") or "").strip()
+        text_overlay = str(raw.get("text_overlay") or "").strip()
+        visual = str(raw.get("visual") or "").strip()
+        if not voiceover and text_overlay:
+            voiceover = text_overlay.replace("|", "，").replace("｜", "，")
+            repairs.append(f"已用字幕补齐第{index + 1}镜旁白")
+        has_structure = any(
+            raw.get(key) not in (None, "", 0)
+            for key in ("duration", "duration_ms", "asset_id", "event_clip_id", "asset_segment_id")
+        )
+        if not voiceover and not text_overlay and not visual and not has_structure:
+            repairs.append(f"已移除第{index + 1}个空白分镜")
+            continue
         asset_id = raw.get("asset_id")
-        if asset_id not in asset_ids:
+        event_clip_id = raw.get("event_clip_id")
+        event_ref = None
+        if event_clip_id is not None:
+            try:
+                event_clip_id = int(event_clip_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("热点事件片段 ID 无效") from exc
+            event_ref = (event_lookup or {}).get(event_clip_id)
+            if event_ref:
+                # 热点母片可以是 inactive，但它引用的事件代理片仍然是合法素材。
+                asset_id = event_ref.get("asset_id")
+            elif asset_id not in asset_ids:
+                raise ValueError("热点事件片段不存在")
+        if asset_id not in asset_ids and not event_ref:
             asset_id = None
+        asset_segment_id = raw.get("asset_segment_id") if asset_id else None
+        event_clip_id = event_clip_id if asset_id else None
+        try:
+            asset_segment_id = int(asset_segment_id) if asset_segment_id is not None else None
+            # 已选择的热点事件也可以进一步定位到母片内的分析子片段。
+            # 过去只为 asset_segment_id 保留范围，导致热点 Hook 又退回事件起点（常为主播画面）。
+            has_precise_range = bool(asset_segment_id or event_ref)
+            asset_start_ms = max(0, int(raw.get("asset_start_ms") or 0)) if has_precise_range else 0
+            asset_end_ms = max(asset_start_ms, int(raw.get("asset_end_ms") or 0)) if has_precise_range else 0
+        except (TypeError, ValueError):
+            asset_segment_id, asset_start_ms, asset_end_ms, event_clip_id = None, 0, 0, None
+        evidence_type = str(raw.get("evidence_type") or "")[:32]
+        scene_role = str(raw.get("scene_role") or "")[:32]
+        if is_explanation_scene({"evidence_type": evidence_type, "scene_role": scene_role}):
+            raise ValueError("信息图、流程图和 PPT 卡片已禁用；请使用热点 Hook、Buffalo 自有视频或自有图片")
+        raw_duration = float(raw.get("duration") or 5)
+        # 自有静态图只承担 1–2 秒的节奏过渡，不能被通用视频最短时长
+        # 规则拉长为 3 秒；否则它既会破坏图片占比，又会迫使真实视频被压缩。
+        minimum_duration = 1.0 if evidence_type == "image" else 3.0
         scenes.append({
-            "scene": index + 1,
-            "duration": max(3.0, min(8.0, float(raw.get("duration") or 5))),
-            "visual": str(raw.get("visual") or "品牌信息卡")[:80],
-            "voiceover": str(raw.get("voiceover") or "")[:180],
-            "text_overlay": str(raw.get("text_overlay") or raw.get("voiceover") or "")[:24],
+            "scene": len(scenes) + 1,
+            "scene_role": scene_role,
+            "evidence_type": evidence_type,
+            "match_reasons": list(raw.get("match_reasons") or [])[:8],
+            "duration": max(minimum_duration, min(8.0, raw_duration)),
+            "visual": (visual or "Buffalo 素材")[:80],
+            "voiceover": voiceover[:180],
+            "text_overlay": (text_overlay or voiceover)[:24],
             "asset_id": asset_id,
+            "asset_segment_id": asset_segment_id,
+            "asset_start_ms": asset_start_ms,
+            "asset_end_ms": asset_end_ms,
+            "event_clip_id": event_clip_id,
+            "brand_endcard_path": str(raw.get("brand_endcard_path") or "")[:240],
         })
-    if not 4 <= len(scenes) <= 6:
-        raise ValueError("抖音脚本必须包含 4–6 个场景")
-    total = sum(scene["duration"] for scene in scenes)
-    factor = 30 / total
-    for scene in scenes:
-        scene["duration"] = round(max(3, min(8, scene["duration"] * factor)), 2)
-    return {**script, "duration_target": 30, "scenes": scenes}
+    min_scenes, max_scenes = (6, 18) if target > 45_000 else (4, 8)
+    if not min_scenes <= len(scenes) <= max_scenes:
+        raise ValueError(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
+    if asset_lookup is not None:
+        for scene in scenes:
+            if not scene.get("asset_id"):
+                continue
+            try:
+                scene["clip_ref"] = resolve_clip_ref(
+                    scene, asset_lookup.get(int(scene["asset_id"])), event_lookup or {}
+                )
+            except ClipReferenceError as exc:
+                raise ValueError(str(exc)) from exc
+    requested_total = sum(round(float(scene["duration"]) * 1000) for scene in scenes)
+    fitted = rebalance_scenes_to_budget(scenes, target, minimum_scene_ms=1_500)
+    for scene in fitted:
+        if (
+            scene.get("asset_id")
+            and scene.get("evidence_type") != "image"
+            and int(scene["duration_ms"]) < 3_000
+        ):
+            raise ValueError("真实视频分镜不能短于 3 秒；请减少分镜或补充未使用的 Buffalo 自有图片")
+    usage = source_usage_report(fitted)
+    if not usage["passed"]:
+        raise ValueError("素材重复硬门禁未通过：" + "；".join(usage["issues"]))
+    if requested_total > target:
+        repairs.append(
+            f"已将分镜总时长从 {requested_total / 1000:g} 秒压缩至 {target / 1000:g} 秒"
+        )
+    requested_clips = script.get("selected_clip_scenes") or []
+    selected_clip_scenes = sorted({int(value) for value in requested_clips if str(value).isdigit() and 1 <= int(value) <= len(scenes)})
+    return {**script, "duration_target": round(target / 1000, 3), "duration_target_ms": target,
+            "duration_used_ms": sum(int(scene["duration_ms"]) for scene in fitted),
+            "duration_remaining_ms": max(0, target - sum(int(scene["duration_ms"]) for scene in fitted)),
+            "scenes": fitted,
+            "output_mode": "full_and_clips" if script.get("output_mode") == "full_and_clips" else "full",
+            "selected_clip_scenes": selected_clip_scenes,
+            "source_usage": usage,
+            "normalization": {"auto_repaired": bool(repairs), "actions": repairs}}
 
 
-def synthesize_mimo(text: str, voice: str, output: Path, api_key: str | None = None):
+def synthesize_qwen_tts(text: str, voice: str, output: Path, api_key: str | None = None):
+    key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+    if not key:
+        raise RuntimeError("未配置 DASHSCOPE_API_KEY")
+    voice = normalize_tts_voice(voice)
+    if voice not in VOICES:
+        raise ValueError("不支持的 Qwen TTS 音色")
+    payload = {
+        "model": "qwen3-tts-flash",
+        "input": {"text": text, "voice": voice, "language_type": "Chinese"},
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
+        try:
+            with httpx.Client(timeout=90, trust_env=False) as client:
+                response = client.post(
+                    QWEN_TTS_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                audio_url = response.json()["output"]["audio"]["url"]
+            with httpx.Client(timeout=90, trust_env=False) as client:
+                audio = client.get(audio_url)
+                audio.raise_for_status()
+            output.write_bytes(audio.content)
+            return
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            last_error = exc
+            if attempt < TTS_MAX_ATTEMPTS:
+                # This function runs inside the render worker thread, so the
+                # small backoff cannot block the API event loop. Retrying the
+                # whole request also refreshes an expired one-shot audio URL.
+                time.sleep(TTS_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError(f"Qwen TTS 请求或音频下载失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
+
+
+MIMO_TTS_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MIMO_TTS_VOICE = "mimo_default"
+# Qwen TTS 只接受文本，语气全靠标点，播报永远是同一个平铺直叙的节奏。
+# MiMo v2.5-tts 允许在 user 消息里用自然语言描述语气/语速，这条默认风格
+# 只是让旁白读起来像真人口语播报，不是台词内容，不会进入成片文本。
+MIMO_TTS_DEFAULT_STYLE = "播报语气自然亲切、像真人口语跟卖家说话，语速适中偏快，不要机械平铺直叙。"
+
+
+def synthesize_mimo_tts(text: str, voice: str, output: Path, api_key: str | None = None,
+                         style_instruction: str = MIMO_TTS_DEFAULT_STYLE):
+    """用 MiMo v2.5-tts 合成旁白；voice 留空时使用预置默认音色。
+
+    请求/返回格式来自官方文档 speech-synthesis-v2.5：POST /chat/completions，
+    合成文本放在 assistant 消息，风格控制放在 user 消息，返回
+    message.audio.data 是 base64 编码的 wav，不是下载 URL。
+    """
     key = api_key or os.environ.get("MIMO_API_KEY", "")
     if not key:
         raise RuntimeError("未配置 MIMO_API_KEY")
-    if voice not in VOICES:
-        raise ValueError("不支持的 MiMo 音色")
     payload = {
         "model": "mimo-v2.5-tts",
         "messages": [
-            {"role": "user", "content": "专业、可信、自然的中文短视频旁白，语速略快，重点清晰。"},
+            {"role": "user", "content": style_instruction},
             {"role": "assistant", "content": text},
         ],
-        "audio": {"format": "wav", "voice": voice},
+        "audio": {"format": "wav", "voice": voice or MIMO_TTS_VOICE},
     }
-    with httpx.Client(timeout=90, trust_env=False) as client:
-        response = client.post(MIMO_URL, headers={"api-key": key, "Content-Type": "application/json"}, json=payload)
-        response.raise_for_status()
+    last_error: Exception | None = None
+    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
+        try:
+            with httpx.Client(timeout=90, trust_env=False) as client:
+                response = client.post(
+                    f"{MIMO_TTS_BASE_URL}/chat/completions",
+                    headers={"api-key": key, "Content-Type": "application/json"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+                audio_b64 = body["choices"][0]["message"]["audio"]["data"]
+            output.write_bytes(base64.b64decode(audio_b64))
+            return
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            last_error = exc
+            if attempt < TTS_MAX_ATTEMPTS:
+                time.sleep(TTS_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError(f"MiMo TTS 请求或音频解码失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
+
+
+def synthesize_local_macos(text: str, output: Path, voice: str = "Tingting"):
+    """使用 macOS 内置语音生成内部预览，不发送任何文本到外部服务。"""
+    say = shutil.which("say")
+    ffmpeg = shutil.which("ffmpeg")
+    if not say or not ffmpeg:
+        raise RuntimeError("本地旁白需要 macOS say 与 FFmpeg")
+    aiff = output.with_suffix(".aiff")
     try:
-        encoded = response.json()["choices"][0]["message"]["audio"]["data"]
-        output.write_bytes(base64.b64decode(encoded, validate=True))
-    except Exception as exc:
-        raise RuntimeError("MiMo 返回了无效音频") from exc
+        subprocess.run(
+            [say, "-v", voice, "-r", "190", "-o", str(aiff), text],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            [ffmpeg, "-y", "-i", str(aiff), "-ar", "24000", "-ac", "1", str(output)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        aiff.unlink(missing_ok=True)
 
 
-def _font(size=70):
-    for path in ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"):
-        if Path(path).exists():
-            return ImageFont.truetype(path, size=size)
-    return ImageFont.load_default()
+def synthesize_scene_voiceover(
+    text: str,
+    output: Path,
+    *,
+    tts_provider: str,
+    voice: str,
+) -> None:
+    """Route one scene voiceover to the configured TTS provider."""
+    if tts_provider == "local_macos":
+        synthesize_local_macos(text, output)
+    elif tts_provider == "mimo":
+        synthesize_mimo_tts(text, MIMO_TTS_VOICE, output)
+    else:
+        synthesize_qwen_tts(text, voice, output)
 
 
-def _fallback_card(text: str, output: Path):
-    """生成品牌信息卡图片（纯文字兜底）"""
-    image = Image.new("RGB", (1080, 1920), "#F6F3ED")
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((80, 160, 1000, 1760), radius=54, fill="white")
-    draw.text((130, 240), "BUFFALO · SA LOGIFLOW", font=_font(40), fill="#B98A4C")
-    y, line = 650, ""
-    for char in text[:60]:
-        if draw.textbbox((0, 0), line + char, font=_font())[2] > 790:
-            draw.text((145, y), line, font=_font(), fill="#171717")
-            y += 105
-            line = char
-        else:
-            line += char
-    if line:
-        draw.text((145, y), line, font=_font(), fill="#171717")
-    image.save(output)
+def _generate_text_overlay(
+    text: str,
+    output: Path,
+    width: int = 1080,
+    *,
+    height: int | None = None,
+    mask_source_lower_third: bool = False,
+):
+    """生成下方安全区字幕图；不依赖 FFmpeg 的可选 libass/drawtext 编译能力。
 
-
-def _generate_text_overlay(text: str, output: Path):
-    """用 PIL 生成透明背景的文字叠加图片"""
-    img = Image.new('RGBA', (1080, 120), (0, 0, 0, 0))
+    热点新闻母片常自带底部新闻条。此时用半透明的整条底栏覆盖原新闻条，
+    只保留系统字幕，避免两层字幕同时争抢画面；自有素材仍使用紧凑字幕条。
+    """
+    # A 16:9 output is wide but short.  Width-only scaling made its subtitles
+    # much larger than vertical subtitles.  The short edge is the safe scale.
+    scale = min(width / 1080, (height or 1920) / 1920)
+    # News clips frequently carry their own large lower-third captions.  A
+    # compact system subtitle strip leaves both layers readable only in theory:
+    # on a phone they collide.  Cover that complete source area and place our
+    # caption at the top of the mask, above the original text.
+    overlay_height = (
+        max(round((height or 1920) * 0.36), round(180 * scale))
+        if mask_source_lower_third
+        else max(70, round(92 * scale))
+    )
+    font_size = max(20, round(34 * scale))
+    stroke_width = max(2, round(3 * scale))
+    img = Image.new('RGBA', (width, overlay_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
     font = None
     for fp in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]:
         if Path(fp).exists():
             try:
-                font = ImageFont.truetype(fp, 42)
+                font = ImageFont.truetype(fp, font_size)
                 break
             except Exception:
                 pass
     if not font:
         font = ImageFont.load_default()
     
-    x, y = 540, 60
-    for dx in [-2, 0, 2]:
-        for dy in [-2, 0, 2]:
-            draw.text((x+dx, y+dy), text, font=font, fill="black", anchor="mm")
-    draw.text((x, y), text, font=font, fill="white", anchor="mm")
+    lines, line = [], ""
+    for char in text:
+        candidate = line + char
+        if line and draw.textbbox((0, 0), candidate, font=font)[2] > width * 0.72:
+            lines.append(line); line = char
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    lines = lines[:2]
+    line_height = max(28, round(50 * scale))
+    y0 = (
+        max(round(64 * scale), round(overlay_height * 0.14))
+        if mask_source_lower_third
+        else overlay_height / 2 - (len(lines) - 1) * line_height / 2
+    )
+    # 先画底板：自有素材使用窄字幕条，新闻热点则覆盖整条原始新闻下三分之一。
+    text_block_top = max(8, int(y0 - line_height / 2 - 12 * scale))
+    text_block_bottom = min(overlay_height - 8, int(y0 + (len(lines) - 1) * line_height + line_height / 2 + 12 * scale))
+    if mask_source_lower_third:
+        for y in range(overlay_height):
+            # 顶部较透、底部加深，完整压住原片 ticker，但不做纯黑硬切。
+            alpha = int(132 + 102 * (y / max(1, overlay_height - 1)))
+            draw.line((0, y, width, y), fill=(7, 11, 10, alpha))
+    else:
+        draw.rounded_rectangle(
+            (int(width * 0.11), text_block_top, int(width * 0.89), text_block_bottom),
+            radius=max(12, round(16 * scale)), fill=(7, 11, 10, 160),
+        )
+    for line_index, value in enumerate(lines):
+        y = y0 + line_index * line_height
+        draw.text((width / 2, y), value, font=font, fill="white", stroke_width=stroke_width,
+                  stroke_fill="black", anchor="mm")
     img.save(output)
+
+
+def _generate_watermark(text: str, output: Path, width: int):
+    overlay_width = max(320, min(width - 40, 720))
+    image = Image.new("RGBA", (overlay_width, 64), (25, 20, 14, 190))
+    draw = ImageDraw.Draw(image)
+    font = None
+    for font_path in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]:
+        if Path(font_path).exists():
+            try:
+                font = ImageFont.truetype(font_path, 26)
+                break
+            except Exception:
+                pass
+    draw.text((overlay_width / 2, 32), text, font=font or ImageFont.load_default(), fill="white", anchor="mm")
+    image.save(output)
+
+
+def _subtitle_safe_bottom_margin(height: int, subtitle_layout: str = "standard") -> int:
+    """Keep burned-in captions clear of mobile navigation and home-indicator areas.
+
+    The old 28px-at-1920 margin placed the subtitle slab almost on the bottom
+    edge (only 14px in a 540×960 preview).  A 7.5% lower safe area keeps the
+    subtitle readable without turning it into a middle-screen caption.  News
+    clips use a full lower-third mask, so that mask must reach the bottom edge
+    while its caption sits near the top of the mask.
+    """
+    if subtitle_layout == "hotspot_news":
+        return 0
+    return max(48, round(max(1, int(height)) * 0.075))
+
+
+def is_standard_portrait_size(output_size: tuple[int, int]) -> bool:
+    """Production renders are always an exact 9:16 mobile canvas."""
+    try:
+        width, height = int(output_size[0]), int(output_size[1])
+    except (IndexError, TypeError, ValueError):
+        return False
+    return width > 0 and height > 0 and width * 16 == height * 9
+
+
+def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
+                   wav: Path, cues: list[dict], duration: float, segment: Path,
+                   work_root: Path, scene_index: int, source_start: float = 0,
+                   source_end: float | None = None,
+                   output_size: tuple[int, int] = (1080, 1920),
+                   watermark_text: str = "",
+                   subtitle_layout: str = "standard",
+                   animate_image: bool = False,
+                   fast: bool = False) -> list[str]:
+    """用逐句 PNG overlay 烧录字幕，兼容未编译 libass 的 FFmpeg。"""
+    width, height = output_size
+    if is_video:
+        # 真实视频永远不循环。render_job 会在调用前确认可用镜头长度足以覆盖旁白。
+        visual_input = []
+        if source_start > 0:
+            visual_input += ["-ss", str(source_start)]
+        visual_input += ["-t", str(duration)]
+        visual_input += ["-i", str(source)]
+    else:
+        visual_input = ["-loop", "1", "-i", str(source)]
+    overlays = []
+    mask_source_lower_third = subtitle_layout == "hotspot_news"
+    for cue_index, cue in enumerate(cues):
+        overlay = work_root / f"subtitle-{scene_index}-{cue_index}.png"
+        _generate_text_overlay(
+            cue["text"], overlay, width, height=height,
+            mask_source_lower_third=mask_source_lower_third,
+        )
+        overlays.append(overlay)
+    subtitle_count = len(overlays)
+    if watermark_text:
+        watermark = work_root / f"watermark-{scene_index}.png"
+        _generate_watermark(watermark_text, watermark, width)
+        overlays.append(watermark)
+    command = [ffmpeg, "-y", *visual_input]
+    for overlay in overlays:
+        command += ["-loop", "1", "-i", str(overlay)]
+    audio_index = len(overlays) + 1
+    command += ["-i", str(wav), "-t", str(duration)]
+    # 所有镜头统一为满版竖屏。之前的“模糊背景 + 完整横画面”会让横向热点
+    # 在竖屏素材之间看起来像一张横向插卡；这里强制放大并居中裁切，确保任意
+    # 横竖源在每次转场后都保持同一个 9:16 视觉比例。素材策展负责在入库阶段
+    # 选择主体清楚的 Hook，渲染层不再以横向前景破坏成片节奏。
+    filters = [
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={width}:{height}:exact=1,setsar=1[portrait]",
+    ]
+    if animate_image and not is_video:
+        # 自有上下文图片是短暂的真实证据，不应在 9:16 画面中显得像一张突然插入的卡片。
+        # 仅做 3.5% 的居中推进；品牌 CTA 则保持稳定，便于识别并避免过度装饰。
+        filters += [
+            f"[portrait]zoompan=z='min(zoom+0.0007,1.035)':"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
+            f"s={width}x{height}:fps=30,setsar=1[v0]",
+        ]
+    else:
+        filters.append("[portrait]fps=30,setsar=1[v0]")
+    current = "v0"
+    # 自有素材字幕位于移动端底部安全区之上；热点新闻则覆盖原片下三分之一，
+    # 系统字幕上移到遮罩上沿，避免与原片英文新闻条叠字。
+    subtitle_bottom_margin = _subtitle_safe_bottom_margin(height, subtitle_layout)
+    for cue_index, cue in enumerate(cues):
+        next_label = f"v{cue_index + 1}"
+        filters.append(
+            f"[{current}][{cue_index + 1}:v]overlay=0:H-h-{subtitle_bottom_margin}:enable='between(t,{cue['start']},{cue['end']})'[{next_label}]"
+        )
+        current = next_label
+    if watermark_text:
+        watermark_label = f"v{subtitle_count + 1}"
+        filters.append(
+            f"[{current}][{subtitle_count + 1}:v]overlay=20:20[{watermark_label}]"
+        )
+        current = watermark_label
+    if is_video and _has_audio(ffprobe, source):
+        filters += ["[0:a]volume=0.12[source_audio]", f"[source_audio][{audio_index}:a]amix=inputs=2:duration=longest[mixed_audio]"]
+        command += ["-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", "[mixed_audio]"]
+    else:
+        command += ["-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", f"{audio_index}:a"]
+    preset = "ultrafast" if fast else "veryfast"
+    crf_args = ["-crf", "28"] if fast else []
+    return command + ["-r", "30", "-c:v", "libx264", "-preset", preset, *crf_args,
+                      "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", str(segment)]
+
+
+def _clip_source_command(
+    ffmpeg: str,
+    source: Path,
+    output: Path,
+    source_start: float,
+    source_end: float | None,
+    fast: bool = False,
+) -> list[str]:
+    """先物化已确认镜头范围，后续只播放一次，不允许循环该范围。"""
+    command = [ffmpeg, "-y", "-ss", str(max(0, source_start)), "-i", str(source)]
+    if source_end is not None and source_end > source_start:
+        command += ["-t", str(round(source_end - source_start, 3))]
+    preset = "ultrafast" if fast else "veryfast"
+    crf = "28" if fast else "20"
+    return command + [
+        "-r", "30", "-c:v", "libx264", "-preset", preset, "-crf", crf,
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
+    ]
 
 
 def _has_audio(ffprobe: str, path: Path) -> bool:
@@ -193,6 +687,271 @@ def _has_audio(ffprobe: str, path: Path) -> bool:
         capture_output=True, text=True
     )
     return bool(result.stdout.strip())
+
+
+def _probe_media(ffprobe: str, path: Path) -> dict:
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    data = json.loads(result.stdout or "{}")
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
+    return {
+        "duration": round(float((data.get("format") or {}).get("duration") or 0), 3),
+        "width": int(video.get("width") or 0), "height": int(video.get("height") or 0),
+        "video_codec": video.get("codec_name"), "audio_codec": audio.get("codec_name"),
+        "has_audio": bool(audio),
+    }
+
+
+def _transition_concat_command(
+    ffmpeg: str,
+    segments: list[Path],
+    durations: list[float],
+    output: Path,
+    *,
+    transition_duration: float = 0.22,
+) -> list[str]:
+    """统一时间基准并用极短交叉淡化连接分镜，避免硬拼接时间戳顿挫。"""
+    if len(segments) < 2 or len(segments) != len(durations):
+        raise ValueError("平滑拼接至少需要两个时长完整的分镜")
+    transition = max(0.08, min(float(transition_duration), 0.5))
+    command = [ffmpeg, "-y"]
+    filters = []
+    for index, segment in enumerate(segments):
+        command += ["-i", str(segment)]
+        filters.append(
+            f"[{index}:v]fps=30,settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v{index}]"
+        )
+        segment_duration = max(0.1, float(durations[index]))
+        filters.append(
+            f"[{index}:a]aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS,"
+            f"apad=whole_dur={segment_duration:.3f},atrim=duration={segment_duration:.3f}[a{index}]"
+        )
+
+    video_label, audio_label = "v0", "a0"
+    combined_duration = float(durations[0])
+    for index in range(1, len(segments)):
+        next_video, next_audio = f"vx{index}", f"ax{index}"
+        offset = max(0, combined_duration - transition)
+        filters.append(
+            f"[{video_label}][v{index}]xfade=transition=fade:duration={transition:g}:"
+            f"offset={offset:.3f}[{next_video}]"
+        )
+        filters.append(
+            f"[{audio_label}][a{index}]acrossfade=d={transition:g}:c1=tri:c2=tri[{next_audio}]"
+        )
+        video_label, audio_label = next_video, next_audio
+        combined_duration += float(durations[index]) - transition
+
+    command += [
+        "-filter_complex", ";".join(filters),
+        "-map", f"[{video_label}]", "-map", f"[{audio_label}]",
+        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
+        "-movflags", "+faststart", str(output),
+    ]
+    return command
+
+
+def _safe_concat_command(ffmpeg: str, segments: list[Path], output: Path) -> list[str]:
+    """Compatibility fallback when a long xfade graph is rejected by local FFmpeg builds.
+
+    All scene files are normalized before this point, so a hard cut is preferable to
+    failing an otherwise valid internal preview. The report records this fallback.
+    """
+    manifest = output.with_suffix(".concat.txt")
+    manifest.write_text(
+        "".join(f"file '{segment.as_posix()}'\n" for segment in segments), encoding="utf-8"
+    )
+    # The segments have identical H.264/AAC settings, so the concat demuxer avoids
+    # another long filter graph and is substantially more portable on macOS FFmpeg.
+    return [
+        ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(manifest),
+        "-c", "copy", "-movflags", "+faststart", str(output),
+    ]
+
+
+def build_subtitle_cues(text: str, duration: float) -> list[dict]:
+    """按语义停顿分句，并按字数分配 TTS 实际时长，避免字幕与旁白硬截断。"""
+    parts = [p.strip() for p in re.split(r"(?<=[，。！？；,.!?;])", text or "") if p.strip()]
+    if not parts and text.strip():
+        parts = [text.strip()]
+    compact_parts = []
+    for part in parts:
+        remaining = part
+        while len(remaining) > 36:
+            cut = remaining.rfind(" ", 0, 37)
+            if cut < 18:
+                cut = 36
+            compact_parts.append(remaining[:cut].strip())
+            remaining = remaining[cut:].strip()
+        if remaining:
+            compact_parts.append(remaining)
+    parts = compact_parts
+    total = sum(max(1, len(part)) for part in parts) or 1
+    cursor, cues = 0.0, []
+    for index, part in enumerate(parts):
+        end = duration if index == len(parts) - 1 else cursor + duration * max(1, len(part)) / total
+        cues.append({"start": round(cursor, 3), "end": round(end, 3), "text": part})
+        cursor = end
+    return cues
+
+
+def subtitle_sync_report(cues: list[dict], audio_duration: float, tolerance: float = 0.12) -> dict:
+    """校验字幕覆盖真实 TTS 音频窗口，避免字幕提前结束或越过旁白。"""
+    measured = round(max(0.0, float(audio_duration or 0)), 3)
+    normalized = sorted(cues or [], key=lambda item: float(item.get("start") or 0))
+    subtitle_end = round(float(normalized[-1].get("end") or 0), 3) if normalized else 0.0
+    gaps = []
+    previous_end = 0.0
+    for cue in normalized:
+        start = float(cue.get("start") or 0)
+        end = float(cue.get("end") or 0)
+        if start > previous_end + tolerance:
+            gaps.append(round(start - previous_end, 3))
+        if end < start or end > measured + tolerance:
+            gaps.append(round(max(0.0, end - measured), 3))
+        previous_end = max(previous_end, end)
+    return {
+        "passed": bool(normalized) and abs(subtitle_end - measured) <= tolerance and not gaps,
+        "audio_duration": measured,
+        "subtitle_end": subtitle_end,
+        "cue_count": len(normalized),
+        "gaps": gaps,
+    }
+
+
+def tts_speedup_factor(
+    speech_duration: float,
+    available_video_seconds: float,
+    *,
+    breathing_room: float = TTS_BREATHING_ROOM_SECONDS,
+    max_speedup: float = MAX_NATURAL_TTS_SPEEDUP,
+) -> float | None:
+    """Return a bounded tempo adjustment to keep one narration pass inside a real clip."""
+    available_audio = max(0.0, float(available_video_seconds) - float(breathing_room))
+    speech = max(0.0, float(speech_duration))
+    if not speech or speech <= available_audio:
+        return None
+    factor = speech / available_audio if available_audio else float("inf")
+    return factor if 1.0 < factor <= max_speedup else None
+
+
+def compact_voiceover_to_fit_real_video(
+    text: str,
+    speech_duration: float,
+    available_video_seconds: float,
+    *,
+    breathing_room: float = TTS_BREATHING_ROOM_SECONDS,
+) -> str | None:
+    """Shorten only an overflowing narration tail before re-synthesizing it.
+
+    This is a last renderer-side guard for real clips. Qwen may read the same
+    number of characters at quite different speeds because of punctuation and
+    brand names. We preserve the opening factual clause, prefer an existing
+    phrase boundary, and never stretch or repeat the video to hide the result.
+    """
+    compact = "".join(str(text or "").split())
+    available_audio = max(0.0, float(available_video_seconds) - float(breathing_room))
+    measured = max(0.0, float(speech_duration))
+    if not compact or not measured or measured <= available_audio:
+        return None
+    # Keep a conservative margin because the second TTS call can vary a little
+    # even for the shortened text.
+    target = max(8, int(len(compact) * available_audio / measured * 0.84))
+    if target >= len(compact):
+        return None
+    # Scene descriptions frequently contain vehicle codes or brand strings
+    # (for example "CE KEMACH 18" / "BUFFALO BOS"). When they alone cause an
+    # overflow, remove those opaque labels first so the remaining Chinese
+    # action clause stays intelligible rather than ending at "BUF" mid-word.
+    without_codes = re.sub(r"[A-Za-z0-9]+", "", compact).strip()
+    if 5 <= len(without_codes) <= target:
+        return without_codes if without_codes.endswith(("。", "！", "？", "；")) else without_codes + "。"
+    prefix = compact[:target]
+    boundary = max((prefix.rfind(mark) for mark in "。！？；，、"), default=-1)
+    if boundary >= max(4, int(target * 0.5)):
+        marker = prefix[boundary]
+        shortened = prefix[:boundary + 1]
+        if marker in "，、":
+            shortened = shortened[:-1].rstrip() + "。"
+    else:
+        shortened = prefix[:max(1, target - 1)].rstrip("，、；：- ") + "。"
+    return shortened if shortened != compact else None
+
+
+def scene_render_duration(
+    planned_duration: float,
+    speech_duration: float,
+    *,
+    is_brand_endcard: bool = False,
+    preserve_planned_duration: bool = False,
+    breathing_room: float = TTS_BREATHING_ROOM_SECONDS,
+    max_trailing_gap: float = MAX_TRAILING_NARRATION_GAP_SECONDS,
+) -> float:
+    """Fit a single narration pass without leaving a long, silent visual tail.
+
+    Normal scenes may shorten below their planning allocation when Qwen TTS is
+    naturally concise. Formal dual-library videos preserve their planned beat
+    duration, just like brand endcards, so a promised 50–90 second delivery is
+    not silently compressed into a much shorter video. Neither branch ever
+    cuts off spoken audio.
+    """
+    planned = max(0.0, float(planned_duration))
+    speech = max(0.0, float(speech_duration))
+    required = speech + max(0.0, float(breathing_room))
+    if is_brand_endcard or preserve_planned_duration:
+        return round(max(planned, required), 3)
+    capped = min(planned, speech + max(float(breathing_room), float(max_trailing_gap)))
+    return round(max(1.0, required, capped), 3)
+
+
+def _audio_tempo_command(ffmpeg: str, source: Path, output: Path, factor: float) -> list[str]:
+    """Build a bounded FFmpeg tempo command; callers only use a near-natural speedup."""
+    return [
+        ffmpeg, "-y", "-i", str(source), "-filter:a", f"atempo={factor:.6f}",
+        "-vn", str(output),
+    ]
+
+
+def _ass_time(seconds: float) -> str:
+    centiseconds = max(0, round(seconds * 100))
+    return f"{centiseconds // 360000}:{(centiseconds // 6000) % 60:02d}:{(centiseconds // 100) % 60:02d}.{centiseconds % 100:02d}"
+
+
+def _write_ass(cues: list[dict], output: Path):
+    header = """[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,PingFang SC,44,&H00FFFFFF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,120,120,180,1\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"""
+    lines = []
+    for cue in cues:
+        safe = cue["text"].replace("\\", "\\\\").replace("{", "（").replace("}", "）").replace("\n", "\\N")
+        lines.append(f"Dialogue: 0,{_ass_time(cue['start'])},{_ass_time(cue['end'])},Default,,0,0,0,,{safe}")
+    output.write_text(header + "\n".join(lines), encoding="utf-8")
+
+
+def _quality_report(
+    ffprobe: str,
+    path: Path,
+    expected_duration: float,
+    subtitle_cues: int,
+    expected_size: tuple[int, int] = (1080, 1920),
+) -> dict:
+    media = _probe_media(ffprobe, path)
+    expected_width, expected_height = expected_size
+    checks = {
+        "expected_resolution": (
+            media["width"] == expected_width and media["height"] == expected_height
+        ),
+        "portrait_9_16": is_standard_portrait_size((media["width"], media["height"])),
+        "has_audio": media["has_audio"],
+        "duration_aligned": abs(media["duration"] - expected_duration) <= 0.35,
+        "has_timed_subtitles": subtitle_cues > 0,
+    }
+    return {**media, "expected_duration": round(expected_duration, 3), "subtitle_cues": subtitle_cues,
+            "expected_width": expected_width, "expected_height": expected_height,
+            "checks": checks, "status": "passed" if all(checks.values()) else "failed"}
 
 
 # 渲染任务超时时间（秒）
@@ -226,7 +985,23 @@ def cleanup_stale_jobs():
         print(f"🧹 已清理 {stale_count} 个超时渲染任务")
 
 
-def render_job(job_id: str, static_dir: Path):
+def render_job(
+    job_id: str,
+    static_dir: Path,
+    cancel_check: Callable[[], bool] | None = None,
+    output_size: tuple[int, int] = (1080, 1920),
+    output_name: str | None = None,
+    tts_provider: str = "qwen",
+    preview: bool = False,
+):
+    if not is_standard_portrait_size(output_size):
+        job = db.get_render_job(job_id)
+        if job:
+            db.update_render_job(
+                job_id, status="failed", stage="画幅校验失败",
+                error="正式视频只支持统一的 9:16 竖屏画幅",
+            )
+        return
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         db.update_render_job(job_id, status="failed", stage="依赖缺失", error="未安装 FFmpeg/ffprobe")
@@ -235,129 +1010,407 @@ def render_job(job_id: str, static_dir: Path):
     job = db.get_render_job(job_id)
     if not job:
         return
+    script_usage = source_usage_report(job.get("script", {}).get("scenes") or [])
+    if not script_usage["passed"]:
+        db.update_render_job(
+            job_id, status="failed", stage="素材重复硬门禁",
+            error="；".join(script_usage["issues"])[:500],
+        )
+        return
 
     work_root = static_dir / "uploads" / "render" / job_id
-    output_rel = Path("uploads") / "video" / f"douyin-{job_id}.mp4"
+    output_rel = Path("uploads") / "video" / (output_name or f"douyin-{job_id}.mp4")
     output = static_dir / output_rel
     work_root.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
+    event_clips = {int(item["id"]): item for item in db.list_hotspot_event_clips()}
+
+    def is_canceled() -> bool:
+        if cancel_check and cancel_check():
+            return True
+        latest = db.get_render_job(job_id)
+        return bool(latest and latest.get("status") in ("cancel_requested", "canceled"))
+
+    def check_canceled():
+        if is_canceled():
+            raise RenderCanceled("视频生成已取消")
 
     try:
         db.update_render_job(job_id, status="running", stage="生成旁白", progress=5, error=None)
         segments = []
-        used_asset_ids: set[int] = set()  # 跟踪已分配素材，避免重复
+        scene_durations = []
+        subtitle_count = 0
+        subtitle_sync_reports = []
+        used_clip_refs: list[dict] = []
+        scene_subtitles: list[dict] = []
+        rendered_scene_sources: list[dict] = []
+        audio_tempo_adjustments: list[dict] = []
+        voiceover_compactions: list[dict] = []
 
         # 从脚本标题或首场景旁白提取整体话题，用于素材匹配时加权
         topic = job["script"].get("title", "") or ""
         if not topic and job["script"].get("scenes"):
             topic = job["script"]["scenes"][0].get("voiceover", "")[:40]
+        preserve_planned_duration = (
+            str(job["script"].get("source_type") or "") == "topic_brief_dual_library"
+        )
 
-        for index, scene in enumerate(job["script"]["scenes"]):
-            # 1. 生成 TTS 音频
+        scenes = list(job["script"]["scenes"])
+        # Parallel first-pass TTS: each scene writes an indexed WAV; video-fit
+        # re-TTS stays serial inside the per-scene loop below.
+        check_canceled()
+        with ThreadPoolExecutor(max_workers=_scene_tts_concurrency()) as pool:
+            tts_futures = {
+                index: pool.submit(
+                    synthesize_scene_voiceover,
+                    scene["voiceover"],
+                    work_root / f"voice-{index}.wav",
+                    tts_provider=tts_provider,
+                    voice=job["voice"],
+                )
+                for index, scene in enumerate(scenes)
+            }
+            for index, future in tts_futures.items():
+                check_canceled()
+                future.result()
+
+        pending_scene_renders: list[dict] = []
+        for index, scene in enumerate(scenes):
+            # 1. 使用并行预生成的 TTS 音频
+            check_canceled()
             wav = work_root / f"voice-{index}.wav"
-            synthesize_mimo(scene["voiceover"], job["voice"], wav)
+            check_canceled()
+            speech_duration = _probe_media(ffprobe, wav)["duration"]
+            # 永不截断旁白。短旁白不再被原计划镜头强行拉成数秒静音尾部。
+            duration = scene_render_duration(
+                float(scene["duration"]), speech_duration,
+                is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                preserve_planned_duration=preserve_planned_duration,
+            )
 
-            # 2. 获取素材（强制使用素材库视频）
+            # 2. 获取素材。没有对应的真实热点/自有素材时直接失败，
+            # 不允许以信息图、流程图或循环画面填满旁白。
             asset_id = scene.get("asset_id")
-            asset = db.get_asset(asset_id) if asset_id else None
-
-            if not asset or asset["file_type"] not in ("video", "image"):
-                all_videos = db.list_assets(file_type="video", status="active")
-                if all_videos:
-                    # 优先按场景画面描述匹配素材分类，兜底才用轮询
-                    visual = scene.get("visual", "")
-                    matched = _match_asset_by_scene(visual, all_videos,
-                                                    used_asset_ids=used_asset_ids,
-                                                    topic=topic)
-                    if matched:
-                        asset = matched
-                        used_asset_ids.add(asset["id"])
-                        print(f"✅ 场景 {index+1}: 按画面描述匹配素材 {asset['name']} (category={asset.get('category')})")
-                    else:
-                        # 所有素材都已用过，轮询选一个未用的
-                        unused = [a for a in all_videos if a["id"] not in used_asset_ids]
-                        pool = unused if unused else all_videos
-                        asset = pool[index % len(pool)]
-                        used_asset_ids.add(asset["id"])
-                        print(f"⚠️ 场景 {index+1}: 无分类匹配，轮询选用 {asset['name']}")
-                else:
-                    card_path = work_root / f"card-{index}.png"
-                    _fallback_card(scene["visual"], card_path)
-                    source = card_path
-                    is_video = False
-                    print(f"❌ 场景 {index+1}: 素材库为空，使用品牌信息卡")
-                    duration = scene["duration"]
-                    segment = work_root / f"segment-{index}.mp4"
-                    frames = int(duration * 30)
-                    vf = f"zoompan=z=min(zoom+0.001\\,1.15):s=1080:1920:fps=30"
-                    command = [ffmpeg, "-y", "-loop", "1", "-i", str(source), "-i", str(wav),
-                               "-t", str(duration), "-vf", vf,
-                               "-map", "0:v", "-map", "1:a",
-                               "-r", "30", "-c:v", "libx264", "-preset", "veryfast",
-                               "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
-                               str(segment)]
-                    subprocess.run(command, capture_output=True, timeout=180, check=True)
-                    segments.append(segment)
-                    continue
+            asset = None
+            clip_ref = None
+            endcard_rel = str(scene.get("brand_endcard_path") or "")
+            animate_image = False
+            if is_explanation_scene(scene):
+                raise ValueError("信息图、流程图和 PPT 卡片已禁用；请补充真实热点 Hook 或 Buffalo 自有素材")
+            elif endcard_rel:
+                candidate = (static_dir / endcard_rel).resolve()
+                if not candidate.is_relative_to(static_dir.resolve()) or not candidate.is_file():
+                    raise ValueError("品牌结尾图片不存在或路径不安全")
+                asset = {"id": None, "name": "Buffalo 品牌结尾", "file_type": "image", "filepath": endcard_rel,
+                         "hotspot_id": None}
+            else:
+                asset = db.get_asset(asset_id) if asset_id else None
+            if not asset or asset.get("file_type") not in ("video", "image"):
+                raise ValueError(
+                    f"第{index + 1}镜没有对应素材；请补充未使用的热点 Hook、Buffalo 自有视频或自有图片，禁止循环填充旁白"
+                )
 
             if asset["file_type"] == "video":
-                source = static_dir / asset["filepath"]
+                try:
+                    clip_ref = resolve_clip_ref(scene, asset, event_clips)
+                except ClipReferenceError as exc:
+                    raise ValueError(str(exc)) from exc
+                matched_segment = db.get_asset_segment(scene.get("asset_segment_id")) if scene.get("asset_segment_id") else None
+                if matched_segment and matched_segment.get("asset_id") != asset["id"]:
+                    matched_segment = None
+                if clip_ref.get("library_origin") == "hotspot_event":
+                    source = static_dir / asset["filepath"]
+                    event_start, event_end = int(clip_ref["start_ms"]), int(clip_ref["end_ms"])
+                    chosen_start = int(scene.get("asset_start_ms") or event_start)
+                    chosen_end = int(scene.get("asset_end_ms") or event_end)
+                    # 事件代理片段可用于默认预览；但当内容分析已在事件内部选定
+                    # 更具体的现场镜头时，必须从母片按这个精确范围取画面。
+                    if event_start <= chosen_start < chosen_end <= event_end:
+                        source_start, source_end = chosen_start / 1000, chosen_end / 1000
+                        clip_ref = {**clip_ref, "start_ms": chosen_start, "end_ms": chosen_end,
+                                    "duration_ms": chosen_end - chosen_start}
+                    else:
+                        source_start, source_end = event_start / 1000, event_end / 1000
+                    matched_segment = None
+                elif matched_segment and matched_segment.get("preview_path"):
+                    source = static_dir / matched_segment["preview_path"]
+                    source_start = 0
+                    # 片段预览文件本身已经是精确范围，只播放一次。
+                    source_end = None
+                else:
+                    source = static_dir / asset["filepath"]
+                    source_start = (matched_segment.get("start_ms", 0) if matched_segment else scene.get("asset_start_ms", 0)) / 1000
+                    end_ms = matched_segment.get("end_ms", 0) if matched_segment else scene.get("asset_end_ms", 0)
+                    source_end = end_ms / 1000 if end_ms and end_ms / 1000 > source_start else None
                 is_video = True
-                print(f"✅ 场景 {index+1}: 使用视频 {asset['name']}")
+                subtitle_layout = (
+                    "hotspot_news" if clip_ref.get("library_origin") == "hotspot_event"
+                    else "standard"
+                )
+                used_clip_refs.append(dict(clip_ref))
+                print(f"✅ 场景 {index+1}: 使用视频 {asset['name']}，起点 {source_start:g} 秒")
             else:
+                if asset.get("hotspot_id"):
+                    raise ValueError("热点图片也必须通过事件片段或人工确认后使用")
                 source = static_dir / asset["filepath"]
                 is_video = False
+                source_start = 0
+                source_end = None
+                subtitle_layout = "standard"
+                # 品牌结尾也采用极轻的慢推进。保持 Logo 与 CTA 可读，同时避免
+                # 3–5 秒完全静止的卡片在短视频中被感知为卡顿或冻结帧。
+                animate_image = True
                 print(f"✅ 场景 {index+1}: 使用图片 {asset['name']}")
 
-            duration = scene["duration"]
-            segment = work_root / f"segment-{index}.mp4"
+            if is_video and (source_start > 0 or source_end is not None):
+                clipped_source = work_root / f"visual-source-{index}.mp4"
+                run_cancelable_process(
+                    job_id,
+                    _clip_source_command(
+                        ffmpeg, source, clipped_source, source_start, source_end,
+                        fast=preview,
+                    ),
+                    timeout=180,
+                    cancel_check=is_canceled,
+                )
+                source, source_start, source_end = clipped_source, 0, None
 
-            # 3. 生成字幕叠加图片
-            subtitle_text = scene.get("text_overlay", "")
-            overlay_img = work_root / f"overlay-{index}.png"
-            if subtitle_text:
-                _generate_text_overlay(subtitle_text, overlay_img)
-                print(f"  ✅ 已添加字幕: {subtitle_text}")
-
-            # 4. 构建 FFmpeg 命令
-            visual_input = ["-stream_loop", "-1", "-i", str(source)] if is_video else ["-loop", "1", "-i", str(source)]
-            
             if is_video:
-                vf_base = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-            else:
-                vf_base = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-            
-            # 如果有字幕，添加 overlay
-            if subtitle_text and overlay_img.exists():
-                command = [ffmpeg, "-y", *visual_input, "-i", str(overlay_img), "-i", str(wav), "-t", str(duration)]
-                if is_video and _has_audio(ffprobe, source):
-                    command += ["-filter_complex", 
-                                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];[v0][1:v]overlay=0:main_h-overlay_h[v];[0:a]volume=0.15[bg];[bg][2:a]amix=inputs=2:duration=first[a]",
-                                "-map", "[v]", "-map", "[a]"]
-                else:
-                    command += ["-filter_complex",
-                                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];[v0][1:v]overlay=0:main_h-overlay_h[v]",
-                                "-map", "[v]", "-map", "2:a"]
-            else:
-                command = [ffmpeg, "-y", *visual_input, "-i", str(wav), "-t", str(duration), "-vf", vf_base]
-                if is_video and _has_audio(ffprobe, source):
-                    command += ["-filter_complex", "[0:a]volume=0.15[bg];[bg][1:a]amix=inputs=2:duration=first[a]", "-map", "0:v", "-map", "[a]"]
-                else:
-                    command += ["-map", "0:v", "-map", "1:a"]
-            
-            command += ["-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", str(segment)]
-            subprocess.run(command, capture_output=True, timeout=180, check=True)
-            segments.append(segment)
-            db.update_render_job(job_id, stage=f"合成场景 {index + 1}/{len(job['script']['scenes'])}", progress=10 + int(75 * (index + 1) / len(job["script"]["scenes"])))
+                available_seconds = max(0.0, _probe_media(ffprobe, source)["duration"] - source_start)
+                # One local text contraction is allowed after Qwen TTS has
+                # been measured.  It protects real 3–7 second beats from a
+                # punctuation-heavy voiceover without looping their footage.
+                for text_attempt in range(2):
+                    speedup = tts_speedup_factor(speech_duration, available_seconds)
+                    if speedup is not None and available_seconds + 0.12 < duration:
+                        fitted_wav = work_root / f"voice-{index}-fitted.wav"
+                        run_cancelable_process(
+                            job_id, _audio_tempo_command(ffmpeg, wav, fitted_wav, speedup),
+                            timeout=60, cancel_check=is_canceled,
+                        )
+                        wav = fitted_wav
+                        original_duration = speech_duration
+                        speech_duration = _probe_media(ffprobe, wav)["duration"]
+                        duration = scene_render_duration(
+                            float(scene["duration"]), speech_duration,
+                            is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                            preserve_planned_duration=preserve_planned_duration,
+                        )
+                        audio_tempo_adjustments.append({
+                            "scene": index + 1,
+                            "tempo": round(speedup, 4),
+                            "audio_seconds_before": round(original_duration, 3),
+                            "audio_seconds_after": round(speech_duration, 3),
+                        })
+                    if available_seconds + 0.12 >= duration or text_attempt:
+                        break
+                    shortened_voiceover = compact_voiceover_to_fit_real_video(
+                        scene["voiceover"], speech_duration, available_seconds,
+                    )
+                    if not shortened_voiceover:
+                        break
+                    original_voiceover = scene["voiceover"]
+                    scene = {**scene, "voiceover": shortened_voiceover}
+                    # Keep the quality storyboard aligned with the audio the
+                    # user receives, while preserving the planned source refs.
+                    job["script"]["scenes"][index]["voiceover"] = shortened_voiceover
+                    wav = work_root / f"voice-{index}-shortened.wav"
+                    synthesize_scene_voiceover(
+                        shortened_voiceover, wav, tts_provider=tts_provider, voice=job["voice"],
+                    )
+                    speech_duration = _probe_media(ffprobe, wav)["duration"]
+                    duration = scene_render_duration(
+                        float(scene["duration"]), speech_duration,
+                        is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                        preserve_planned_duration=preserve_planned_duration,
+                    )
+                    voiceover_compactions.append({
+                        "scene": index + 1,
+                        "original": original_voiceover,
+                        "rendered": shortened_voiceover,
+                    })
+                if available_seconds + 0.12 < duration:
+                    raise ValueError(
+                        f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，旁白需 {duration:.1f} 秒；"
+                        "必须拆分成可用的真实素材 Beat 或补充未使用的 Buffalo 自有图片，禁止循环真实视频"
+                    )
+            scene_durations.append(duration)
+            cues = build_subtitle_cues(scene["voiceover"], min(speech_duration, duration))
+            subtitle_sync = subtitle_sync_report(cues, speech_duration)
+            subtitle_sync_reports.append(subtitle_sync)
+            scene_subtitles.append({"render_duration": duration, "sync": subtitle_sync})
+            subtitle_count += len(cues)
+            subtitle_file = work_root / f"subtitle-{index}.ass"
+            _write_ass(cues, subtitle_file)
+            rendered_scene_sources.append({
+                **scene,
+                "clip_ref": clip_ref,
+                "render_duration": duration,
+            })
 
-        # 5. 拼接所有段
-        concat = work_root / "concat.txt"
-        concat.write_text("\n".join(f"file '{path.resolve().as_posix()}'" for path in segments), encoding="utf-8")
-        subprocess.run(
-            [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", "-movflags", "+faststart", str(output)],
-            capture_output=True, timeout=240, check=True
+            segment = work_root / f"segment-{index}.mp4"
+            # 3. 用逐句 PNG overlay 烧录字幕，避免依赖 FFmpeg 可选的 libass。
+            command = _scene_command(ffmpeg, ffprobe, source, is_video, wav, cues,
+                                     duration, segment, work_root, index,
+                                     source_start=source_start, source_end=source_end,
+                                     output_size=output_size,
+                                     watermark_text=str(job["script"].get("watermark") or ""),
+                                     subtitle_layout=subtitle_layout,
+                                     animate_image=animate_image,
+                                     fast=preview)
+            pending_scene_renders.append({
+                "index": index,
+                "segment": segment,
+                "command": command,
+            })
+
+        # Parallel scene FFmpeg: cancel tracks every child process for this job.
+        segments = [None] * len(pending_scene_renders)
+        scene_total = max(1, len(pending_scene_renders))
+
+        def _render_pending_scene(item: dict) -> tuple[int, Path]:
+            run_cancelable_process(
+                job_id, item["command"], timeout=180, cancel_check=is_canceled,
+            )
+            return item["index"], item["segment"]
+
+        with ThreadPoolExecutor(max_workers=_scene_ffmpeg_concurrency()) as pool:
+            futures = [pool.submit(_render_pending_scene, item) for item in pending_scene_renders]
+            completed = 0
+            for future in as_completed(futures):
+                check_canceled()
+                index, segment = future.result()
+                segments[index] = segment
+                completed += 1
+                db.update_render_job(
+                    job_id,
+                    stage=f"合成场景 {completed}/{scene_total}",
+                    progress=10 + int(75 * completed / scene_total),
+                )
+        if any(segment is None for segment in segments):
+            raise RuntimeError("分镜并行渲染未产出完整片段列表")
+
+        # 5. 统一音画时间基准并做极短交叉淡化，避免分镜边界出现停帧或时间戳跳变。
+        check_canceled()
+        segment_durations = [_probe_media(ffprobe, segment)["duration"] for segment in segments]
+        # A very short crossfade still reads as a hard cut when warehouse and
+        # delivery beats alternate on a phone. Keep the edit brisk but give the
+        # picture and narration a perceptibly smoother handoff.
+        transition_duration = 0.5
+        # xfade/acrossfade overlap adjacent beats. Formal dual-library videos
+        # promise a 50–90s rendered duration, so a valid storyboard must not
+        # lose its lower-bound duration merely because many transitions overlap.
+        if preserve_planned_duration and len(segment_durations) > 1:
+            available_overlap = (
+                sum(segment_durations) - 50.0
+            ) / (len(segment_durations) - 1)
+            if available_overlap < transition_duration:
+                transition_duration = max(0.0, available_overlap)
+        # 预览只用于内部质检/查看画面与字幕，不需要 crossfade 的全片重编码；
+        # 直接走 -c copy 的硬切拼接可以把这一步的耗时从数十秒降到接近零。
+        # 真正的交叉淡化过渡只在最终成片时渲染一次。
+        transition_fallback = preview
+        if preview:
+            run_cancelable_process(
+                job_id, _safe_concat_command(ffmpeg, segments, output), timeout=240,
+                cancel_check=is_canceled,
+            )
+            output.with_suffix(".concat.txt").unlink(missing_ok=True)
+        else:
+            try:
+                run_cancelable_process(
+                    job_id,
+                    _transition_concat_command(
+                        ffmpeg, segments, segment_durations, output,
+                        transition_duration=transition_duration,
+                    ),
+                    timeout=240,
+                    cancel_check=is_canceled,
+                )
+            except subprocess.CalledProcessError:
+                # FFmpeg builds differ in their xfade graph support; do not discard a
+                # fully rendered, source-verified preview solely for that reason.
+                transition_fallback = True
+                run_cancelable_process(
+                    job_id, _safe_concat_command(ffmpeg, segments, output), timeout=240,
+                    cancel_check=is_canceled,
+                )
+                output.with_suffix(".concat.txt").unlink(missing_ok=True)
+        expected_duration = sum(segment_durations) - (0 if transition_fallback else transition_duration * (len(segments) - 1))
+        report = _quality_report(
+            ffprobe, output, expected_duration, subtitle_count,
+            expected_size=output_size,
         )
-        db.update_render_job(job_id, status="succeeded", stage="渲染完成", progress=100, output_path=output_rel.as_posix(), error=None)
+        report["transition"] = {
+            "type": "hard_cut_fallback" if transition_fallback else "crossfade",
+            "duration": 0 if transition_fallback else transition_duration,
+            "count": len(segments) - 1,
+        }
+        report["frame_policy"] = {
+            "id": PORTRAIT_FRAME_POLICY,
+            "canvas": f"{output_size[0]}x{output_size[1]}",
+            "description": "每个镜头满版居中裁切到统一 9:16，禁止横向插卡或信箱边框",
+        }
+        report["audio_sync"] = {
+            "passed": all(item["passed"] for item in subtitle_sync_reports),
+            "scenes": subtitle_sync_reports,
+        }
+        report["audio_tempo_adjustments"] = audio_tempo_adjustments
+        report["voiceover_compactions"] = voiceover_compactions
+        source_usage = source_usage_report(rendered_scene_sources)
+        final_subtitles = subtitle_timeline_report(
+            scene_subtitles,
+            final_duration=report["duration"],
+            transition_duration=0 if transition_fallback else transition_duration,
+        )
+        # These are final-output gates, not scene-level hints.  A video only
+        # passes when the render manifest has no duplicate source/range and its
+        # measured final duration still agrees with the post-transition subtitle
+        # timeline and audio stream.
+        report["source_usage"] = source_usage
+        report["final_subtitle_timeline"] = final_subtitles
+        # The semantic QA service receives this actual (post-TTS, post-transition)
+        # timeline, rather than guessing static-image windows from planned lengths.
+        report["render_timeline"] = final_subtitles.get("timeline") or []
+        report["transition_audio_sync"] = {
+            "passed": bool(
+                report["checks"]["has_audio"]
+                and report["checks"]["duration_aligned"]
+                and report["audio_sync"]["passed"]
+                and final_subtitles["passed"]
+            ),
+            "transition_type": report["transition"]["type"],
+        }
+        report["checks"].update({
+            "no_repeated_source_or_range": source_usage["passed"],
+            "final_subtitle_timeline_aligned": final_subtitles["passed"],
+            "transition_audio_video_sync": report["transition_audio_sync"]["passed"],
+        })
+        report["status"] = "passed" if all(report["checks"].values()) else "failed"
+        clips = []
+        if job["script"].get("output_mode") == "full_and_clips":
+            clip_dir = static_dir / "uploads" / "video" / "clips"
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            for scene_number in job["script"].get("selected_clip_scenes") or []:
+                source_segment = segments[scene_number - 1]
+                clip_rel = Path("uploads") / "video" / "clips" / f"douyin-{job_id}-scene-{scene_number}.mp4"
+                shutil.copy2(source_segment, static_dir / clip_rel)
+                clip_report = _quality_report(
+                    ffprobe, static_dir / clip_rel, scene_durations[scene_number - 1],
+                    len(build_subtitle_cues(job['script']['scenes'][scene_number - 1]['voiceover'], scene_durations[scene_number - 1])),
+                    expected_size=output_size,
+                )
+                clips.append({"scene": scene_number, "type": "video", "path": clip_rel.as_posix(),
+                              "url": "/static/" + clip_rel.as_posix(), "filename": clip_rel.name,
+                              "quality_report": clip_report, "quality_status": clip_report["status"]})
+        if report["status"] != "passed":
+            raise RuntimeError("视频质量门禁未通过：" + "、".join(key for key, ok in report["checks"].items() if not ok))
+        report["clip_refs"] = used_clip_refs
+        db.update_render_job(job_id, status="succeeded", stage="质量检查通过", progress=100,
+                             output_path=output_rel.as_posix(), clips=clips, quality_report=report, error=None)
 
+    except RenderCanceled:
+        output.unlink(missing_ok=True)
+        db.update_render_job(job_id, status="canceled", stage="已取消", error=None)
     except Exception as exc:
         db.update_render_job(job_id, status="failed", stage="渲染失败", error=str(exc)[:500])

@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 
 WIDTH, HEIGHT = 1242, 1660
-TEMPLATE_VERSION = "buffalo-gold-v1"
+TEMPLATE_VERSION = "buffalo-reference-v4"
 GOLD = "#B78A4A"
 GOLD_LIGHT = "#D2AA6D"
 GOLD_DARK = "#7C542D"
@@ -17,16 +17,25 @@ CREAM = "#F3E6D2"
 WHITE = "#FFFDF8"
 FONT_CANDIDATES = (
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/STHeiti Medium.ttc",
     "/Library/Fonts/Arial Unicode.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 )
+LOGO_FILES = {
+    "header": Path(__file__).parent / "static" / "icons" / "buffalo_logo_header.png",
+    "large": Path(__file__).parent / "static" / "icons" / "buffalo_logo_large.png",
+    "white": Path(__file__).parent / "static" / "icons" / "buffalo_logo_white.png",
+    "mark_white": Path(__file__).parent / "static" / "icons" / "buffalo_mark_white.png",
+}
 
 
 def _font(size: int, bold: bool = False):
     for candidate in FONT_CANDIDATES:
         if Path(candidate).exists():
             try:
+                if "Hiragino Sans GB" in candidate:
+                    return ImageFont.truetype(candidate, size=size, index=2 if bold else 0)
                 return ImageFont.truetype(candidate, size=size, index=1 if bold else 0)
             except OSError:
                 return ImageFont.truetype(candidate, size=size)
@@ -40,22 +49,39 @@ def _clean(value, limit: int) -> str:
 
 def normalize_pages(title: str, pages: list[dict] | None) -> list[dict]:
     valid = []
-    for index, raw in enumerate(pages or []):
+    for raw in pages or []:
         if not isinstance(raw, dict):
             continue
         points = [_clean(item, 48) for item in raw.get("points", []) if _clean(item, 48)][:4]
         valid.append({
-            "type": "cover" if index == 0 else "content",
-            "headline": _clean(raw.get("headline") or (title if index == 0 else "物流提示"), 24),
+            "type": "cover" if not valid else "content",
+            "headline": _clean(raw.get("headline") or (title if not valid else "物流提示"), 24),
             "subheadline": _clean(raw.get("subheadline"), 34),
             "points": points,
+            "show_logo": raw.get("show_logo", True) is not False,
+            "logo_variant": "large" if raw.get("logo_variant") == "large" else "header",
         })
-    if len(valid) < 2:
-        valid = [
-            {"type": "cover", "headline": _clean(title, 24), "subheadline": "南非物流实用指南", "points": []},
-            {"type": "content", "headline": "值得关注的重点", "subheadline": "", "points": ["及时确认最新物流动态", "提前准备可执行的应对方案"]},
-        ]
-    return valid[:9]
+    if not valid:
+        valid.append({"type": "cover", "headline": _clean(title, 24), "subheadline": "南非物流实用指南", "points": [], "show_logo": True, "logo_variant": "header"})
+
+    # AI 偶尔只返回 2-3 页。轮播产品约定为 5-7 页，因此用不依赖外部事实的
+    # 核对/执行清单补足，而不是编造业务数据或热点细节。
+    fallback_pages = [
+        ("核心拆解", ["确认真实情况与适用范围", "梳理关键流程与费用节点"]),
+        ("常见风险", ["信息不完整可能导致判断偏差", "核对时效要求与责任边界"]),
+        ("执行建议", ["提前准备资料与时间缓冲", "执行前再次核对最新要求"]),
+        ("行动清单", ["明确负责人和下一步动作", "保留记录并持续跟进"]),
+        ("最后提醒", ["根据实际情况选择合适方案", "必要时咨询专业服务人员"]),
+    ]
+    logo_variant = valid[0]["logo_variant"]
+    for headline, points in fallback_pages:
+        if len(valid) >= 5:
+            break
+        valid.append({
+            "type": "content", "headline": headline, "subheadline": "", "points": points,
+            "show_logo": True, "logo_variant": logo_variant,
+        })
+    return valid[:7]
 
 
 def pages_from_content(title: str, body: str) -> list[dict]:
@@ -93,6 +119,15 @@ def _wrapped(draw, text: str, font, max_width: int) -> list[str]:
     return lines
 
 
+def _cover_headline_lines(text: str) -> list[str]:
+    """参考物料偏好均衡的两行大标题，避免问号被单独挤到第三行。"""
+    clean = str(text or "").strip()
+    if 8 <= len(clean) <= 18:
+        split_at = len(clean) // 2
+        return [clean[:split_at], clean[split_at:]]
+    return []
+
+
 def _gradient(size: tuple[int, int], top=GOLD_LIGHT, bottom=GOLD_DARK) -> Image.Image:
     image = Image.new("RGB", size, top)
     top_rgb = Image.new("RGB", (1, 1), top).getpixel((0, 0))
@@ -124,115 +159,133 @@ def _photo_panel(source: Path | None, size: tuple[int, int]) -> Image.Image:
     return _gradient(size)
 
 
-def _brand(draw: ImageDraw.ImageDraw, page: int, total: int, dark=False):
-    color = WHITE if dark else "#FFFFFF"
-    draw.text((785, 70), "BUFFALO", font=_font(34, True), fill=color)
-    draw.text((980, 80), "WE DELIVER HOPE", font=_font(13, True), fill=color)
-    draw.text((1144, 72), f"{page}/{total}", font=_font(24, True), fill=color)
+def _brand(image: Image.Image, draw: ImageDraw.ImageDraw, page_data: dict, page: int, total: int, dark=False):
+    """参考 BUFFALO 既有物料：白色 Logo 居右，页码使用深金色胶囊。"""
+    if page_data.get("show_logo", True):
+        variant = "large" if page_data.get("logo_variant") == "large" else "header"
+        # 水牛轮廓来自用户提供的官方成品物料；字标和口号来自官网原始 PNG。
+        # 分开组合可避免手绘失真，也避免放大截图中的小号口号造成锯齿。
+        mark_path, wordmark_path = LOGO_FILES["mark_white"], LOGO_FILES["header"]
+        if mark_path.exists() and wordmark_path.exists():
+            with Image.open(mark_path) as original:
+                mark = original.convert("RGBA")
+            with Image.open(wordmark_path) as original:
+                wordmark = original.convert("RGBA").crop((52, 0, original.width, original.height))
+            mark_width = 82 if variant == "large" else 74
+            wordmark_width = 310 if variant == "large" else 285
+            mark = mark.resize((mark_width, round(mark.height * mark_width / mark.width)), Image.Resampling.LANCZOS)
+            wordmark = wordmark.resize((wordmark_width, round(wordmark.height * wordmark_width / wordmark.width)), Image.Resampling.LANCZOS)
+            alpha = wordmark.getchannel("A")
+            white_wordmark = Image.new("RGBA", wordmark.size, (255, 255, 255, 255))
+            white_wordmark.putalpha(alpha)
+            total_width = mark_width + 16 + wordmark_width
+            logo_x = WIDTH - total_width - 145
+            image.paste(mark, (logo_x, 63), mark)
+            image.paste(white_wordmark, (logo_x + mark_width + 16, 58), white_wordmark)
+        else:
+            draw.text((760, 68), "BUFFALO · WE DELIVER HOPE", font=_font(28, True), fill=WHITE)
+    count = f"{page}/{total}"
+    bbox = draw.textbbox((0, 0), count, font=_font(28, True))
+    pill_w = bbox[2] - bbox[0] + 42
+    draw.rounded_rectangle((WIDTH - pill_w - 28, 40, WIDTH - 28, 112), radius=34, fill="#9A642D")
+    draw.text((WIDTH - pill_w - 7, 57), count, font=_font(28, True), fill=WHITE)
+
+
+def _dots(draw: ImageDraw.ImageDraw, page: int, total: int):
+    count = min(total, 9)
+    gap, radius = 30, 7
+    start = WIDTH / 2 - (count - 1) * gap / 2
+    for index in range(count):
+        color = WHITE if index == page - 1 else "#D9C2A6"
+        draw.ellipse((start + index * gap - radius, 1605 - radius,
+                      start + index * gap + radius, 1605 + radius), fill=color)
 
 
 def _draw_cover(page: dict, total: int, photo: Path | None) -> Image.Image:
-    image = _gradient((WIDTH, HEIGHT), "#C39A61", "#80562E")
-    draw = ImageDraw.Draw(image)
-    image.paste(_photo_panel(photo, (WIDTH, 690)), (0, 970))
-    # Signature curved transition used by BUFFALO's published covers.
-    draw.ellipse((-240, 785, WIDTH + 260, 1125), fill="#9C6C3D")
-    draw.rectangle((0, 0, WIDTH, 915), fill="#A77743")
+    image = _gradient((WIDTH, HEIGHT), "#C8944C", "#7E512F")
+    image.paste(_photo_panel(photo, (WIDTH, 720)), (0, 940))
+    # 大块金棕信息区 + 参考图中的柔和弧形落边。
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    ImageDraw.Draw(overlay).rectangle((0, 0, WIDTH, 980), fill=(120, 77, 38, 55))
+    odraw = ImageDraw.Draw(overlay)
+    odraw.rectangle((0, 0, WIDTH, 900), fill=(151, 98, 52, 72))
+    odraw.ellipse((-250, 735, WIDTH + 250, 1085), fill=(139, 87, 45, 245))
+    odraw.rectangle((0, 0, WIDTH, 850), fill=(170, 116, 61, 120))
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(image)
-    _brand(draw, 1, total, dark=True)
+    _brand(image, draw, page, 1, total, dark=True)
 
-    headline_font = _font(92, True)
-    lines = _wrapped(draw, page["headline"], headline_font, 1010)[:3]
-    y = 300 if len(lines) <= 2 else 245
+    headline_font = _font(124, True)
+    lines = _cover_headline_lines(page["headline"]) or _wrapped(draw, page["headline"], headline_font, 1040)[:3]
+    y = 225 if len(lines) <= 2 else 175
     for line in lines:
         width = draw.textbbox((0, 0), line, font=headline_font)[2]
-        draw.text(((WIDTH - width) / 2, y), line, font=headline_font, fill=WHITE, stroke_width=2, stroke_fill="#875C32")
-        y += 120
+        draw.text(((WIDTH - width) / 2, y), line, font=headline_font, fill=WHITE)
+        y += 142
 
     subtitle = page.get("subheadline") or "拆解关键逻辑，避开常见误区"
-    sub_font = _font(40)
-    sub_w = min(1030, draw.textbbox((0, 0), subtitle, font=sub_font)[2] + 76)
+    sub_font = _font(49)
+    sub_w = min(1110, draw.textbbox((0, 0), subtitle, font=sub_font)[2] + 72)
     x = (WIDTH - sub_w) / 2
-    draw.rounded_rectangle((x, y + 24, x + sub_w, y + 94), radius=8, fill="#C49A5E")
-    draw.text((x + 38, y + 35), subtitle, font=sub_font, fill="#FFF6E9")
-    draw.text((495, 850), "WE DELIVER HOPE", font=_font(22, True), fill="#F7E7CE")
+    draw.rectangle((x, y + 20, x + sub_w, y + 112), fill="#CC9340")
+    draw.text((x + 36, y + 34), subtitle, font=sub_font, fill=WHITE)
+    slogan = "WE DELIVER HOPE"
+    sw = draw.textbbox((0, 0), slogan, font=_font(25, True))[2]
+    draw.text(((WIDTH - sw) / 2, 800), slogan, font=_font(25, True), fill=WHITE)
+    _dots(draw, 1, total)
     return image
 
 
 def _draw_text_page(page: dict, index: int, total: int) -> Image.Image:
-    image = _gradient((WIDTH, HEIGHT), "#C2975C", "#8B5D34")
-    image = image.filter(ImageFilter.GaussianBlur(0.35))
+    image = _gradient((WIDTH, HEIGHT), "#C78C3E", "#80512D")
     draw = ImageDraw.Draw(image)
-    _brand(draw, index + 1, total, dark=True)
+    _brand(image, draw, page, index + 1, total, dark=True)
 
-    intro = page.get("subheadline") or "真正拉开差距的，往往是这些容易忽略的细节"
-    intro_font = _font(38)
+    intro = page.get("subheadline") or page["headline"]
+    intro_font = _font(55, True)
     y = 190
-    for line in _wrapped(draw, intro, intro_font, 1020)[:2]:
-        draw.text((105, y), line, font=intro_font, fill="#F8E8D2")
-        y += 54
-    draw.text((105, y + 8), page["headline"], font=_font(51, True), fill=WHITE)
-    y += 126
+    intro_lines = _wrapped(draw, intro, intro_font, 980)[:2]
+    intro_width = max(draw.textbbox((0, 0), line, font=intro_font)[2] for line in intro_lines)
+    draw.rectangle((100, y - 12, 100 + intro_width + 34, y + len(intro_lines) * 68), fill="#D29A48")
+    for line in intro_lines:
+        draw.text((118, y), line, font=intro_font, fill=WHITE)
+        y += 68
+    y += 68
 
     points = page.get("points") or ["核对最新要求与真实成本", "提前规划关键节点", "保留充足执行缓冲"]
     supporting = [
-        "确认计费口径与服务边界，避免后续临时追加",
-        "核对费用发生节点与承担方，防止责任不清",
-        "结合货量和时效，选择真正适合自己的方案",
-        "报价存在有效期，执行前再次确认最新标准",
+        "先说明它是什么，再解释执行口径与注意事项",
+        "结合真实业务节点，避免只给抽象结论",
+        "核对费用、责任和时效，形成可执行方案",
+        "执行前再次确认最新政策与实际报价",
     ]
     for number, point in enumerate(points[:4], 1):
+        point_count = min(len(points), 4)
+        block_h = 430 if point_count <= 2 else (320 if point_count == 3 else 245)
+        fill = "#A96E32" if number % 2 else "#B97C36"
+        draw.rectangle((0, y - 22, WIDTH, y + block_h - 22), fill=fill)
         number_text = f"{number:02d}"
-        draw.text((72, y), number_text, font=_font(45, True), fill="#FFF5E6")
-        lines = _wrapped(draw, point, _font(40, True), 930)[:2]
-        draw.text((170, y + 2), lines[0], font=_font(40, True), fill=WHITE)
+        draw.ellipse((44, y - 10, 116, y + 62), fill="#C58A3E")
+        draw.text((43, y - 4), number_text, font=_font(48, True), fill=WHITE)
+        lines = _wrapped(draw, point, _font(55, True), 1020)[:2]
+        draw.text((135, y - 4), lines[0], font=_font(55, True), fill=WHITE, stroke_width=3, stroke_fill="#704425")
         detail = lines[1] if len(lines) > 1 else supporting[number - 1]
-        for detail_line in _wrapped(draw, detail, _font(28), 920)[:2]:
-            draw.text((170, y + 62), detail_line, font=_font(28), fill="#F1DDC3")
-        draw.line((170, y + 142, 1120, y + 142), fill="#D2A974", width=2)
-        y += 230
-    draw.text((78, 1570), "* 内容仅供业务沟通参考，请以最新政策与实际报价为准", font=_font(20), fill="#E6C9A4")
+        detail_y = y + 74
+        draw.text((145, detail_y), "核心说明：", font=_font(35, True), fill=WHITE)
+        detail_y += 50
+        for detail_line in _wrapped(draw, detail, _font(36), 970)[:3]:
+            draw.text((145, detail_y), detail_line, font=_font(36), fill="#FFF4E4")
+            detail_y += 50
+        if block_h >= 320:
+            reminder = "执行前核对最新口径、责任边界与实际费用"
+            draw.text((145, y + block_h - 105), "执行提醒：", font=_font(34, True), fill=WHITE)
+            draw.text((345, y + block_h - 105), reminder, font=_font(32), fill="#FFF4E4")
+        y += block_h + 22
+    _dots(draw, index + 1, total)
     return image
 
 
 def _draw_photo_page(page: dict, index: int, total: int, photo: Path | None) -> Image.Image:
-    image = _gradient((WIDTH, HEIGHT), "#B68A51", "#80562F")
-    image.paste(_photo_panel(photo, (WIDTH, 610)), (0, 0))
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    ImageDraw.Draw(overlay).rectangle((0, 0, WIDTH, 610), fill=(76, 48, 25, 65))
-    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(image)
-    _brand(draw, index + 1, total, dark=True)
-
-    title_font = _font(49, True)
-    title_lines = _wrapped(draw, page["headline"], title_font, 1010)[:2]
-    ty = 365
-    for line in title_lines:
-        w = draw.textbbox((0, 0), line, font=title_font)[2]
-        draw.rounded_rectangle(((WIDTH - w) / 2 - 24, ty - 8, (WIDTH + w) / 2 + 24, ty + 62), radius=7, fill="#AA793E")
-        draw.text(((WIDTH - w) / 2, ty), line, font=title_font, fill=WHITE)
-        ty += 72
-
-    points = page.get("points") or ["信息透明，节点可追踪", "灵活响应，减少积压", "本地执行，提高效率"]
-    supporting = [
-        "逐项问清费用范围，并写入正式报价",
-        "起运端、海运段与目的港分别核对",
-        "确认清关、仓储与末端配送责任",
-    ]
-    y = 680
-    icons = ["✓", "◇", "◎"]
-    for number, point in enumerate(points[:3]):
-        draw.ellipse((95, y, 185, y + 90), outline=WHITE, width=4)
-        draw.text((121, y + 12), icons[number], font=_font(48, True), fill=WHITE)
-        lines = _wrapped(draw, point, _font(39, True), 860)[:2]
-        draw.text((220, y + 2), lines[0], font=_font(39, True), fill=WHITE)
-        detail = lines[1] if len(lines) > 1 else supporting[number]
-        draw.text((220, y + 62), detail, font=_font(27), fill="#F2DDC2")
-        y += 275
-    return image
+    return _draw_text_page(page, index, total)
 
 
 def _render_page(page: dict, index: int, total: int, output: Path, photo: Path | None = None):

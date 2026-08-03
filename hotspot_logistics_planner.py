@@ -7,15 +7,10 @@ from __future__ import annotations
 
 import re
 
+import hotspot_lexicon
 
-SIGNAL_GROUPS = {
-    "strike": ("罢工", "停工", "抗议", "工会", "strike", "protest"),
-    "risk": ("危险", "枪击", "抢劫", "暴力", "治安", "安全", "事故", "火灾", "爆炸", "crime", "safety"),
-    "ecommerce_growth": ("电商", "订单", "网购", "零售", "消费", "增长", "delivery demand", "e-commerce"),
-    "infrastructure": ("港口", "拥堵", "交通", "道路", "桥", "铁路", "停电", "基础设施", "port", "road", "rail", "traffic", "congestion", "screening"),
-    "weather": ("洪水", "暴雨", "风暴", "干旱", "天气", "flood", "storm", "weather"),
-    "policy": ("政策", "法规", "关税", "投资", "政府", "department", "regulation", "investment"),
-}
+# Back-compat alias; canonical terms live in hotspot_lexicon.EVENT_TYPES.
+SIGNAL_GROUPS = hotspot_lexicon.EVENT_TYPES
 
 TOPICS = {
     "strike": {"topic": "路线稳定性", "keywords": ("路线", "备用", "停工", "运输"),
@@ -46,13 +41,7 @@ def classify_hotspot(event: dict) -> str:
     package_type = str(event.get("event_type") or "")
     if package_type in TOPICS:
         return package_type
-    text = _text(event)
-    scores = {
-        group: sum(1 for term in terms if term.casefold() in text)
-        for group, terms in SIGNAL_GROUPS.items()
-    }
-    best, score = max(scores.items(), key=lambda item: item[1])
-    return best if score else "unknown"
+    return hotspot_lexicon.classify_event_type(_text(event))
 
 
 def _custom_topic(event: dict, topic_brief: dict | None) -> dict:

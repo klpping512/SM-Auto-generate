@@ -17,14 +17,48 @@ DEFAULT_YOUTUBE_CHANNELS = [
     {"name": "SA Today", "url": "https://www.youtube.com/@SAtoday"},
     {"name": "South Africa Now", "url": "https://www.youtube.com/@SouthAfricaNow1"},
     {"name": "SABC Digital News", "url": "https://www.youtube.com/@sabcdigitalnews"},
+    # 南非主流 24 小时新闻台：现场类新闻视频密度高，是 Hook 素材的主要来源。
+    {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
+    {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV"},
 ]
-DEFAULT_CHANNEL_VIDEO_LIMIT = 3
-# 常规三天任务只读每个已授权频道最近 3 条，避免元数据轮询膨胀；
-# 管理员批量验收可通过环境变量扩展至 12 条，以便模型有足够候选找到不同物流题材。
+DEFAULT_CHANNEL_VIDEO_LIMIT = 8
+MAX_CHANNEL_VIDEO_LIMIT = 24
+# 每频道每轮默认读取最近 8 条（仅元数据，不下载），保证漏斗顶端有足够候选；
+# 管理员批量验收可通过环境变量扩展至 24 条，以便模型有足够候选找到不同物流题材。
 try:
-    CHANNEL_VIDEO_LIMIT = max(1, min(12, int(os.environ.get("HOTSPOT_YOUTUBE_CHANNEL_VIDEO_LIMIT", DEFAULT_CHANNEL_VIDEO_LIMIT))))
+    CHANNEL_VIDEO_LIMIT = max(1, min(MAX_CHANNEL_VIDEO_LIMIT, int(os.environ.get("HOTSPOT_YOUTUBE_CHANNEL_VIDEO_LIMIT", DEFAULT_CHANNEL_VIDEO_LIMIT))))
 except ValueError:
     CHANNEL_VIDEO_LIMIT = DEFAULT_CHANNEL_VIDEO_LIMIT
+
+
+def configured_channels() -> list[dict]:
+    """返回当前生效的 YouTube 频道信源。
+
+    支持环境变量 ``SA_HOTSPOT_VIDEO_CHANNELS_JSON``（形如
+    ``[{"name": "eNCA", "url": "https://www.youtube.com/@..."}]``）完全覆盖默认
+    清单，语义与 ``SA_HOTSPOT_FEEDS_JSON`` 一致；未配置或配置非法时回落到
+    ``DEFAULT_YOUTUBE_CHANNELS``。仅接受 HTTPS 的 youtube.com 频道地址。
+    """
+    raw = os.environ.get("SA_HOTSPOT_VIDEO_CHANNELS_JSON", "")
+    if raw.strip():
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            items = []
+        channels = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            url = str(item.get("url") or "").strip().rstrip("/")
+            if not name or not url:
+                continue
+            if not (url.startswith("https://www.youtube.com/") or url.startswith("https://youtube.com/")):
+                continue
+            channels.append({"name": name[:100], "url": url})
+        if channels:
+            return channels
+    return [dict(item) for item in DEFAULT_YOUTUBE_CHANNELS]
 # 三天全量 Hook 任务会逐条读取当前资讯库的单视频事实；上限只防止异常数据库
 # 无限增长，不再把正常候选压缩为二十多条。
 INTAKE_METADATA_LIMIT = 500
@@ -71,7 +105,7 @@ def _command(channel_url: str, limit: int) -> list[str]:
         "--dump-single-json",
         "--no-warnings",
     ]
-    proxy = str(os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
+    proxy = str(os.environ.get("SA_HOTSPOT_PROXY") or os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
     if proxy:
         command.extend(["--proxy", proxy])
     command.append(channel_url.rstrip("/") + "/videos")
@@ -91,7 +125,7 @@ def _metadata_command(video_url: str) -> list[str]:
         "--socket-timeout",
         "20",
     ]
-    proxy = str(os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
+    proxy = str(os.environ.get("SA_HOTSPOT_PROXY") or os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
     if proxy:
         command.extend(["--proxy", proxy])
     command.append(video_url)
@@ -205,9 +239,9 @@ def fetch_youtube_channel_hotspots(
     runner: Callable = subprocess.run,
     limit: int | None = None,
 ) -> dict:
-    channels = list(channels or DEFAULT_YOUTUBE_CHANNELS)
+    channels = list(channels or configured_channels())
     requested_limit = CHANNEL_VIDEO_LIMIT if limit is None else limit
-    effective_limit = max(1, min(int(requested_limit), 12))
+    effective_limit = max(1, min(int(requested_limit), MAX_CHANNEL_VIDEO_LIMIT))
     result = {
         "channels": len(channels),
         "new": 0,

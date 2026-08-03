@@ -146,7 +146,7 @@ async def list_huimei_accounts() -> dict:
 async def dispatch(
     platform: str, title: str, content: str,
     tags: list[str] = None, images: list[str] = None,
-    video: str = None, account: dict = None,
+    video: str = None, account: dict = None, owner_id: int | None = None,
 ) -> dict:
     """统一发布入口：查适配器注册表并分发。返回与旧接口兼容的 dict。"""
     from adapters import get_adapter  # 延迟导入避免循环
@@ -158,7 +158,7 @@ async def dispatch(
     if account is None:
         # 选取凭据完整的账号：优先 active，其次任何有有效凭据的账号。
         # 不因 status=='expired' 直接排除——该状态可能被上次探测误标，真实有效性由发布时判断。
-        ready_accounts = [a for a in db.get_accounts(platform)
+        ready_accounts = [a for a in db.get_accounts(platform, owner_id=owner_id)
                           if publish_readiness.readiness(platform, a.get("credentials"))["ready"]]
         account = next((a for a in ready_accounts if a.get("status") == "active"),
                        ready_accounts[0] if ready_accounts else None)

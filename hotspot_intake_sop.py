@@ -7,10 +7,10 @@ of the hotspot admission policy.
 """
 from __future__ import annotations
 
-import re
 from typing import Iterable
 
 import database as db
+import hotspot_lexicon
 
 
 SOP_ID = "buffalo-hotspot-hook-intake"
@@ -19,19 +19,9 @@ MAX_EVIDENCE_PER_CANDIDATE = 3
 MAX_EVIDENCE_CHARS = 360
 
 _PREFERRED_CATEGORIES = {"产品资料", "公司介绍", "成功案例", "品牌规范"}
-_STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "south", "africa",
-    "关于", "导致", "当地", "新闻", "热点", "物流", "公司", "服务", "事件",
-}
-_RETRIEVAL_ALIASES = (
-    ("warehouse", "仓库", "仓储", "海外仓", "入库", "出库"),
-    ("parcel", "package", "包裹", "分拣", "检查"),
-    ("loading", "装卸", "装车", "拖车", "货车"),
-    ("delivery", "last mile", "配送", "末端", "派送"),
-    ("cross border", "border", "跨境", "口岸", "入境"),
-    ("customs", "clearance", "清关", "报关", "税务"),
-    ("port", "harbour", "港口", "码头", "船期"),
-)
+# Back-compat aliases for any external imports of the previous private constants.
+_STOPWORDS = set(hotspot_lexicon.STOPWORDS)
+_RETRIEVAL_ALIASES = hotspot_lexicon.RETRIEVAL_ALIAS_GROUPS
 
 
 def policy_contract() -> dict:
@@ -56,15 +46,7 @@ def policy_contract() -> dict:
 
 
 def _terms(text: str) -> set[str]:
-    normalized = str(text or "").casefold()
-    words = set(re.findall(r"[a-z0-9]{3,}", normalized))
-    chinese = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
-    for width in (2, 3, 4):
-        words.update(chinese[index:index + width] for index in range(max(0, len(chinese) - width + 1)))
-    for aliases in _RETRIEVAL_ALIASES:
-        if any(alias in normalized for alias in aliases):
-            words.update(aliases)
-    return {word for word in words if word not in _STOPWORDS}
+    return hotspot_lexicon.extract_terms(text)
 
 
 def _knowledge_evidence() -> list[dict]:

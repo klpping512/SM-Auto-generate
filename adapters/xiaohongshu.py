@@ -34,6 +34,14 @@ class XiaohongshuAdapter(RpaAdapter):
         if not images:
             return PublishResult(success=False, platform=self.name,
                                  error="小红书必须配图，images 不能为空")
+        # 在启动发布浏览器前先验证登录态，避免把 Cookie 或浏览器安装问题
+        # 直接暴露为底层 Playwright 异常。
+        if not await self.check_login(account):
+            return PublishResult(
+                success=False,
+                platform=self.name,
+                error="cookie/登录失效或浏览器未就绪，请到「账号管理」重新扫码登录小红书后再发布",
+            )
 
         body = content
         if tags:
@@ -89,7 +97,7 @@ class XiaohongshuAdapter(RpaAdapter):
             logger.exception("小红书发布异常")
             return PublishResult(success=False, platform=self.name, error=str(e))
 
-    async def fill_publish_form(self, page, *, title, content, tags=None, images=None):
+    async def fill_publish_form(self, page, *, title, content, tags=None, images=None, video=None):
         """打开发布页并自动填好（标题/正文/图片/话题），但**不点发布**，供人工复核后手动发布。
         话题用逐字输入 + 回车选中，触发小红书话题识别，生成真正的蓝色话题。异常直接抛出。"""
         await page.goto(self.publish_url, timeout=30000, wait_until="domcontentloaded")

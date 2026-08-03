@@ -4,6 +4,7 @@ import os
 import logging
 import secrets
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable
 
 import jwt
@@ -14,7 +15,27 @@ from models import UserRole
 
 logger = logging.getLogger(__name__)
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "sa-logiflow-secret-key-change-in-production")
+
+def _load_or_create_jwt_secret() -> str:
+    """优先用环境变量；否则读取/生成一份本机持久化的随机密钥。
+
+    不用固定字符串兜底：源码里写死的默认密钥等于公开发布签名密钥，
+    任何读到代码的人都能伪造登录 token。
+    """
+    env_secret = os.environ.get("JWT_SECRET")
+    if env_secret:
+        return env_secret
+    secret_path = Path(__file__).parent / "data" / ".jwt_secret"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    if secret_path.exists():
+        return secret_path.read_text().strip()
+    generated = secrets.token_hex(32)
+    secret_path.write_text(generated)
+    secret_path.chmod(0o600)
+    return generated
+
+
+JWT_SECRET = _load_or_create_jwt_secret()
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 8
 

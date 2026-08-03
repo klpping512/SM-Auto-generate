@@ -166,7 +166,7 @@ def select_for_hook_ingestion(
     media_rows: Iterable[dict],
     hotspots_by_id: dict[int, dict],
     *,
-    maximum: int = 4,
+    maximum: int = 8,
     targeted_requests: Iterable[dict] = (),
 ) -> tuple[list[dict], dict]:
     """仅由内置模型选出可下载的热点母片；没有模型则返回空集。"""
@@ -175,10 +175,10 @@ def select_for_hook_ingestion(
         return [], {"status": "no_candidates", "reason": "没有待入库的授权长视频"}
     if not model_router.key_is_available("planner_text") or not model_router.key_is_available("critic"):
         return [], {"status": "model_unavailable", "reason": "内置热点入库模型未配置，本轮不下载"}
-    maximum = max(1, min(int(maximum), 12))
+    maximum = max(1, min(int(maximum), 24))
     base_candidates = [
         _candidate(row, hotspots_by_id.get(int(row.get("hotspot_id") or 0), {}))
-        for row in rows[:24]
+        for row in rows[:48]
     ]
     candidates, sop_meta = hotspot_intake_sop.enrich_candidates(base_candidates)
     if not candidates:

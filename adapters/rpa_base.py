@@ -36,7 +36,26 @@ def playwright_proxy_from_env(environ: dict | None = None) -> dict | None:
 
 
 def browser_launch_options(*, headless: bool, use_proxy: bool = True) -> dict:
-    options = {"headless": headless}
+    options = {
+        "headless": headless,
+        "args": [
+            # 反检测
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            # GPU + 视频解码（解决抖音/小红书视频预览黑屏）
+            "--enable-gpu",
+            "--ignore-gpu-blocklist",
+            "--enable-gpu-rasterization",
+            "--enable-zero-copy",
+            "--enable-hardware-overlays",
+            "--enable-features=VaapiVideoDecoder,VaapiVideoEncoder",
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-webgl",
+            "--autoplay-policy=no-user-gesture-required",
+        ],
+    }
     # 国内站点（小红书/抖音）必须直连；若走 Clash 等国外代理会被掐断（ERR_CONNECTION_CLOSED）。
     if use_proxy:
         proxy = playwright_proxy_from_env()
@@ -69,7 +88,18 @@ class RpaAdapter(PublishAdapter):
 
     async def _new_context(self, playwright, account: dict | None):
         browser = await playwright.chromium.launch(**browser_launch_options(headless=self.headless, use_proxy=self.use_proxy))
-        context = await browser.new_context()
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            locale="zh-CN",
+        )
+        # 隐藏 webdriver 标记，绕过抖音反爬检测
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+            window.chrome = {runtime: {}};
+        """)
         cookies = parse_cookies((account or {}).get("credentials"))
         if cookies:
             await context.add_cookies(cookies)

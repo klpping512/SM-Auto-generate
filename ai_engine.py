@@ -1,4 +1,4 @@
-"""AI content generation using Xiaomi MiMo V2.5."""
+"""AI content generation using Alibaba Cloud Model Studio Qwen."""
 import asyncio
 import httpx
 import json
@@ -6,6 +6,7 @@ import logging
 import re
 from models import Platform, GeneratedContent
 from topic_library import PLATFORM_PROMPTS
+import douyin_copywriting_sop
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +79,15 @@ def _format_asset_catalog(assets: list[dict]) -> str:
             lines.append(f"[{cat}/{cat_names.get(cat, cat)}] " + " | ".join(groups[cat]))
     return "\n".join(lines)
 
-# MiMo API config
-MIMO_API_KEY = ""
-MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-MIMO_MODEL = "mimo-v2.5"
+# 百炼文本模型（OpenAI 兼容接口）。
+DASHSCOPE_API_KEY = ""
+QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen-plus"
 
 
 def set_api_key(key: str):
-    global MIMO_API_KEY
-    MIMO_API_KEY = key
+    global DASHSCOPE_API_KEY
+    DASHSCOPE_API_KEY = key
 
 
 async def generate_content(
@@ -135,7 +136,7 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
 - 最后 1 个场景可以是品牌信息卡（asset_id=null）
 - 每个场景选择最匹配画面描述的素材，同一素材不能重复使用
 - visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言
-""" + category_hint + "\n" + _format_asset_catalog(assets or [])
+""" + "\n" + douyin_copywriting_sop.prompt_for_chat_douyin() + category_hint + "\n" + _format_asset_catalog(assets or [])
         user_prompt = f"""请为以下物流主题生成{platform.value}平台的内容：
 
 主题：{topic}
@@ -162,19 +163,19 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"{MIMO_BASE_URL}/chat/completions",
+                    f"{QWEN_BASE_URL}/chat/completions",
                     headers={
-                        "api-key": MIMO_API_KEY,
+                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": MIMO_MODEL,
+                        "model": QWEN_MODEL,
                         "messages": [
                             {"role": "system", "content": prompt_config["system"]},
                             {"role": "user", "content": user_prompt},
                         ],
                         "temperature": 0.7,
-                        "max_completion_tokens": prompt_config["max_len"],
+                        "max_tokens": prompt_config["max_len"],
                         "response_format": {"type": "json_object"},
                     },
                 )
@@ -251,6 +252,54 @@ UNSUPPORTED_ATTRIBUTION_PATTERN = re.compile(
     r"(?:官方数据(?:显示|表明)|数据显示|行业报告(?:显示|指出)|根据[^。.!?]{0,20}(?:报告|数据)|according to [^.!?]{0,30}(?:report|data))",
     re.I,
 )
+UNSUPPORTED_OPERATIONAL_CLAIM_PATTERN = re.compile(
+    r"(?:"
+    r"不影响(?:整体)?(?:交期|时效)(?:承诺)?|交期承诺|时效承诺|"
+    r"(?:本地清关|自营海外仓|自营仓|自有仓)(?:团队|服务|双(?:链路|保障))?|"
+    r"(?:已|会)?优先(?:安排|调用|发运|处理)|(?:已|会)?实时(?:同步|监控|跟进)|"
+    r"(?:我(?:们)?|本地|南非).{0,8}(?:仓|仓库).{0,18}(?:提前)?(?:布局|运营|投入|启用|落地)|"
+    r"(?:货物|订单|包裹).{0,16}优先(?:入仓|分拣|备货|处理|出库)|"
+    r"(?:最大限度|有效).{0,16}(?:缓冲|降低|避免)(?:通关|延误|波动)|"
+    r"(?:点击|欢迎).{0,16}(?:咨询|联系).{0,16}(?:实时)?(?:查|查询)(?:进度|状态)|"
+    r"(?:海外仓|本地仓|自有仓|自营仓).{0,24}(?:备案|预审|成熟|协同|响应|合规)|"
+    r"(?:清关文件|单证).{0,16}(?:预审|预检|预处理)|(?:本地(?:合作)?报关行|本地化协同)(?:能力|机制|服务)?|"
+    r"专人(?:同步|跟进|对接)|(?:实时)(?:合规|进展|状态|提醒)|"
+    r"(?:查单|评估时效).{0,20}(?:专人|我们|同步|跟进)|"
+    r"(?:调取|查询|获取|核查).{0,16}(?:运单|订单).{0,12}(?:通关)?(?:最新|实时)?(?:状态|进度)|"
+    r"(?:联动|同步).{0,16}(?:南非)?(?:本地)?(?:合作方|合作伙伴)|"
+    r"(?:马上|立刻|优先).{0,18}(?:为您|帮你|帮您).{0,18}(?:核查|查询|查).{0,12}(?:进度|状态|运单)|"
+    r"(?:私信|留言|发送).{0,16}(?:运单号|单号).{0,24}(?:协助|帮(?:您|你)?|为您)?(?:核查|核对|查询|查|盯).{0,12}(?:进度|状态)?|"
+    r"(?:点击|进入).{0,16}(?:主页|咨询).{0,24}(?:订单|实时).{0,16}(?:节点|进度|状态|解读)|"
+    r"订单.{0,16}(?:实时|动态).{0,16}(?:节点|进度|状态|解读|预判)|"
+    r"(?:快速|帮(?:您|你)?|我们).{0,20}(?:定位|查询|核对|同步).{0,12}(?:当前)?(?:订单|运单|货物).{0,16}(?:在途)?(?:节点|进度|状态)|"
+    r"(?:评论区|私信|留言).{0,24}(?:查节点|查单|查进度|查状态|定位订单)|"
+    r"(?:承运商|物流商).{0,18}(?:系统|平台).{0,18}(?:在途)?(?:节点|进度|状态)|"
+    r"(?:官网|平台).{0,12}(?:实时)?(?:路况|交通状态).{0,12}(?:更新|同步|查询)|"
+    r"(?:实时|最新).{0,24}(?:路况|交通|封控|道路|节点|状态|数据|公告)|"
+    r"(?:交管(?:局)?|道路局|交通部|国家道路局|当地电台|GPS).{0,30}(?:官网|状态页|公告|数据|同步|封控)|"
+    r"(?:评论区|私信|留言).{0,30}(?:清单|模板|查询|核查|节点|状态|进度)|"
+    r"(?:每隔|出发前).{0,12}(?:\d+|一刻钟|几分钟).{0,12}(?:查看|刷新|核对|查询)|"
+    r"全程(?:可追踪|可查|透明|操作可追溯)|不等不拖|绝不让(?:您|你)?(?:被动)?等待|"
+    r"保障(?:交付|时效|连续性)|保证(?:到货|交期|时效)|(?:已经|已).{0,20}(?:正式)?(?:启用|落地)|"
+    r"全链路支持|库存(?:实时)?可视|"
+    r"(?:超)?千平米|(?:48|24)小时(?:内)?|专人对接|"
+    r"(?:一件代发|FBA中转|退(?:换)?货(?:处理|回检)|本地收货|全流程?标准化作业|"
+    r"(?:货物|订单|包裹).{0,16}(?:完成|进行)(?:清关|质检|贴标|上架|出库)|"
+    r"清关[→＞>\-].{0,24}(?:质检|贴标|上架|出库)|(?:稳|保)交付|可(?:控|查|视|追溯))"
+    r")",
+    re.I,
+)
+
+
+def _brand_evidence_allowlist_text(brand_evidence: list[dict] | None) -> str:
+    parts = []
+    for item in brand_evidence or []:
+        status = str(item.get("status") or "confirmed").strip().casefold()
+        if status and status != "confirmed":
+            continue
+        parts.append(str(item.get("claim") or ""))
+        parts.append(str(item.get("evidence_note") or ""))
+    return " ".join(parts)
 
 
 def _unsupported_claim_warnings(body: str, source_text: str) -> list[str]:
@@ -260,6 +309,52 @@ def _unsupported_claim_warnings(body: str, source_text: str) -> list[str]:
     if UNSUPPORTED_ATTRIBUTION_PATTERN.search(body) and not UNSUPPORTED_ATTRIBUTION_PATTERN.search(source_text):
         warnings.append("输入中未提供来源的报告或官方数据归因")
     return warnings
+
+
+def _unsupported_operational_claim_warnings(
+    body: str,
+    brand_evidence: list[dict] | None = None,
+) -> list[str]:
+    """Reject hard service promises; allow confirmed brand-evidence capability text."""
+    matches = list(dict.fromkeys(match.group(0) for match in UNSUPPORTED_OPERATIONAL_CLAIM_PATTERN.finditer(body)))
+    allowlist = _brand_evidence_allowlist_text(brand_evidence)
+    if allowlist:
+        matches = [item for item in matches if item not in allowlist]
+    return [f"未经证据支持的服务能力或交付承诺：{'、'.join(matches)}"] if matches else []
+
+
+def _conservative_chat_body(topic: str) -> str:
+    """A user-facing fallback when the model keeps inventing service facts."""
+    return (
+        f"围绕「{topic or '南非仓配'}」，先把现场能确认的情况和订单当前节点分开说清楚。"
+        "承运方尚未确认的信息，不把它写成路线调整或交期结论。"
+        "系统会在两段相关热点 Hook 完成下载、分析与事实核验后，再生成正式视频。"
+    )
+
+
+def _conservative_chat_subject(topic: str, messages: list[dict] | None = None) -> str:
+    """Return a neutral user-intent label, never a model-invented headline."""
+    raw = " ".join(str(topic or "").split())
+    if not raw:
+        for message in reversed(messages or []):
+            if str(message.get("role") or "") == "user":
+                raw = " ".join(str(message.get("content") or "").split())
+                if raw:
+                    break
+    lowered = raw.casefold()
+    if "swartberg" in lowered or "r328" in lowered:
+        return "Swartberg Pass 路况提醒"
+    if "beitbridge" in lowered or "贝特布里奇" in raw:
+        return "Beitbridge 物流提醒"
+    if "德班" in raw and "港" in raw:
+        return "德班港物流提醒"
+    # A concrete disruption stays the topic even when the user also mentions
+    # an overseas warehouse.  The latter is normally the affected node, not
+    # the video subject the user asked us to explain.
+    if "海外仓" in raw and ("南非" in raw or "south africa" in lowered):
+        return "南非海外仓介绍"
+    first_clause = re.split(r"[。！？\n]", raw, maxsplit=1)[0].strip()
+    return first_clause[:36] or "南非物流信息"
 
 
 def _platform_format_warnings(platform: str, body: str) -> list[str]:
@@ -286,12 +381,105 @@ def _normalize_douyin_scenes(value, topic: str, allowed_asset_ids: set[int] | No
         scenes.append({"scene": index + 1, "duration": duration, "visual": str(item.get("visual") or "品牌信息卡")[:80], "voiceover": str(item.get("voiceover") or "")[:180], "text_overlay": str(item.get("text_overlay") or item.get("voiceover") or "")[:48], "asset_id": asset_id})
     if 4 <= len(scenes) <= 6: return scenes
     return [
-        {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"做南非物流的注意了，{topic}值得马上关注。", "text_overlay": "南非物流提醒", "asset_id": None},
-        {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "第一，及时核对最新船期与节点状态。", "text_overlay": "核对最新动态", "asset_id": None},
-        {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "第二，提前检查资料，避免关键环节临时返工。", "text_overlay": "提前检查资料", "asset_id": None},
-        {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "第三，为运输节点预留缓冲，并及时同步客户。", "text_overlay": "预留运输缓冲", "asset_id": None},
-        {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "关注 Buffalo，持续获取真实可执行的南非物流建议。", "text_overlay": "关注南非物流动态", "asset_id": None},
+        {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"刚做南非物流？{topic}，先看清这个节点。", "text_overlay": "先看这个节点", "asset_id": None},
+        {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "先把订单节点和最新消息对一遍。", "text_overlay": "先核对订单节点", "asset_id": None},
+        {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "资料提前看一遍，后面少一点临时返工。", "text_overlay": "资料提前核对", "asset_id": None},
+        {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "路线怎么排，先按实际订单信息来判断。", "text_overlay": "按订单信息判断", "asset_id": None},
+        {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "南非物流怎么安排？先把信息理清楚。", "text_overlay": "先把信息理清楚", "asset_id": None},
     ]
+
+
+def _conservative_douyin_scenes(
+    scenes: list[dict], force_all: bool = False, topic: str = "",
+) -> list[dict]:
+    """Keep chat-preview scenes from making an unsupported operational promise.
+
+    The formal dual-library planner receives the original user request and
+    verified Hook evidence separately.  These chat-preview scenes are not
+    allowed to manufacture capabilities while that formal evidence chain is
+    still being prepared.
+    """
+    safe_scenes = []
+    safe_topic = _conservative_chat_subject(topic) if topic.strip() else ""
+    tailored_lines = (
+        ("热点现场", f"{safe_topic}，先看现场能确认的情况。", "先看现场"),
+        ("订单信息核对", "先把订单当前节点和已知安排对一遍。", "先核对订单节点"),
+        ("运输准备画面", "路线要不要调整，先以承运方确认的信息为准。", "以确认信息为准"),
+        ("客户沟通画面", "客户沟通时，把已确认和待确认的部分分开说清楚。", "已确认与待确认分开说"),
+        ("仓储作业现场", "信息核对清楚后，再安排下一步。", "核对后再安排"),
+        ("品牌信息卡", "做南非物流，先把信息理清楚。", "先把信息理清楚"),
+    )
+    for index, scene in enumerate(scenes):
+        item = dict(scene)
+        text = " ".join(str(item.get(key) or "") for key in ("visual", "voiceover", "text_overlay"))
+        if force_all and safe_topic:
+            if index == len(scenes) - 1 and len(scenes) < len(tailored_lines):
+                item.update({
+                    "visual": "品牌信息卡",
+                    "voiceover": "做南非物流，先把信息核实清楚。",
+                    "text_overlay": "信息以核实为准",
+                })
+            else:
+                visual, voiceover, overlay = tailored_lines[min(index, len(tailored_lines) - 1)]
+                item.update({"visual": visual, "voiceover": voiceover, "text_overlay": overlay})
+        elif force_all and index == len(scenes) - 1:
+            item["visual"] = "品牌信息卡"
+            item["voiceover"] = "SA-LogiFlow，持续关注南非物流信息。"
+            item["text_overlay"] = "信息以核实为准"
+        elif force_all or _unsupported_operational_claim_warnings(text):
+            item["visual"] = "仓储作业现场"
+            item["voiceover"] = "请以订单节点和已确认的通关信息为准，提前核对入库与派送安排。"
+            item["text_overlay"] = "以订单节点为准"
+        safe_scenes.append(item)
+    return safe_scenes
+
+
+def _safe_chat_fallback(platform: str, topic: str, messages: list[dict] | None = None) -> dict:
+    """Return an editable but non-promissory chat result when the model is unavailable."""
+    subject = _conservative_chat_subject(topic, messages)
+    lead = {
+        "xiaohongshu": "先把信息核实清楚：",
+        "douyin": "物流提醒：",
+        "twitter": "Update: ",
+        "facebook": "提醒：",
+        "reddit": "Context first: ",
+    }.get(platform, "提醒：")
+    body = lead + _conservative_chat_body(subject)
+    scenes = []
+    if platform == "douyin":
+        scenes = _conservative_douyin_scenes(
+            _normalize_douyin_scenes([], subject, set()), force_all=True, topic=subject,
+        )
+    return {
+        "platform": platform,
+        "title": f"{subject}｜信息待核实",
+        "body": body,
+        "hashtags": ["南非物流", "信息核实"],
+        "image_pages": [],
+        "duration_target": 30 if platform == "douyin" else None,
+        "scenes": scenes,
+        "music_suggestion": "",
+        "content": body,
+        "quality_warnings": ["AI 服务暂不可用，已切换为无服务承诺的可编辑提示"],
+        "source": "safe_fallback",
+    }
+
+
+def _safe_douyin_generated_content(topic: str) -> GeneratedContent:
+    """Keep the non-chat generation endpoint on the same Douyin SOP fallback."""
+    subject = _conservative_chat_subject(topic)
+    scenes = _conservative_douyin_scenes(
+        _normalize_douyin_scenes([], subject, set()), force_all=True, topic=subject,
+    )
+    return GeneratedContent(
+        platform=Platform.DOUYIN,
+        title=f"{subject}｜先核实再安排",
+        body="物流提醒：" + _conservative_chat_body(subject),
+        hashtags=["南非物流", "信息核实"],
+        duration_target=30,
+        scenes=scenes,
+        music_suggestion="稳健、克制的商务节奏",
+    )
 
 
 def _fallback_content(platform: Platform, topic: str, category: str) -> GeneratedContent:
@@ -315,23 +503,7 @@ def _fallback_content(platform: Platform, topic: str, category: str) -> Generate
                 {"type": "content", "headline": "收藏这份提醒", "points": ["持续关注南非物流动态", "有具体问题欢迎留言交流"]},
             ],
         ),
-        Platform.DOUYIN: GeneratedContent(
-            platform=platform,
-            title=f"{topic}｜60秒物流提醒",
-            body=f"做南非市场的朋友注意了！{topic}正在悄悄影响你的货运时效。"
-                 f"想让库存转得快、清关不卡壳，建议马上做三件事：确认最新船期、预留缓冲时间、提前同步客户。"
-                 f"头程、清关、仓储、末端派送，一个靠谱的海外仓帮你全链路搞定。关注我们，获取真实可执行的南非物流建议～",
-            hashtags=["南非物流", "跨境电商", "物流避坑"],
-            duration_target=30,
-            scenes=[
-                {"scene": 1, "duration": 4, "visual": "港口或集装箱开场", "voiceover": f"做南非物流的注意了，{topic}值得马上关注。", "text_overlay": "南非物流提醒", "asset_id": None},
-                {"scene": 2, "duration": 6, "visual": "仓库作业或货物画面", "voiceover": "第一，及时核对最新船期与港口状态。", "text_overlay": "核对最新动态", "asset_id": None},
-                {"scene": 3, "duration": 6, "visual": "员工操作或文件画面", "voiceover": "第二，提前检查资料，避免关键环节临时返工。", "text_overlay": "提前检查资料", "asset_id": None},
-                {"scene": 4, "duration": 7, "visual": "卡车配送或路线画面", "voiceover": "第三，为运输节点预留缓冲，并及时同步客户。", "text_overlay": "预留运输缓冲", "asset_id": None},
-                {"scene": 5, "duration": 7, "visual": "品牌结尾信息卡", "voiceover": "关注 Buffalo，持续获取真实可执行的南非物流建议。", "text_overlay": "关注南非物流动态", "asset_id": None},
-            ],
-            music_suggestion="稳健、有节奏的商务电子乐",
-        ),
+        Platform.DOUYIN: _safe_douyin_generated_content(topic),
         Platform.FACEBOOK: GeneratedContent(
             platform=platform,
             title=f"📢 {topic} - Latest Update",
@@ -383,6 +555,8 @@ SYSTEM_PROMPT_CHAT = (
     "你必须结合当前会话的全部历史消息理解上下文、承接上一版内容，并正确处理‘继续’、‘改短一点’、‘沿用刚才语气’等省略和指代；"
     "如果新要求与旧要求冲突，以用户最新一条消息为准。"
     "回复简洁、专业，直接给出可用文案，不要多余的解释开头。"
+    "不得把未提供证据的服务能力、当前处置、实时跟进、优先处理、自营团队、交期或时效保证写成既成事实；"
+    "这类信息只能改写为条件式的准备建议，例如‘请以订单节点和最新通关状态为准’。"
     "如果用户使用快捷指令，请按指令要求处理下方提供的编辑器内容。"
 )
 
@@ -453,36 +627,32 @@ async def _chat_one_platform(
         f"\n本轮偏好：语气={tone_map.get(tone, tone)}；长度={length_map.get(length, length)}。"
         + (f"\n主题：{topic}。" if topic else "")
         + f"\n语言要求：{language_rules.get(platform, '根据目标平台选择自然语言。')}"
-        + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
+        + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；也不得虚构 Buffalo 已启动应急方案、优先安排、实时跟进、自营团队、全程可追踪或不影响交期等服务承诺。用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
         + f"\n平台硬性格式：{config['format']}"
         + ("\n小红书还必须返回 image_pages 数组，共 5-7 页。每项格式为 {\"type\":\"cover或content\",\"headline\":\"不超过18字\",\"subheadline\":\"可选副标题\",\"points\":[\"2-4条具体短句，每条说明一个真实问题或行动\"]}。第一页是有冲击力的封面，内页信息具体，最后一页是建议或互动引导，避免空泛口号。" if platform == "xiaohongshu" else "")
         + ("\n抖音的 body 是面向观众的发布文案（种草文字，不要写【画面】【口播】标记）；分镜必须返回 4-6 个 scenes，总时长约30秒，每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id。**每个场景的 asset_id 必须从素材目录中选择一个真实 ID**，同一视频不能重复引用同一素材，最后1个场景可以是品牌信息卡（asset_id=null）。visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言。" if platform == "douyin" else "")
+        + (("\n" + douyin_copywriting_sop.prompt_for_chat_douyin()) if platform == "douyin" else "")
         + (("\n" + _get_category_priority_hint(topic or messages[-1]["content"][:40] if messages else "", "douyin", assets or []) + "\n" + _format_asset_catalog(assets or [])) if platform == "douyin" else "")
         + "\n请返回严格 JSON：{\"title\":\"标题\",\"body\":\"正文\",\"hashtags\":[\"标签\"],\"image_pages\":[],\"scenes\":[],\"music_suggestion\":\"\"}，不要输出 Markdown 代码块或解释。"
     )
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT_CHAT + "\n" + config["system"] + parameter_prompt}] + messages
 
-    if not MIMO_API_KEY:
-        seed = topic or (messages[-1]["content"] if messages else "南非跨境物流")
-        try:
-            fallback = _fallback_content(Platform(platform), seed, "")
-        except ValueError:
-            fallback = _fallback_content(Platform.FACEBOOK, seed, "")
-        return {"platform": platform, "title": fallback.title, "body": fallback.body, "hashtags": fallback.hashtags, "image_pages": fallback.image_pages, "duration_target": fallback.duration_target, "scenes": fallback.scenes, "music_suggestion": fallback.music_suggestion, "content": fallback.body}
+    if not DASHSCOPE_API_KEY:
+        return _safe_chat_fallback(platform, topic, messages)
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{MIMO_BASE_URL}/chat/completions",
+                f"{QWEN_BASE_URL}/chat/completions",
                 headers={
-                    "api-key": MIMO_API_KEY,
+                    "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": MIMO_MODEL,
+                    "model": QWEN_MODEL,
                     "messages": api_messages,
                     "temperature": 0.7,
-                    "max_completion_tokens": config["max_len"],
+                    "max_tokens": config["max_len"],
                     "response_format": {"type": "json_object"},
                 },
             )
@@ -494,25 +664,28 @@ async def _chat_one_platform(
             hashtags = _normalize_hashtags(parsed.get("hashtags"), body)
             source_text = " ".join(item.get("content", "") for item in messages) + " " + topic
             unsupported_claims = _unsupported_claim_warnings(body, source_text)
+            unsupported_operational_claims = _unsupported_operational_claim_warnings(body)
             needs_twitter_trim = platform == "twitter" and len(body) > 280
-            if unsupported_claims or needs_twitter_trim:
+            if unsupported_claims or unsupported_operational_claims or needs_twitter_trim:
                 constraints = ["Remove every unsupported numeric claim, vague time range, percentage, price, statistic, and unsupported attribution such as 'official data shows' or 'industry reports'. Keep numbered action-list labels, but make no claim whose source was not supplied by the user."]
+                if unsupported_operational_claims:
+                    constraints.append("Remove every unverified operational or delivery claim: do not state that Buffalo has already acted, provides a self-operated team or warehouse, prioritizes a shipment, tracks in real time, guarantees delivery, or that congestion will not affect lead time. Replace such statements with conditional planning guidance and ‘以订单节点和最新通关状态为准’." )
                 if platform == "twitter":
                     constraints.append("The body must be a standalone post that includes the warning context and actions; do not rely on the title. The body, including hashtags, MUST be 260 characters or fewer.")
                 repair_resp = await client.post(
-                    f"{MIMO_BASE_URL}/chat/completions",
+                    f"{QWEN_BASE_URL}/chat/completions",
                     headers={
-                        "api-key": MIMO_API_KEY,
+                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": MIMO_MODEL,
+                        "model": QWEN_MODEL,
                         "messages": [
                             {"role": "system", "content": f"You edit {platform_names.get(platform, platform)} posts. Return strict JSON with title, body, hashtags. Preserve this platform format exactly: {config['format']} Language: {language_rules.get(platform, '')} " + " ".join(constraints)},
                             {"role": "user", "content": f"Rewrite this draft while preserving its platform-native style and key actions:\n{body}"},
                         ],
                         "temperature": 0.3,
-                        "max_completion_tokens": 180 if platform == "twitter" else config["max_len"],
+                        "max_tokens": 180 if platform == "twitter" else config["max_len"],
                         "response_format": {"type": "json_object"},
                     },
                 )
@@ -525,19 +698,19 @@ async def _chat_one_platform(
                 raw = repaired_raw
             if _platform_format_warnings(platform, body):
                 format_resp = await client.post(
-                    f"{MIMO_BASE_URL}/chat/completions",
+                    f"{QWEN_BASE_URL}/chat/completions",
                     headers={
-                        "api-key": MIMO_API_KEY,
+                        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": MIMO_MODEL,
+                        "model": QWEN_MODEL,
                         "messages": [
                             {"role": "system", "content": f"Rewrite for {platform_names.get(platform, platform)}. Return strict JSON with title, body, hashtags. Mandatory format: {config['format']} Language: {language_rules.get(platform, '')} Do not add any unsupported real-time data, vague time ranges, statistics, or source attribution."},
                             {"role": "user", "content": body},
                         ],
                         "temperature": 0.3,
-                        "max_completion_tokens": config["max_len"],
+                        "max_tokens": config["max_len"],
                         "response_format": {"type": "json_object"},
                     },
                 )
@@ -550,21 +723,33 @@ async def _chat_one_platform(
                 raw = format_raw
             if platform == "twitter" and len(body) > 280:
                 body = _truncate_twitter_body(body)
+            # 提示词和一次模型重写仍无法保证模型放弃虚构的“已启用/可保证”
+            # 表述时，用可审计的产品事实兜底。不能把未经证据支持的文案继续
+            # 展示给用户，尤其不能让其出现在视频生成按钮旁。
+            scene_claim_text = " ".join(
+                str(scene.get(key) or "")
+                for scene in (parsed.get("scenes") or []) if isinstance(scene, dict)
+                for key in ("visual", "voiceover", "text_overlay")
+            )
+            # 标题、发布文案和预览分镜都在同一个用户可见卡片上；任一位置
+            # 出现没有证据的服务承诺，就整体降级为中性提示，不能只清洗 body。
+            use_safe_fallback = bool(_unsupported_operational_claim_warnings(
+                " ".join((title, body, scene_claim_text))
+            ))
+            if use_safe_fallback:
+                safe_subject = _conservative_chat_subject(topic, messages)
+                body = _conservative_chat_body(safe_subject)
+                title = f"{safe_subject}｜先核实再安排"
+                hashtags = ["南非物流", "信息核实"]
             quality_warnings = [f"仍包含{item}，请人工核实" for item in _unsupported_claim_warnings(body, source_text)]
+            quality_warnings.extend(
+                f"仍包含{item}，请人工核实" for item in _unsupported_operational_claim_warnings(body)
+            )
             quality_warnings.extend(_platform_format_warnings(platform, body))
-            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": 30 if platform == "douyin" else None, "scenes": _normalize_douyin_scenes(parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])}) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings}
+            normalized_scenes = _normalize_douyin_scenes(
+                parsed.get("scenes"), topic or title, {a["id"] for a in (assets or [])},
+            ) if platform == "douyin" else []
+            return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": 30 if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes, force_all=use_safe_fallback, topic=safe_subject if use_safe_fallback else "") if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings}
     except Exception as e:
         logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
-        seed = topic or (messages[-1].get("content", "") if messages else "南非物流")
-        try:
-            fallback = _fallback_content(Platform(platform), seed[:40], "")
-        except ValueError:
-            fallback = _fallback_content(Platform.FACEBOOK, seed[:40], "")
-        return {
-            "platform": platform, "title": fallback.title, "body": fallback.body,
-            "hashtags": fallback.hashtags, "image_pages": fallback.image_pages,
-            "duration_target": fallback.duration_target, "scenes": fallback.scenes,
-            "music_suggestion": fallback.music_suggestion, "content": fallback.body,
-            "quality_warnings": ["AI 服务暂不可用，当前为可编辑模板内容，请人工确认"],
-            "source": "fallback",
-        }
+        return _safe_chat_fallback(platform, topic, messages)

@@ -13,6 +13,7 @@ from typing import Iterable
 
 import model_router
 import hotspot_hook_selection_sop
+import hotspot_lexicon
 
 
 MIN_HOOK_MS = 4_000
@@ -20,15 +21,31 @@ MAX_HOOK_MS = 14_000
 MAX_HOOKS_PER_SOURCE = 3
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
-PROMPT_VERSION = "hotspot-hook-curation-v5"
+PROMPT_VERSION = "hotspot-hook-curation-v6"
 AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v3"
 
 
+def _derive_hook_keywords(fact_text: str) -> list[str]:
+    # Grounded only in what_happened/title_zh — never the model's invented
+    # logistics_question bridge sentence. Taxonomy lives in hotspot_lexicon.
+    keywords = sorted(hotspot_lexicon.category_profile(fact_text, mode="event"))
+    return keywords or ["hotspot"]
+
+
 def _compact_segment(segment: dict) -> dict:
+    raw_tags = segment.get("tags") or []
+    # composition 维度单独取出，不占用下面 tags[:3] 的展示名额——渲染层会把
+    # 每个镜头居中裁切成 9:16，只保留正中约三分之一宽度，这条信号直接影响
+    # 策展模型该不该选这段镜头，不能被其它标签挤掉。
+    edge_risk = next(
+        (str(tag.get("value") or "").replace("edge_risk_", "")
+         for tag in raw_tags if str(tag.get("dimension") or "") == "composition"),
+        "none",
+    )
     tags = [
         f"{str(tag.get('dimension') or '')[:16]}:{str(tag.get('value') or '')[:28]}"
-        for tag in (segment.get("tags") or [])
-        if str(tag.get("value") or "").strip()
+        for tag in raw_tags
+        if str(tag.get("value") or "").strip() and str(tag.get("dimension") or "") != "composition"
     ]
     description = str(segment.get("description") or "").strip()
     # asset_processing 会把母片标题拼到每段 description 开头；标题已经单独
@@ -46,6 +63,7 @@ def _compact_segment(segment: dict) -> dict:
         "transcript": str(segment.get("transcript") or "")[:60],
         "ocr": str(segment.get("ocr_text") or "")[:30],
         "tags": tags[:3],
+        "edge_risk": edge_risk,
     }
 
 
@@ -246,7 +264,7 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
             "title_en": title,
             "location": None,
             "entities": [],
-            "keywords": ["hook", "hotspot"],
+            "keywords": _derive_hook_keywords(f"{happened} {title}"),
             "confidence": round(confidence, 3),
             "review_status": "confirmed",
             "segments": selected,

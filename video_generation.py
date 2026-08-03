@@ -920,7 +920,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         render_task = asyncio.create_task(asyncio.to_thread(
             video_renderer.render_job, job["id"], static_dir,
             lambda: _new_job_cancel_requested(job["id"]), output_size, output_name,
-            "qwen", preview,
+            "mimo", preview,
         ))
         last_reported_progress = -1
         polls_since_renew = 0

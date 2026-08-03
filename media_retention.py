@@ -172,7 +172,17 @@ def run_cleanup(
     dry_run: bool = True,
     now: datetime | None = None,
 ) -> dict:
-    return _cleanup(static_dir=static_dir, dry_run=dry_run, now=now)
+    report = _cleanup(static_dir=static_dir, dry_run=dry_run, now=now)
+    if not dry_run:
+        try:
+            max_rows = max(100, int(os.environ.get("MODEL_CACHE_MAX_ROWS", "5000")))
+        except ValueError:
+            max_rows = 5_000
+        report["model_cache"] = db.cleanup_model_call_cache(
+            ttl_days=_retention_days("MODEL_CACHE_TTL_DAYS", 30),
+            max_rows=max_rows,
+        )
+    return report
 
 
 def cleanup_hotspot_hook_library(

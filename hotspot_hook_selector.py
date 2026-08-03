@@ -1,11 +1,10 @@
 """Deterministic Hook ranking for pre-analysed hotspot event clips."""
 from __future__ import annotations
 
+import hotspot_lexicon
 
-HOOK_TERMS = (
-    "traffic", "congestion", "screening", "road", "port", "strike", "storm", "flood",
-    "delivery", "warehouse", "customs", "拥堵", "交通", "道路", "港口", "罢工", "暴雨", "配送", "清关",
-)
+# Back-compat alias for imports/tests that still reference HOOK_TERMS.
+HOOK_TERMS = hotspot_lexicon.HOOK_SCORE_TERMS
 
 
 def _text(event: dict) -> str:
@@ -13,7 +12,7 @@ def _text(event: dict) -> str:
         str(event.get("title_zh") or ""), str(event.get("title_en") or ""),
         str(event.get("location") or ""), *[str(item) for item in (event.get("keywords") or [])],
         *[str(item) for item in (event.get("entities") or [])],
-    ]).casefold()
+    ])
 
 
 def rank_hook_clips(events: list[dict], *, limit: int = 3) -> list[dict]:
@@ -24,7 +23,7 @@ def rank_hook_clips(events: list[dict], *, limit: int = 3) -> list[dict]:
             continue
         duration_ms = max(0, int(event.get("end_ms") or 0) - int(event.get("start_ms") or 0))
         text = _text(event)
-        matched = [term for term in HOOK_TERMS if term.casefold() in text]
+        matched = hotspot_lexicon.match_hook_terms(text)
         score = min(40, len(matched) * 12)
         score += 25 if 5_000 <= duration_ms <= 12_000 else 15 if 3_000 <= duration_ms <= 20_000 else 5
         score += round(float(event.get("confidence") or 0) * 20)

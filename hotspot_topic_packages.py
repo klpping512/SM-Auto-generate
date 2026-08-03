@@ -6,21 +6,11 @@ import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
+import hotspot_lexicon
 
-LOGISTICS_TERMS = {
-    "strike": ("strike", "protest", "shutdown", "罢工", "抗议"),
-    "risk": ("crime", "hijacking", "security", "危险", "劫车"),
-    "infrastructure": ("port", "customs", "road", "warehouse", "港口", "清关"),
-    "ecommerce_growth": ("e-commerce", "takealot", "amazon", "temu", "电商"),
-}
-
-EVENT_RELEVANCE = {
-    "strike": 85.0,
-    "risk": 80.0,
-    "infrastructure": 95.0,
-    "ecommerce_growth": 75.0,
-    "unknown": 0.0,
-}
+# Back-compat aliases; canonical terms live in hotspot_lexicon.
+LOGISTICS_TERMS = hotspot_lexicon.EVENT_TYPES
+EVENT_RELEVANCE = hotspot_lexicon.EVENT_RELEVANCE
 HEAT_WEIGHTS = {
     "search_growth": 0.25,
     "local_coverage": 0.20,
@@ -87,15 +77,7 @@ def _entities(text: str) -> list[str]:
 
 def classify_event(text: str) -> tuple[str, float]:
     """Classify a signal and return its event type plus logistics relevance (0–100)."""
-    lower = _clean_text(text).casefold()
-    scores = {
-        event_type: sum(term.casefold() in lower for term in terms)
-        for event_type, terms in LOGISTICS_TERMS.items()
-    }
-    event_type, matches = max(scores.items(), key=lambda item: item[1])
-    if not matches:
-        return "unknown", EVENT_RELEVANCE["unknown"]
-    return event_type, EVENT_RELEVANCE[event_type]
+    return hotspot_lexicon.classify_event_type_with_relevance(_clean_text(text))
 
 
 def normalize_signal(raw: dict) -> dict:

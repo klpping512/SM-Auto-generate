@@ -6,6 +6,33 @@ import re
 import database as db
 
 
+def _norm(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _independent_excerpt(claim: str, hotspot: dict) -> str | None:
+    """Return a source excerpt that does not merely repeat the claim text."""
+    claim_n = _norm(claim)
+    if not claim_n:
+        return None
+    title = str(hotspot.get("title") or "").strip()
+    summary = str(hotspot.get("summary") or "").strip()
+    explicit = str(
+        hotspot.get("source_excerpt")
+        or hotspot.get("excerpt")
+        or hotspot.get("body_excerpt")
+        or ""
+    ).strip()
+    for candidate in (explicit, summary, title):
+        excerpt = str(candidate or "").strip()
+        if not excerpt:
+            continue
+        if _norm(excerpt) == claim_n:
+            continue
+        return excerpt[:1_000]
+    return None
+
+
 def _fact_claims(hotspot: dict) -> list[dict]:
     title = str(hotspot.get("title") or "").strip()
     summary = str(hotspot.get("summary") or "").strip()
@@ -15,15 +42,23 @@ def _fact_claims(hotspot: dict) -> list[dict]:
         for part in re.split(r"(?<=[。！？.!?])\s+|\n+", summary)
         if part.strip() and part.strip() != title
     )
-    common = {
-        "source_url": str(hotspot.get("source_url") or ""),
-        "source_title": title,
-        "publisher": str(hotspot.get("publisher") or ""),
-        "excerpt": summary or title,
-        "published_at": hotspot.get("published_at"),
-        "retrieved_at": hotspot.get("retrieved_at"),
-    }
-    return [{"claim": sentence[:1_000], **common} for sentence in sentences[:6] if sentence]
+    claims = []
+    for sentence in sentences[:6]:
+        if not sentence:
+            continue
+        excerpt = _independent_excerpt(sentence, hotspot)
+        if not excerpt:
+            continue
+        claims.append({
+            "claim": sentence[:1_000],
+            "source_url": str(hotspot.get("source_url") or ""),
+            "source_title": title,
+            "publisher": str(hotspot.get("publisher") or ""),
+            "excerpt": excerpt,
+            "published_at": hotspot.get("published_at"),
+            "retrieved_at": hotspot.get("retrieved_at"),
+        })
+    return claims
 
 
 def _confirmed_brand_claims(ids: list[int] | None) -> list[dict]:

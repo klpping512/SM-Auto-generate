@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from video_composition_policy import source_usage_report
 from video_duration_budget import rebalance_scenes_to_budget
+import hotspot_lexicon
 
 
 # 默认 8 个镜头为 60 秒；正式成片可按目标扩展至 90 秒。
@@ -70,16 +71,8 @@ NODE_CATEGORY_RULES = {
     "分拣": {"warehouse", "staff", "facility"},
 }
 
-NODE_TERMS = {
-    "清关": ("清关", "海关", "customs"),
-    "customs": ("清关", "海关", "customs"),
-    "末端": ("末端", "配送", "交付", "last mile", "last_mile", "delivery", "traffic", "congestion", "road", "screening", "拥堵", "道路"),
-    "last_mile": ("末端", "配送", "交付", "last mile", "last_mile", "delivery", "traffic", "congestion", "road", "screening", "拥堵", "道路"),
-    "配送": ("末端", "配送", "交付", "delivery", "traffic", "congestion", "road", "screening", "拥堵", "道路"),
-    "仓储": ("仓储", "仓库", "入库", "分拣", "warehouse"),
-    "入库": ("仓储", "仓库", "入库", "warehouse"),
-    "分拣": ("分拣", "仓库", "warehouse"),
-}
+# Back-compat alias; expansions live in hotspot_lexicon.NODE_EXPANSIONS.
+NODE_TERMS = hotspot_lexicon.NODE_EXPANSIONS
 
 
 def _event_text(event: dict) -> str:
@@ -95,29 +88,20 @@ def _event_score(event: dict, brief: dict) -> tuple[int, list[str]]:
         brief.get("hotspot_type"),
     ) if item)
     terms.update({str(item).casefold() for item in (brief.get("claim") or "").split() if len(str(item)) > 1})
-    type_terms = {
-        "risk": ("危险", "安全", "事故", "暴力", "治安", "道路"),
-        "strike": ("罢工", "停工", "抗议", "工会"),
-        "ecommerce_growth": ("电商", "订单", "增长", "配送", "仓储", "零售"),
-        "infrastructure": ("港口", "道路", "铁路", "拥堵", "基础设施", "traffic", "congestion", "screening"),
-        "weather": ("洪水", "暴雨", "风暴", "天气"),
-        "policy": ("政策", "法规", "投资", "政府"),
-    }
-    terms.update(type_terms.get(str(brief.get("hotspot_type") or ""), ()))
-    overlap = sum(1 for term in terms if term and term in text)
+    terms.update(hotspot_lexicon.EVENT_TYPES.get(str(brief.get("hotspot_type") or ""), ()))
+    overlap = sum(1 for term in terms if term and term.casefold() in text)
     # A custom brief is an explicit user intent.  A clip from the same source video
     # is not evidence of relevance by itself (for example, wildlife footage cannot
     # illustrate customs risk simply because it belongs to the selected hotspot).
     if brief.get("topic_brief_id"):
         custom_terms = []
         for value in brief.get("logistics_nodes") or []:
-            normalized = str(value).casefold()
-            custom_terms.extend(NODE_TERMS.get(normalized, (normalized,)))
+            custom_terms.extend(hotspot_lexicon.expand_node_terms(value))
         custom_terms.append(str(brief.get("logistics_topic") or "").casefold())
         # Do not count the hotspot title itself here: it merely identifies the
         # source, while custom terms establish whether this event can support
         # the user's requested logistics angle.
-        if not any(term and term in text for term in custom_terms):
+        if not any(term and term.casefold() in text for term in custom_terms):
             return 0, []
     same_source = bool(
         brief.get("source_asset_id") and int(event.get("asset_id") or 0) == int(brief["source_asset_id"])
@@ -467,6 +451,14 @@ def plan_followup_scenes(
         )
     selected_events = _limit_distinct_hotspot_hooks(selected_events)
     owned = _diversify_owned_candidates(_owned_candidates(owned_segments, brief))
+    # A candidate whose reviewed range is under 3s can never become a scene
+    # (see the >=3_000 check below). Dropping it here, before the owned_limit
+    # slice, lets a deep candidate pool backfill that slot with the next
+    # usable clip instead of silently losing a scene the library could have
+    # covered — this used to shrink a 60s plan to ~7 scenes of real footage
+    # whenever one of the first `owned_limit` diversified picks happened to
+    # be a too-short clip.
+    owned = [item for item in owned if _usable_source_duration_ms(item) >= 3_000]
     context_images = _owned_image_candidates(owned_images or [], brief)
     scenes = []
     target_duration_ms = max(50_000, min(90_000, int(target_duration_ms)))

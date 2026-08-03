@@ -397,7 +397,7 @@ def _merge_model_tags(tags: list[dict], model_tags: dict[str, list[str]] | None,
 
 
 def _visual_tag_dimensions(payload: dict) -> dict[str, list[str]]:
-    result = {"brand": [], "scene": [], "object": [], "action": []}
+    result = {"brand": [], "scene": [], "object": [], "action": [], "composition": []}
     mapping = {
         "brand_tags": "brand", "scene_tags": "scene", "object_tags": "object", "action_tags": "action",
     }
@@ -411,8 +411,13 @@ def _visual_tag_dimensions(payload: dict) -> dict[str, list[str]]:
             cleaned.append(MODEL_TAG_ALIASES.get(dimension, {}).get(text.casefold(), text))
         result[dimension] = list(dict.fromkeys(cleaned))[:6]
     # 兼容接入前的 tags 数组；不丢弃已缓存模型结果。
-    if not any(result.values()):
+    if not any(result[k] for k in ("brand", "scene", "object", "action")):
         result["object"] = [str(value).strip()[:80] for value in (payload.get("tags") or []) if str(value).strip()][:6]
+    # 只在有裁切风险时落一条 tag；none 不产生标签，保持数据干净，也让下游
+    # 策展证据里“没有标签”天然等同于“安全”，不用额外区分未标注和已确认安全。
+    edge_risk = str(payload.get("edge_risk") or "").strip().lower()
+    if edge_risk in {"left", "right", "both"}:
+        result["composition"] = [f"edge_risk_{edge_risk}"]
     return result
 
 
@@ -430,7 +435,12 @@ def _visual_analysis(job_id: str, image_path: Path, segment: dict) -> dict:
             "\"confidence\":0到1,\"description\":\"不超过40字中文画面描述\","
             "\"brand_tags\":[\"最多2个可见品牌；看不到则空数组\"],"
             "\"scene_tags\":[\"最多3个主场景标签\"],\"object_tags\":[\"最多6个可见对象\"],"
-            "\"action_tags\":[\"最多4个可见动作\"]}。主分类只表示主要场景："
+            "\"action_tags\":[\"最多4个可见动作\"],"
+            "\"edge_risk\":\"none|left|right|both\"}。渲染时画面会被居中放大裁切成 9:16 竖屏，"
+            "只保留画面正中约三分之一宽度，两侧会被切掉。edge_risk 表示关键可辨认信息"
+            "（文字、车牌、Logo、人脸等）是否落在会被切掉的左侧/右侧/两侧区域：都在正中安全区内"
+            "填 none；关键信息偏向左边缘填 left；偏右填 right；左右都有关键信息填 both。"
+            "主分类只表示主要场景："
             "仓库作业归 warehouse；道路/末端运输归 delivery；人物在仓库工作仍归 warehouse，人物放 object_tags；"
             "叉车/货架/传送带在仓库中仍归 warehouse，设备放 object_tags。品牌露出绝不改变主分类："
             "可见 Buffalo/Buffalo Logistics 标志时，brand_tags 填 Buffalo；看不清或未出现时必须留空，不能猜测。"

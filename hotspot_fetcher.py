@@ -21,11 +21,22 @@ import asset_processing
 import hotspot_media
 import hotspot_topic_packages
 import hotspot_video_sources
+import hotspot_lexicon
 
-KEYWORDS = re.compile(r"(?:\bsouth africa\b|南非|\bdurban\b|\bcape town\b|\bjohannesburg\b|\btransnet\b|\bport\b|\bharbour\b|\bcustoms\b|\blogistics\b|\bfreight\b|\bshipping\b|\bwarehouse\b)", re.I)
+# 线索层关键词：宽进严出。这里只决定"哪些新闻值得记一条线索"，
+# 下载与使用仍由授权门禁和内置模型事实核验把关；正则真相源在 hotspot_lexicon。
+KEYWORDS = hotspot_lexicon.FEED_FILTER_PATTERN
 ALLOWED_LICENSE_PREFIXES = ("CC BY", "CC0", "Public domain")
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 DEFAULT_VIDEO_CHANNELS = hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS
+# 允许同时启用的可信源上限：信源扩容后从 5 抬高到 12，
+# 抓取仍是每 6 小时一轮的低成本元数据采集。
+MAX_ENABLED_SOURCES = 12
+
+
+def configured_video_channels() -> list[dict]:
+    """当前生效的 YouTube 视频信源（env 覆盖，回落默认清单）。"""
+    return hotspot_video_sources.configured_channels()
 
 
 def configured_source_rights() -> tuple[str, str]:
@@ -65,11 +76,43 @@ DEFAULT_OFFICIAL_SOURCES = [
         "allowed_domains": ["resbank.co.za"],
         "purpose": "汇率、利率、支付与宏观金融背景",
     },
+    # 以下为主流商业/综合新闻媒体信源：线索层广采，配合 KEYWORDS 过滤出
+    # 物流相关条目；下载与使用仍走既有授权门禁。
+    {
+        "name": "Moneyweb",
+        "url": "https://www.moneyweb.co.za/feed/",
+        "allowed_domains": ["moneyweb.co.za"],
+        "purpose": "财经与企业新闻，覆盖 Transnet、港口、燃油与供应链成本",
+    },
+    {
+        "name": "BusinessTech",
+        "url": "https://businesstech.co.za/news/feed/",
+        "allowed_domains": ["businesstech.co.za"],
+        "purpose": "商业与民生新闻，覆盖电商、快递、道路与基础设施",
+    },
+    {
+        "name": "Daily Maverick",
+        "url": "https://www.dailymaverick.co.za/dmrss/",
+        "allowed_domains": ["dailymaverick.co.za"],
+        "purpose": "深度时事报道，覆盖港口拥堵、铁路与边境口岸事件",
+    },
+    {
+        "name": "The Citizen",
+        "url": "https://citizen.co.za/feed/",
+        "allowed_domains": ["citizen.co.za"],
+        "purpose": "综合新闻，覆盖罢工、封路、天气等履约影响事件",
+    },
+    {
+        "name": "The South African",
+        "url": "https://www.thesouthafrican.com/feed/",
+        "allowed_domains": ["thesouthafrican.com"],
+        "purpose": "综合新闻与民生话题，补充 C 端视角热点",
+    },
 ]
 
 
 def seed_default_sources(created_by: int | None = None) -> int:
-    """补齐官方信源；不覆盖管理员已有配置，启用总数始终不超过 5。"""
+    """补齐默认信源；不覆盖管理员已有配置，启用总数始终不超过 MAX_ENABLED_SOURCES。"""
     existing = db.list_hotspot_sources()
     legacy_stats_url = "https://www.statssa.gov.za/?feed=rss2"
     transport = next(source for source in DEFAULT_OFFICIAL_SOURCES if source["name"] == "Department of Transport")
@@ -90,7 +133,7 @@ def seed_default_sources(created_by: int | None = None) -> int:
     for source in DEFAULT_OFFICIAL_SOURCES:
         if source["url"] in existing_urls:
             continue
-        enabled = enabled_count < 5
+        enabled = enabled_count < MAX_ENABLED_SOURCES
         db.create_hotspot_source(
             source["name"],
             source["url"],
@@ -119,6 +162,20 @@ def configured_feeds() -> list[dict]:
 def _domain_allowed(url: str, allowed_domains: list[str]) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return any(host == domain.lower() or host.endswith("." + domain.lower()) for domain in allowed_domains)
+
+
+def _is_bot_challenge(exc: Exception) -> bool:
+    """判断异常是否为 Cloudflare 等反爬托管质询（需浏览器执行 JS，纯 HTTP 无法通过）。"""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    response = exc.response
+    if response is None or response.status_code not in (403, 429, 503):
+        return False
+    headers = response.headers
+    if "cf-mitigated" in headers:
+        return True
+    server = (headers.get("server") or "").lower()
+    return "cloudflare" in server
 
 
 def _text(node, tag: str) -> str:
@@ -189,7 +246,12 @@ async def fetch_hotspots(
     feeds = configured_feeds() if feeds is None else feeds
     result = {"feeds": len(feeds), "new": 0, "updated": 0, "assets": 0, "skipped": 0, "errors": [], "media_errors": [], "source_health": [], "packages": 0, "signals": 0, "media_candidates": 0}
     owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": "SA-LogiFlow/3.0 (+licensed-hotspot-collector)"})
+    if client is None:
+        _proxy = str(os.environ.get("SA_HOTSPOT_PROXY") or os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
+        _client_kwargs = {"timeout": 25, "follow_redirects": True, "headers": {"User-Agent": "SA-LogiFlow/3.0 (+licensed-hotspot-collector)"}}
+        if _proxy:
+            _client_kwargs["proxy"] = _proxy
+        client = httpx.AsyncClient(**_client_kwargs)
     try:
         for feed in feeds:
             allowed_domains = feed.get("allowed_domains") or [urlparse(feed["url"]).hostname]
@@ -325,8 +387,15 @@ async def fetch_hotspots(
                         })
             except Exception as exc:
                 error = str(exc)[:300]
-                health.update({"status": "error", "error": error})
-                result["errors"].append({"feed": feed.get("name", "unknown"), "error": error})
+                if _is_bot_challenge(exc):
+                    # 站点被 Cloudflare 等反爬托管质询拦截（需浏览器执行 JS），
+                    # 纯 HTTP 客户端无法通过。优雅降级：标记 blocked 并跳过，
+                    # 不计入硬错误，避免 source_health 每次刷红。
+                    health.update({"status": "blocked", "error": "反爬质询拦截（需浏览器），已跳过"})
+                    result["skipped"] += 1
+                else:
+                    health.update({"status": "error", "error": error})
+                    result["errors"].append({"feed": feed.get("name", "unknown"), "error": error})
             finally:
                 result["source_health"].append(health)
         if video_channels:
