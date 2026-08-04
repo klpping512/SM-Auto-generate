@@ -7,8 +7,10 @@
 
 | # | 指令 | 目标一句话 | 状态 | 备注 |
 |---|------|-----------|------|------|
-| 1 | [画面素材分类统一](画面素材分类统一-Cursor执行指令.md) | 把散在 5 处的画面素材分类词表收敛到单一 `asset_taxonomy.py`，修两份 `CATEGORY_KEYWORDS` 漂移 bug | 🟢待验收 | Cursor 已做阶段 A+B（commit `0cbd945`）。待总指挥核：`访谈/采访/文件/单据` 四噪词是否干净删除、并集词有无误删。**阶段 C**（`semantic_matching._tag_map.category_tags` 对齐 asset_taxonomy）尚未做 |
-| 2 | [P0 匹配诊断仪表盘](P0-匹配诊断仪表盘-Cursor执行指令.md) | 匹配不足时暴露"饿在哪一侧、死在哪道闸"，停止盲目人工打标 | 🟡待执行 | 纯观测零副作用。执行后需跑 `GET /api/diagnostics/owned-matching?topic=清关`，把 `starving_side`+`category_inventory` 回给总指挥定 P1 |
+| 1 | [画面素材分类统一](画面素材分类统一-Cursor执行指令.md) | 把散在多处的画面素材分类词表收敛到单一 `asset_taxonomy.py`，修两份 `CATEGORY_KEYWORDS` 漂移 bug | ✅已验收(主体) | 阶段 A+B 已验收（commit `0cbd945`+`d423323`）：四噪词干净删除、并集词无误删、边界守住。**验收新发现**：`asset_processing.py:97 CATEGORY_TERMS` 是第三份"关键词→分类"词表（且是**入库真正的规则分类器**），未并入、仍含「访谈」、与真源口径不一致（关税 vs 通关）。**阶段 C**（未做）范围因此扩为：①`semantic_matching._tag_map.category_tags` 对齐 ②`asset_processing.CATEGORY_TERMS` 改为 import `asset_taxonomy.CATEGORY_KEYWORDS`。速修：删 `CATEGORY_TERMS.staff` 的「访谈」一行 |
+| 2 | [P0 匹配诊断仪表盘](P0-匹配诊断仪表盘-Cursor执行指令.md) | 匹配不足时暴露"饿在哪一侧、死在哪道闸"，停止盲目人工打标 | ✅已验收 | commit `8be5c70`+`364cb8d`。闸门谓词与 `_owned_candidates` 共享、零副作用、732 passed。**首跑 topic=清关**：verdict=category_mismatch，265 可用片过 customs 闸=0，库存全是 warehouse256/delivery83、**无 customs**；热点侧 4 hook 对得上。结论：清关是"严闸+零库存"内容缺口，语义向量救不了；两杠杆=放闸(抄末端 preparation 模式)/补内容 |
+
+| 3 | [P1 话题扫描](P1-话题扫描-Cursor执行指令.md) | 扫 8 个代表话题，分清三种死法各占多少，再决定 P1 买哪副药 | 🟡待执行 | 只循环调用 P0 现成端点，零新逻辑、不改 app.py。产出 Markdown 表 + `sweep-result.json` 回给总指挥 |
 
 ## 背景速记（为什么做这些）
 
@@ -19,6 +21,6 @@
 ## 调优路线图（性价比排序）
 
 - **P0** 匹配诊断仪表盘 ← 指令 #2（先跑，最便宜，防止力气使错方向）
-- **P1** 匹配算法改造：节点→分类为主路径 / 上语义向量（治本，据 P0 数据定）
+- **P1** 匹配算法改造 ← **先扫一圈再拍板**。P0 清关跑出"内容缺口"这一种死法，语义向量救不了它。定 P1 前先跑一批话题(清关/末端/仓储/运输/关税/成本/港口/断链)分清三种死法：①`category_mismatch`+库有货但闸太严 → 改 NODE_CATEGORY_RULES 放闸(便宜)；②闸内有货但关键词 Jaccard 漏配 → 上语义向量(贵、治本)；③`empty_pool` 真没货 → 补内容。哪种占多数才决定买哪副药
 - **P2** 渲染参数快赢：字幕烧录 crf 28→18–20、preset veryfast→medium、TTS 加音色（立竿见影）
 - **P3** 质量闭环：评估权重偏向可改轴、重生成应重选素材而非同输入再渲
