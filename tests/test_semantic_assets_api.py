@@ -77,7 +77,7 @@ def test_match_selection_is_private_and_persists_feedback(tmp_db):
 
 def test_segment_manual_classification_requires_admin(tmp_db):
     admin_client, admin_headers, _ = _client(tmp_db, username="segment-admin")
-    _, segment_id = _asset_and_segment(tmp_db)
+    asset_id, segment_id = _asset_and_segment(tmp_db)
     editor_client, editor_headers, _ = _client(tmp_db, role="editor", username="segment-editor")
 
     assert editor_client.put(
@@ -89,4 +89,36 @@ def test_segment_manual_classification_requires_admin(tmp_db):
         json={"primary_category": "customs", "tags": [{"dimension": "scene", "value": "海关查验"}]},
     )
     assert response.status_code == 200
-    assert response.json()["primary_category"] == "customs"
+    body = response.json()
+    assert body["primary_category"] == "customs"
+    assert body["primary_category_source"] == "manual"
+    assert any(tag["dimension"] == "scene" and tag["value"] == "海关查验" and tag["source"] == "manual" for tag in body["tags"])
+    asset = tmp_db.get_asset(asset_id)
+    assert asset["primary_category"] == "customs"
+    assert asset["primary_category_source"] == "manual"
+    assert asset["category"] == "customs"
+
+
+def test_segment_manual_classification_clears_review_required(tmp_db):
+    admin_client, admin_headers, _ = _client(tmp_db, username="segment-review-admin")
+    asset_id, segment_id = _asset_and_segment(tmp_db)
+    with tmp_db.get_conn() as conn:
+        conn.execute("UPDATE assets SET processing_status='review_required' WHERE id=?", (asset_id,))
+
+    response = admin_client.put(
+        f"/api/asset-segments/{segment_id}/classification", headers=admin_headers,
+        json={
+            "primary_category": "warehouse",
+            "tags": [
+                {"dimension": "scene", "value": "仓库作业"},
+                {"dimension": "object", "value": "货架"},
+                {"dimension": "brand", "value": "Buffalo"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    asset = tmp_db.get_asset(asset_id)
+    assert asset["processing_status"] == "ready"
+    assert asset["primary_category"] == "warehouse"
+    assert asset["primary_category_source"] == "manual"
