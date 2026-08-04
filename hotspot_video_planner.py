@@ -238,20 +238,40 @@ def _owned_node_tag_relevance(item: dict, brief: dict) -> float:
     return overlap / max(3.0, min(float(len(wanted)), 8.0))
 
 
+_OWNED_ASSET_SOURCES = frozenset({"upload", "directory", "local_directory", "manual", "local"})
+
+
+def _is_owned_video_segment(item: dict) -> bool:
+    return str(item.get("asset_file_type") or item.get("file_type") or "") == "video"
+
+
+def _is_buffalo_usable_source(item: dict) -> bool:
+    # Licensed stock or a generic library must not be represented as Buffalo
+    # proof.  Existing legacy rows omit asset_source and remain usable.
+    source = item.get("asset_source")
+    return not source or str(source) in _OWNED_ASSET_SOURCES
+
+
+def _brand_visible(item: dict) -> bool:
+    return any(
+        str(tag.get("dimension") or "") == "brand" and str(tag.get("value") or "").strip()
+        for tag in (item.get("tags") or [])
+    )
+
+
 def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
     eligible_categories = _eligible_owned_categories(brief)
     videos = []
     for item in segments:
-        if str(item.get("asset_file_type") or item.get("file_type") or "") != "video":
+        if not _is_owned_video_segment(item):
             continue
-        # Licensed stock or a generic library must not be represented as Buffalo
-        # proof.  Existing legacy rows omit asset_source and remain usable.
-        if item.get("asset_source") and str(item["asset_source"]) not in {"upload", "directory", "local_directory", "manual", "local"}:
+        if not _is_buffalo_usable_source(item):
             continue
         functional_categories = _functional_categories(item)
         if eligible_categories is not None and not (functional_categories & eligible_categories):
             continue
         videos.append(item)
+
     def rank(item: dict) -> tuple[float, float, float, int]:
         # 保持功能分类作为准入门槛；在同类 Buffalo 自有视频里，优先使用可见
         # 品牌标识，其次与当前物流节点重合的多维标签，避免港口运输主题误选泛仓库镜头。
@@ -280,6 +300,143 @@ def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
         unique_assets.add(asset_id)
         result.append(item)
     return result
+
+
+def diagnose_owned_matching(segments: Iterable[dict], brief: dict) -> dict:
+    """纯观测：按 ``_owned_candidates`` 同一套闸门逐级计数，零副作用。
+
+    不改选片/排序/阈值；只在调用方显式请求时运行。
+    """
+    items = list(segments)
+    eligible_categories = _eligible_owned_categories(brief)
+    eligible_list = sorted(eligible_categories) if eligible_categories is not None else None
+
+    passed_video: list[dict] = []
+    passed_source: list[dict] = []
+    passed_category: list[dict] = []
+    dropped_by_category: list[dict] = []
+    category_inventory: dict[str, int] = {}
+
+    for item in items:
+        if not _is_owned_video_segment(item):
+            continue
+        passed_video.append(item)
+        if not _is_buffalo_usable_source(item):
+            continue
+        passed_source.append(item)
+        functional_categories = _functional_categories(item)
+        if eligible_categories is not None and not (functional_categories & eligible_categories):
+            for category in sorted(functional_categories):
+                category_inventory[category] = category_inventory.get(category, 0) + 1
+            dropped_by_category.append({
+                "asset_id": item.get("asset_id"),
+                "segment_id": item.get("id"),
+                "primary_category": str(item.get("primary_category") or ""),
+                "functional_categories": sorted(functional_categories),
+                "brand_visible": _brand_visible(item),
+                "description": str(item.get("description") or "")[:40],
+                "quality_score": float(item.get("quality_score") or 0),
+            })
+            continue
+        passed_category.append(item)
+
+    # Dedup gate mirrors _owned_candidates (unique asset_id); count only.
+    unique_assets: set[int] = set()
+    after_dedup = 0
+    for item in passed_category:
+        asset_id = int(item.get("asset_id") or 0)
+        if not asset_id or asset_id in unique_assets:
+            continue
+        unique_assets.add(asset_id)
+        after_dedup += 1
+
+    dropped_by_category.sort(
+        key=lambda row: (-float(row.get("quality_score") or 0), int(row.get("segment_id") or 0))
+    )
+    for row in dropped_by_category:
+        row.pop("quality_score", None)
+
+    funnel = {
+        "is_video": len(passed_video),
+        "not_licensed_stock": len(passed_source),
+        "category_match": len(passed_category),
+        "after_dedup": after_dedup,
+    }
+
+    # Verdict priority matches the ops playbook; empty usable pool collapses to empty_pool.
+    if funnel["is_video"] == 0 or funnel["not_licensed_stock"] == 0:
+        verdict = "empty_pool"
+    elif eligible_categories is not None and funnel["category_match"] == 0:
+        verdict = "category_mismatch"
+    elif funnel["after_dedup"] >= 4:
+        verdict = "healthy"
+    elif funnel["after_dedup"] >= 1:
+        verdict = "thin_but_matched"
+    else:
+        verdict = "empty_pool"
+
+    return {
+        "eligible_categories": eligible_list,
+        "logistics_nodes": list(brief.get("logistics_nodes") or []),
+        "total_segments": len(items),
+        "funnel": funnel,
+        "dropped_by_category_mismatch": dropped_by_category[:10],
+        "category_inventory": category_inventory,
+        "verdict": verdict,
+    }
+
+
+def count_matching_hotspot_hooks(brief: dict, hotspot_events: Iterable[dict]) -> int:
+    """Count confirmed/ready-or-pending hooks that hit the brief's node lexicon.
+
+    Reuses ``expand_node_terms`` / ``extract_terms`` / ``category_profile`` — same
+    term surface as event matching — without inventing a parallel word list.
+    """
+    nodes = [str(node) for node in (brief.get("logistics_nodes") or []) if str(node).strip()]
+    topic = str(brief.get("logistics_topic") or "")
+    probe = " ".join([topic, *nodes]).strip()
+    wanted_terms: set[str] = set(hotspot_lexicon.extract_terms(probe))
+    for node in nodes:
+        wanted_terms.update(str(term).casefold() for term in hotspot_lexicon.expand_node_terms(node))
+    topic_cats = hotspot_lexicon.category_profile(probe, mode="topic") if probe else set()
+
+    count = 0
+    for event in hotspot_events:
+        if str(event.get("review_status") or "confirmed") != "confirmed":
+            continue
+        if str(event.get("clip_status") or "ready") not in {"ready", "pending"}:
+            continue
+        text = " ".join(
+            str(event.get(key) or "")
+            for key in ("title_zh", "title_en", "location")
+        )
+        text += " " + " ".join(str(value) for value in (event.get("keywords") or []))
+        event_cats = hotspot_lexicon.category_profile(text, mode="event")
+        event_terms = hotspot_lexicon.extract_terms(text)
+        if (wanted_terms and wanted_terms & event_terms) or (topic_cats and topic_cats & event_cats):
+            count += 1
+    return count
+
+
+def diagnose_starving_side(
+    *,
+    owned_pool: int,
+    hotspot_pool: int,
+    hotspot_batch_age: str | None = None,
+) -> dict:
+    """Point ops at which library is hungry: hotspot batch vs Buffalo owned."""
+    if hotspot_pool == 0:
+        side = "hotspot"
+    elif owned_pool < 4:
+        side = "owned"
+    else:
+        side = "none"
+    return {
+        "starving_side": side,
+        "hotspot_pool": int(hotspot_pool),
+        "owned_pool": int(owned_pool),
+        "hotspot_batch_age": hotspot_batch_age,
+    }
 
 
 def _owned_visual_family(item: dict) -> str:

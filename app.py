@@ -4315,6 +4315,32 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
     return list(dict.fromkeys(nodes)) or ["运输"]
 
 
+def _hotspot_batch_age() -> str | None:
+    run = db.get_latest_hotspot_fetch_run()
+    if not run:
+        return None
+    return str(run.get("finished_at") or run.get("started_at") or "") or None
+
+
+def _compose_owned_matching_diagnostics(
+    brief: dict,
+    owned_segments: list[dict],
+    *,
+    hotspot_events: list[dict] | None = None,
+) -> dict:
+    """Attach funnel diagnosis + starving_side. Observation only; never changes selection."""
+    diagnostics = hotspot_video_planner.diagnose_owned_matching(owned_segments, brief)
+    events = hotspot_events if hotspot_events is not None else db.list_hotspot_event_clips()
+    hotspot_pool = hotspot_video_planner.count_matching_hotspot_hooks(brief, events)
+    starve = hotspot_video_planner.diagnose_starving_side(
+        owned_pool=int((diagnostics.get("funnel") or {}).get("after_dedup") or 0),
+        hotspot_pool=hotspot_pool,
+        hotspot_batch_age=_hotspot_batch_age(),
+    )
+    diagnostics.update(starve)
+    return diagnostics
+
+
 def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dict:
     """Preflight the formal 50–90s plan without creating a project or calling a model.
 
@@ -4405,7 +4431,7 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
     else:
         message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
         status = "needs_owned_media"
-    return {
+    result = {
         "status": status,
         "delivery_ready": delivery_ready,
         "coverage": coverage,
@@ -4416,6 +4442,76 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         "planner_issue": planner_issue or None,
         "adaptation": adaptation,
     }
+    # Observation only when inventory looks thin or delivery is blocked.
+    if owned_count < 4 or not delivery_ready:
+        # hotspot_pool must scan the full confirmed hook library for the topic,
+        # not only the locked parent video's related clips.
+        result["diagnostics"] = _compose_owned_matching_diagnostics(
+            planning_brief, owned_segments,
+        )
+    return result
+
+
+@app.get("/api/diagnostics/owned-matching")
+async def diagnostics_owned_matching(
+    topic: str,
+    hotspot_event_id: int | None = None,
+    user=Depends(require_role(UserRole.ADMIN)),
+):
+    """Admin-only matching funnel diagnosis. Pure observation; no model calls."""
+    topic = str(topic or "").strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="topic 不能为空")
+    owned_segments = [
+        item for item in db.list_asset_segments(limit=2_000)
+        if not item.get("asset_hotspot_id")
+    ]
+    locked_events: list[dict] = []
+    event = None
+    if hotspot_event_id is not None:
+        event = db.get_hotspot_event_clip(int(hotspot_event_id))
+        if not event:
+            raise HTTPException(status_code=404, detail="热点事件不存在")
+        locked_events = [event]
+    nodes = _chat_video_logistics_nodes(topic, locked_events)
+    source = {}
+    if event:
+        source = {**(db.get_hotspot(int(event["hotspot_id"])) or {}), **event}
+    planning_brief = hotspot_logistics_planner.build_brief(
+        source or {"title_zh": topic, "title_en": topic},
+        owned_segments,
+        {
+            "id": f"diag-{hashlib.sha256(topic.encode()).hexdigest()[:16]}",
+            "raw_input": topic,
+            "subject": topic[:120],
+            "angle": topic[:180],
+            "goal": "匹配诊断（只读）",
+            "logistics_nodes": nodes,
+            "platforms": ["douyin"],
+        },
+    )
+    if event:
+        planning_brief.update({
+            "hotspot_id": event.get("hotspot_id"),
+            "source_asset_id": event.get("asset_id"),
+            "primary_event_id": event.get("id"),
+            "approved_hook_event_ids": [int(event["id"])],
+        })
+    diagnostics = _compose_owned_matching_diagnostics(planning_brief, owned_segments)
+    payload = {
+        "topic": topic,
+        "logistics_nodes": nodes,
+        "starving_side": diagnostics.get("starving_side"),
+        "hotspot_pool": diagnostics.get("hotspot_pool"),
+        "owned_pool": diagnostics.get("owned_pool"),
+        "hotspot_batch_age": diagnostics.get("hotspot_batch_age"),
+        "diagnostics": diagnostics,
+    }
+    if event is not None:
+        payload["event_diagnostics"] = hotspot_event_matching.diagnose_event_matching(
+            event, db.list_asset_segments(limit=2_000),
+        )
+    return payload
 
 
 @app.post("/api/ai/chat")
