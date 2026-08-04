@@ -64,6 +64,19 @@ def _needs_zero_hook_ready(media: dict) -> bool:
     return "未筛出可复用 Hook" in detail
 
 
+def _needs_requeue_uncurated(media: dict) -> bool:
+    """Select mothers that failed JSON curation or finished with zero reusable Hooks."""
+    if media.get("download_status") != "downloaded" or not media.get("asset_id"):
+        return False
+    detail = str(media.get("progress_detail") or "")
+    error = str(media.get("error_message") or "")
+    blob = f"{detail}\n{error}"
+    # Reasoning-model pollution / parse failures are marked temporarily_unavailable.
+    if "未返回合法 JSON" in blob:
+        return True
+    return _needs_zero_hook_ready(media)
+
+
 def _reprocess_media(media_id: int, *, skip_analysis: bool, refresh_intake_decision: bool) -> dict:
     """Run one fully model-governed re-curation and return its audit summary."""
     media = db.get_hotspot_media(media_id)
@@ -153,6 +166,11 @@ def main() -> int:
         action="store_true",
         help="重策展所有 ready 且上次未筛出可复用 Hook 的母片（跳过暂时不可用）",
     )
+    selection.add_argument(
+        "--requeue-uncurated",
+        action="store_true",
+        help="重策展 JSON 解析失败或上次未筛出可复用 Hook 的母片",
+    )
     parser.add_argument("--skip-analysis", action="store_true", help="复用已完成的镜头分析，仅重新进行 Hook 策展")
     parser.add_argument("--refresh-intake-decision", action="store_true", help="让内置 Qwen 重新确认本母片的获准事件范围")
     parser.add_argument("--max-media", type=int, default=0, help="批量模式最多处理多少条；0 表示全部")
@@ -172,6 +190,12 @@ def main() -> int:
             int(media["id"])
             for media in db.list_hotspot_media(lifecycle_status="active", authorization_status="authorized", limit=500)
             if _needs_zero_hook_ready(media)
+        ]
+    elif args.requeue_uncurated:
+        media_ids = [
+            int(media["id"])
+            for media in db.list_hotspot_media(lifecycle_status="active", authorization_status="authorized", limit=500)
+            if _needs_requeue_uncurated(media)
         ]
     else:
         media_ids = [int(args.media_id)]

@@ -9,11 +9,69 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from typing import Iterable
+import re
+from typing import Any, Iterable
 
 import model_router
 import hotspot_hook_selection_sop
 import hotspot_lexicon
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _balanced_json_substring(text: str) -> str | None:
+    """Return the first balanced `{...}` or `[...]` substring, or None."""
+    start = -1
+    for index, char in enumerate(text):
+        if char in "{[":
+            start = index
+            break
+    if start < 0:
+        return None
+    opening = text[start]
+    closing = "}" if opening == "{" else "]"
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _extract_json(raw: str) -> Any:
+    """Strip fences/think blocks and load the first JSON object or array."""
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    text = _THINK_BLOCK_RE.sub("", text).strip()
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    extracted = _balanced_json_substring(text)
+    if extracted is None:
+        raise ValueError("未返回合法 JSON")
+    try:
+        return json.loads(extracted)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("未返回合法 JSON") from exc
 
 
 MIN_HOOK_MS = 4_000
@@ -179,12 +237,9 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
         prompt_version=AUDIT_PROMPT_VERSION,
         max_output_tokens=400,
     ))
-    raw = str(result.get("content") or "").strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        payload = _extract_json(str(result.get("content") or ""))
+    except ValueError as exc:
         raise ValueError("Hook 事实核验模型未返回合法 JSON") from exc
     if isinstance(payload, dict):
         accepted_rows = payload.get("accepted") or []
@@ -213,12 +268,9 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
 
 
 def _parse(content: str, segments: list[dict]) -> list[dict]:
-    raw = str(content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        payload = _extract_json(content)
+    except ValueError as exc:
         raise ValueError("Hook 策展模型未返回合法 JSON") from exc
     if isinstance(payload, dict):
         rows = payload.get("hooks") or []

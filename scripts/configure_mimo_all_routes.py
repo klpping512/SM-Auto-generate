@@ -38,6 +38,9 @@ def _routes() -> list[dict]:
             "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
             "capabilities": ["text"], "timeout": 90, "max_tokens": 1800,
             "cost_profile": "high", "enabled": True,
+            # Portable flags: model_router maps enable_thinking=false → MiMo
+            # thinking.type=disabled (MiMo ignores MiniMax reasoning_split).
+            "request_options": {"reasoning_split": True, "enable_thinking": False},
         },
         {
             "role": "chat_text", "provider": "mimo", "base_url": MIMO_BASE_URL,
@@ -50,6 +53,7 @@ def _routes() -> list[dict]:
             "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
             "capabilities": ["text"], "timeout": 90, "max_tokens": 1400,
             "cost_profile": "high", "enabled": True,
+            "request_options": {"reasoning_split": True, "enable_thinking": False},
         },
         {
             "role": "vision_tagger", "provider": "mimo", "base_url": MIMO_BASE_URL,

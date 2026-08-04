@@ -33,3 +33,29 @@ def test_legacy_batch_selects_only_confirmed_hooks_without_event_identity(monkey
     ])
     assert not script._needs_legacy_event_identity({"asset_id": 306})
     assert not script._needs_legacy_event_identity({"asset_id": None})
+
+
+def test_requeue_uncurated_selects_json_failures_and_zero_hooks():
+    script = _module()
+
+    assert script._needs_requeue_uncurated({
+        "download_status": "downloaded",
+        "processing_status": "processing_failed",
+        "asset_id": 1,
+        "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook：内置 Hook 策展暂时不可用：Hook 策展模型未返回合法 JSON",
+        "error_message": "内置 Hook 策展暂时不可用：Hook 策展模型未返回合法 JSON",
+    })
+    assert script._needs_requeue_uncurated({
+        "download_status": "downloaded",
+        "processing_status": "ready",
+        "asset_id": 2,
+        "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook",
+        "error_message": None,
+    })
+    assert not script._needs_requeue_uncurated({
+        "download_status": "downloaded",
+        "processing_status": "ready",
+        "asset_id": 3,
+        "progress_detail": "内置模型已筛出 2 条精华 Hook 片段",
+        "error_message": None,
+    })

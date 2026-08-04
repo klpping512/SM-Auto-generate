@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 
 import httpx
 
@@ -25,6 +26,7 @@ DEFAULT_ROUTES = {
         "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
         "capabilities": ["text"], "timeout": 90, "max_tokens": 1800,
         "cost_profile": "high", "enabled": True,
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     # Chat / platform copy — standard MiMo text.
     "chat_text": {
@@ -55,6 +57,7 @@ DEFAULT_ROUTES = {
         "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
         "capabilities": ["text"], "timeout": 90, "max_tokens": 1400,
         "cost_profile": "high", "enabled": True,
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     "tts": {
         "role": "tts", "provider": "mimo",
@@ -101,6 +104,22 @@ def _safe_request_options(route: dict) -> dict:
     # keeps the visible answer in a separate field.
     if isinstance(raw.get("reasoning_split"), bool):
         options["reasoning_split"] = raw["reasoning_split"]
+    return options
+
+
+def _provider_request_options(route: dict) -> dict:
+    """Translate portable request_options into provider-native chat.completions fields."""
+    options = _safe_request_options(route)
+    provider = str(route.get("provider") or "")
+    if provider == "mimo":
+        body: dict = {}
+        # MiMo V2.5 defaults thinking ON; MiniMax-style keys are ignored and the
+        # reasoning budget can exhaust max_tokens, leaving message.content empty.
+        if "enable_thinking" in options:
+            body["thinking"] = {
+                "type": "enabled" if options["enable_thinking"] else "disabled",
+            }
+        return body
     return options
 
 
@@ -218,7 +237,13 @@ def record_call(
 def make_cache_key(role: str, payload: dict, prompt_version: str) -> str:
     route = get_route(role)
     raw = json.dumps(
-        {"role": role, "model": route["model"], "prompt_version": prompt_version, "payload": payload},
+        {
+            "role": role,
+            "model": route["model"],
+            "prompt_version": prompt_version,
+            "request_options": _safe_request_options(route),
+            "payload": payload,
+        },
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -230,21 +255,21 @@ def key_is_available(role: str) -> bool:
     return bool(route["enabled"] and os.environ.get(route["api_key_env"], ""))
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
 def _visible_text_content(payload: dict) -> str:
     """Return provider-visible answer, never provider reasoning traces.
 
-    MiniMax's compatible endpoint can return a legacy `<think>…</think>` block
-    in `content` if a gateway ignores `reasoning_split`.  The workflow stores
-    strict JSON in several downstream steps, so only remove a *leading*
-    reasoning block rather than altering arbitrary customer-facing text.
+    MiniMax / MiMo gateways may still embed `<think>…</think>` in `content` when
+    thinking controls are ignored. Strip those blocks before downstream JSON
+    parsers see the text. Never promote `reasoning_content` into the answer.
     """
     content = str(
         (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
     ).strip()
-    if content.startswith("<think>"):
-        closing = content.find("</think>")
-        if closing >= 0:
-            content = content[closing + len("</think>"):].strip()
+    if "<think>" in content.lower() or "</think>" in content.lower():
+        content = _THINK_BLOCK_RE.sub("", content).strip()
     return content
 
 
@@ -303,7 +328,7 @@ async def call_text(
             "model": route["model"],
             "messages": messages,
             "max_tokens": visible_output,
-            **_safe_request_options(route),
+            **_provider_request_options(route),
         }
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
@@ -318,6 +343,10 @@ async def call_text(
         if owns_client:
             await client.aclose()
     content = _visible_text_content(payload)
+    if not content:
+        # Thinking-on-by-default models can exhaust the output budget and leave
+        # an empty answer; never cache that poison for Hook JSON consumers.
+        raise RuntimeError("模型未返回可见文本内容")
     usage = payload.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens") or estimated_input)
     output_tokens = int(usage.get("completion_tokens") or max(1, len(content) // 4))
@@ -420,7 +449,7 @@ async def call_multimodal_json(
                     # 在长 JSON 时留下不完整尾部。
                     "max_tokens": route["max_tokens"],
                 }
-                payload.update(_safe_request_options(route))
+                payload.update(_provider_request_options(route))
                 if route.get("json_mode", True):
                     payload["response_format"] = {"type": "json_object"}
                 response = await client.post(

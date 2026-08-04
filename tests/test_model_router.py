@@ -49,6 +49,49 @@ def test_visible_text_content_removes_only_leading_legacy_thinking_block():
     assert model_router._visible_text_content(payload) == '{"approved":true}'
 
 
+def test_mimo_maps_enable_thinking_false_to_native_thinking_disabled(tmp_db):
+    import model_router
+
+    model_router.save_route("planner_text", {
+        "provider": "mimo", "base_url": model_router.MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5-pro",
+        "capabilities": ["text"], "timeout": 90, "max_tokens": 1800,
+        "cost_profile": "high",
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
+        "enabled": True,
+    })
+    route = model_router.get_route("planner_text")
+    assert model_router._safe_request_options(route) == {
+        "enable_thinking": False, "reasoning_split": True,
+    }
+    assert model_router._provider_request_options(route) == {
+        "thinking": {"type": "disabled"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_text_does_not_cache_empty_visible_content(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": "", "reasoning_content": "thinking only"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 40},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="未返回可见文本内容"):
+            await model_router.call_text(
+                "empty-content", "planner_text", [{"role": "user", "content": "返回 JSON"}],
+                prompt_version="empty-content-v1", client=client,
+            )
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_text_json_mode_is_part_of_request_and_cache_identity(tmp_db, monkeypatch):
     import model_router
