@@ -4097,6 +4097,55 @@ def update_asset_segment_classification(segment_id: int, primary_category: str, 
                 (primary_category, source, quality_score, segment_id),
             )
         _refresh_segment_fts(conn, segment_id)
+        # 列表卡片读 assets.category；人工确认镜头时必须同步母片，否则会出现
+        # 「弹窗已是工作人员、卡片仍显示海外仓」。
+        if source == "manual":
+            row = conn.execute("SELECT asset_id FROM asset_segments WHERE id=?", (segment_id,)).fetchone()
+            if row and row["asset_id"]:
+                conn.execute(
+                    "UPDATE assets SET category=?,primary_category=?,primary_category_source='manual' WHERE id=?",
+                    (primary_category, primary_category, int(row["asset_id"])),
+                )
+                status = conn.execute(
+                    "SELECT processing_status FROM assets WHERE id=?", (int(row["asset_id"]),)
+                ).fetchone()
+                if status and status["processing_status"] == "review_required":
+                    conn.execute(
+                        "UPDATE assets SET processing_status='ready' WHERE id=?",
+                        (int(row["asset_id"]),),
+                    )
+
+
+def sync_assets_to_manual_segment_categories() -> int:
+    """把镜头人工主场景回写到仍不一致的母片分类，返回修复条数。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT a.id AS asset_id, s.primary_category
+                 FROM assets a
+                 JOIN asset_segments s ON s.asset_id=a.id AND s.status='active'
+                WHERE s.primary_category_source='manual'
+                  AND s.primary_category IS NOT NULL AND s.primary_category != ''
+                  AND (
+                    COALESCE(a.category,'') != s.primary_category
+                    OR COALESCE(a.primary_category,'') != s.primary_category
+                    OR COALESCE(a.primary_category_source,'') != 'manual'
+                  )
+                ORDER BY a.id, s.id"""
+        ).fetchall()
+        # 同一母片多镜头时，后写覆盖前写；人工打标以最近一条为准即可。
+        updates: dict[int, str] = {}
+        for row in rows:
+            updates[int(row["asset_id"])] = str(row["primary_category"])
+        for asset_id, category in updates.items():
+            conn.execute(
+                "UPDATE assets SET category=?,primary_category=?,primary_category_source='manual' WHERE id=?",
+                (category, category, asset_id),
+            )
+            conn.execute(
+                "UPDATE assets SET processing_status='ready' WHERE id=? AND processing_status='review_required'",
+                (asset_id,),
+            )
+        return len(updates)
 
 
 def create_asset_processing_job(asset_id: int, requested_by: int | None = None,

@@ -122,3 +122,46 @@ def test_segment_manual_classification_clears_review_required(tmp_db):
     assert asset["processing_status"] == "ready"
     assert asset["primary_category"] == "warehouse"
     assert asset["primary_category_source"] == "manual"
+
+
+def test_manual_segment_classification_updates_asset_card_category(tmp_db):
+    """回归：弹窗改工作人员后，列表卡片不能继续显示海外仓。"""
+    admin_client, admin_headers, _ = _client(tmp_db, username="card-sync-admin")
+    asset_id, segment_id = _asset_and_segment(tmp_db)
+    with tmp_db.get_conn() as conn:
+        conn.execute(
+            "UPDATE assets SET category='warehouse',primary_category='warehouse',primary_category_source='model' WHERE id=?",
+            (asset_id,),
+        )
+
+    response = admin_client.put(
+        f"/api/asset-segments/{segment_id}/classification", headers=admin_headers,
+        json={"primary_category": "staff", "tags": [{"dimension": "entity", "value": "团队"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["primary_category"] == "staff"
+
+    listed = admin_client.get("/api/assets", headers=admin_headers).json()
+    card = next(item for item in listed if item["id"] == asset_id)
+    assert card["category"] == "staff"
+    assert card["primary_category"] == "staff"
+    assert card["primary_category_source"] == "manual"
+
+
+def test_sync_assets_to_manual_segment_categories_repairs_stale_cards(tmp_db):
+    asset_id, segment_id = _asset_and_segment(tmp_db)
+    with tmp_db.get_conn() as conn:
+        conn.execute(
+            "UPDATE asset_segments SET primary_category='staff',primary_category_source='manual' WHERE id=?",
+            (segment_id,),
+        )
+        conn.execute(
+            "UPDATE assets SET category='warehouse',primary_category='warehouse',primary_category_source='model' WHERE id=?",
+            (asset_id,),
+        )
+
+    assert tmp_db.sync_assets_to_manual_segment_categories() == 1
+    asset = tmp_db.get_asset(asset_id)
+    assert asset["category"] == "staff"
+    assert asset["primary_category"] == "staff"
+    assert asset["primary_category_source"] == "manual"

@@ -2402,15 +2402,6 @@ async def update_segment_classification(
         })
     db.update_asset_segment_classification(segment_id, req.primary_category, req.quality_score)
     db.replace_segment_tags(segment_id, tags, updated_by=user["id"])
-    asset_id = segment.get("asset_id")
-    if asset_id:
-        # 母片列表分类与镜头人工真值保持一致，并避免后续 taxonomy 重建覆盖。
-        db.mark_asset_category_manual(asset_id, req.primary_category)
-        asset = db.get_asset(asset_id)
-        if asset and asset.get("processing_status") == "review_required":
-            db.update_asset_semantic_state(
-                asset_id, req.primary_category, "ready", source="manual",
-            )
     db.add_audit_log(user["id"], user["username"], "classify_asset_segment", target=str(segment_id))
     return db.get_asset_segment(segment_id)
 
