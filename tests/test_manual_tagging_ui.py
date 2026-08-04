@@ -56,3 +56,9 @@ def test_assets_page_exposes_one_click_tagging_for_long_videos():
     assert "逐镜精修" in page
     assert "segment_count" in page
     assert "应用到全部镜头" in page
+    assert "resolveAssetSegmentCount" in page
+    assert "oneClickHelpText" in page
+    assert "全部 ${count} 个镜头" in page
+    assert "||'?'" not in page
+    assert "applyOneClickViaSegments" in page
+    assert "一键打标接口未加载，请重启 8080 后再试" in page

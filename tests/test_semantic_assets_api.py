@@ -241,6 +241,7 @@ def test_classify_all_requires_admin(tmp_db):
     assert body["primary_category"] == "warehouse"
     assert body["asset"]["category"] == "warehouse"
     assert body["asset"]["primary_category_source"] == "manual"
+    assert body["asset"]["segment_count"] == 2
 
     for segment in tmp_db.list_asset_segments(asset_id=asset_id):
         assert segment["primary_category"] == "warehouse"
@@ -249,6 +250,13 @@ def test_classify_all_requires_admin(tmp_db):
         assert ("region", "南非") in values
         assert ("scene", "仓库作业") in values
         assert ("brand", "Buffalo") in values
+
+
+def test_classify_all_route_registered_in_openapi(tmp_db):
+    client, _, _ = _client(tmp_db, username="classify-all-openapi")
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/assets/{asset_id}/classify-all" in paths
+    assert "post" in paths["/api/assets/{asset_id}/classify-all"]
 
 
 def test_classify_all_replace_tags_wipes_existing_fine_tags(tmp_db):
