@@ -16,6 +16,8 @@
 
 | 5 | [P2 渲染参数快赢](P2-渲染参数快赢-Cursor执行指令.md) | 正式片锐化：中间片近视觉无损(crf18)+交付段 medium 预设，减代际损失 | ✅已验收 | 4 处参数已改（`video_renderer.py`），新增 `RENDER_PRESET/RENDER_INTERMEDIATE_CRF/RENDER_FINAL_CRF` 环境档位。**真实 job A/B 实测**（a5104b2e 重放）：总耗时 38.0s→60.8s(+60%)、体积 14.5MB→20.0MB(+37.5%)、字幕文字边缘能量+5%~15%（拉普拉斯客观度量）、质量门禁全过；preview 路径仍 ultrafast+crf28 未变。单条 ffmpeg 最长 22.9s≪180s 子进程超时，`cleanup_stale_jobs` 仅启动时跑一次→300s 红线风险低；首个 50–90s 正式片仍需观察 |
 
+| 6 | [P1 终局 清关放闸+文案门禁](P1终局-清关放闸+文案门禁-Cursor执行指令.md) | 清关/关税放闸(preparation)取用 warehouse/delivery 备货上下文，**同批**建确定性文案门禁堵住"仓库画面谎称已清关" | ✅已验收 | 三件套**同批提交**：①`_eligible_owned_categories` 清关节点→{customs,warehouse,delivery}（真实 brief 放闸前 candidates 0→3）②`safe_customs_preparation_copy` 安全兜底模板（纯准备词，无开场前缀防字数超限）③`overclaim_completion_issues` 纯确定性子串拦截器 + `apply_overclaim_guard` 接入 B1 生产链（命中回退模板并记 `overclaim_guard`）+ B2 预览链 locked_scenes 补 primary_category 同门禁。单测 13 项全绿：完成词 16 个全拦、准备词 7 个全放行、真 customs 素材/非清关节点不误杀；B1 端到端证「模型说已清关→回退→成片字幕无完成词」。被放闸反转的 3 条存量断言已按新行为改写（staff/facility 仍保持 mismatch 拒绝）；全量回归除 8 个存量基线失败外全绿 |
+
 ## 背景速记（为什么做这些）
 
 - **匹配失败 + 视频质量差 是同一个根**：系统无 AI 文生视频，成片是 FFmpeg 拼真实素材；匹配不足会触发自适应降级出片，降级片就是"质量差"。修匹配同时治两病。

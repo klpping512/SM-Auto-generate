@@ -44,6 +44,7 @@ import model_router
 import sample_harness
 import hotspot_logistics_planner
 import hotspot_video_planner
+import hotspot_preview_narration
 import hotspot_package_service
 import hotspot_hook_selector
 import hotspot_lexicon
@@ -2074,6 +2075,12 @@ async def _generate_topic_brief_video(
         )
     except ValueError as exc:
         raise HTTPException(409, f"内容质量门禁未通过：{exc}") from exc
+    # 清关 preparation 模式文案门禁：所有文案修复/字数校验之后的最后一道
+    # 确定性拦截。非真 customs 素材在清关节点下宣称已完成受监管结果时，
+    # 不放行模型那句，回退安全准备式模板，确保过度宣称无法进入渲染。
+    overclaim_records = hotspot_preview_narration.apply_overclaim_guard(
+        generated["scenes"], scenes, planning_brief.get("logistics_nodes") or [],
+    )
     for scene, generated_scene in zip(scenes, generated["scenes"]):
         scene.update(generated_scene)
     scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
@@ -2083,6 +2090,7 @@ async def _generate_topic_brief_video(
         "topic_brief_id": brief_id, "hotspot_event_id": event["id"], "brief": planning_brief,
         "model": model_router.get_route("planner_text").get("model"), "model_cache_hit": result.get("cache_hit", False),
         "copywriting_sop": douyin_copywriting_sop.metadata(),
+        "overclaim_guard": overclaim_records,
         "adaptation": adaptation,
         "provenance": {
             "hotspot_video": hotspot_count,
@@ -2133,6 +2141,7 @@ async def _generate_topic_brief_video(
             "duration_ms": duration_ms,
         },
         "adaptation": adaptation,
+        "overclaim_guard": overclaim_records,
         "provenance": project_snapshot["provenance"],
     }
 

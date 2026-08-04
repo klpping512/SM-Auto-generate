@@ -51,6 +51,26 @@ def test_diagnose_empty_pool():
 
 
 def test_diagnose_category_mismatch_inventory():
+    # 放闸(preparation 模式)后：customs 节点 eligible 集扩到
+    # {customs,warehouse,delivery}，warehouse 库存不再是 mismatch；
+    # 仍未放闸的 staff/facility 保持 mismatch 判定。
+    brief = _customs_brief()
+    segments = [
+        _seg(1, 10, "staff", description="分拣人员"),
+        _seg(2, 11, "staff", description="检查作业"),
+        _seg(3, 12, "facility", description="园区设施"),
+    ]
+    diag = hotspot_video_planner.diagnose_owned_matching(segments, brief)
+    assert diag["verdict"] == "category_mismatch"
+    assert diag["funnel"]["not_licensed_stock"] == 3
+    assert diag["funnel"]["category_match"] == 0
+    assert diag["category_inventory"] == {"staff": 2, "facility": 1}
+    assert len(diag["dropped_by_category_mismatch"]) == 3
+    assert set(diag["eligible_categories"] or []) == {"customs", "warehouse", "delivery"}
+
+
+def test_diagnose_gate_open_admits_warehouse_inventory_for_customs_brief():
+    # 同一条清关 brief，warehouse 库存在放闸后直接过漏斗，verdict 升级。
     brief = _customs_brief()
     segments = [
         _seg(1, 10, "warehouse", description="仓内分拣"),
@@ -58,12 +78,10 @@ def test_diagnose_category_mismatch_inventory():
         _seg(3, 12, "warehouse", description="入库作业"),
     ]
     diag = hotspot_video_planner.diagnose_owned_matching(segments, brief)
-    assert diag["verdict"] == "category_mismatch"
-    assert diag["funnel"]["not_licensed_stock"] == 3
-    assert diag["funnel"]["category_match"] == 0
-    assert diag["category_inventory"].get("warehouse", 0) == 3
-    assert len(diag["dropped_by_category_mismatch"]) == 3
-    assert "customs" in (diag["eligible_categories"] or [])
+    assert diag["verdict"] == "thin_but_matched"
+    assert diag["funnel"]["category_match"] == 3
+    assert diag["funnel"]["after_dedup"] == 3
+    assert not diag.get("dropped_by_category_mismatch")
 
 
 def test_diagnose_thin_but_matched():

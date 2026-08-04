@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import model_router
 import douyin_copywriting_sop
+import hotspot_video_planner
 from video_composition_policy import scene_voiceover_char_limit
 
 
@@ -137,6 +138,7 @@ def build_messages(topic: str, brief: dict, scenes: list[dict], related_events: 
             "scene": index + 1,
             "role": scene.get("scene_role"),
             "evidence_type": scene.get("evidence_type"),
+            "primary_category": scene.get("primary_category"),
             "visual": scene.get("visual"),
             "event_clip_id": scene.get("event_clip_id"),
             "asset_id": scene.get("asset_id"),
@@ -292,6 +294,79 @@ def deterministic_evidence_issues(proposal: dict, related_events: list[dict]) ->
     return issues
 
 
+# 清关 preparation 模式的确定性过度宣称黑名单。完成词均含「已…」或「…完成」，
+# 准备词用「待/等待/前/准备/备齐」，子串集合天然不重叠（由单测证明）。
+# 注意：不带「已」的「海关放行/货物放行」与指令要求放行的准备式
+# 「等待海关放行」存在子串重叠、无法用子串黑名单区分，故不入表；
+# 「已放行」已足以覆盖完成宣称。
+CUSTOMS_DONE_CLAIMS = (
+    "已清关", "清关完成", "完成清关", "已通关", "通关完成",
+    "已放行", "已报关完成",
+)
+DELIVERY_DONE_CLAIMS = (
+    "已送达", "已交付", "已签收", "派送完成", "已妥投", "妥投完成", "送达客户",
+)
+_CUSTOMS_NODE_TERMS = {"清关", "customs", "关税"}
+_NON_CUSTOMS_CATEGORIES = {"warehouse", "delivery", "staff", "facility"}
+
+
+def overclaim_completion_issues(voiceover: str, primary_category: str, logistics_nodes: list[str]) -> list[str]:
+    """当一条 scene 用非-customs 素材在 customs 节点下宣称已完成受监管结果时，
+    返回问题列表（非空即违规）。纯确定性子串匹配，无模型调用，可单测。"""
+    category = str(primary_category or "").casefold()
+    if category not in _NON_CUSTOMS_CATEGORIES:
+        return []
+    nodes = {str(node).casefold() for node in (logistics_nodes or [])}
+    if not (nodes & _CUSTOMS_NODE_TERMS):
+        return []
+    text = str(voiceover or "")
+    issues: list[str] = []
+    for term in CUSTOMS_DONE_CLAIMS:
+        if term in text:
+            issues.append(f"非清关素材不得宣称清关已完成：命中完成词「{term}」；只能说清关前的准备动作。")
+    for term in DELIVERY_DONE_CLAIMS:
+        if term in text:
+            issues.append(f"非清关素材不得宣称交付已完成：命中完成词「{term}」；只能说发运前的准备动作。")
+    return issues
+
+
+def apply_overclaim_guard(
+    generated_scenes: list[dict],
+    scenes: list[dict],
+    logistics_nodes: list[str],
+) -> list[dict]:
+    """对模型产出的逐镜文案做后置确定性拦截，命中即回退安全准备式文案。
+
+    返回 overclaim_guard 命中记录（含原句、分类、替换后文案），供生产链
+    写入渲染报告。回退文案同步到 text_overlay，确保字幕与旁白一致。
+    """
+    records: list[dict] = []
+    for index, (item, scene) in enumerate(zip(generated_scenes, scenes)):
+        voiceover = str(item.get("voiceover") or "")
+        overlay = str(item.get("text_overlay") or "")
+        category = str(scene.get("primary_category") or "")
+        issues = overclaim_completion_issues(f"{voiceover} {overlay}", category, logistics_nodes)
+        if not issues:
+            continue
+        try:
+            max_chars = scene_voiceover_char_limit(scene)
+        except (TypeError, ValueError):
+            max_chars = None
+        safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
+            category, max_chars=max_chars, min_chars=5,
+        )
+        records.append({
+            "scene": index + 1,
+            "primary_category": category,
+            "issues": issues,
+            "original_voiceover": voiceover,
+            "replaced_voiceover": safe_copy,
+        })
+        item["voiceover"] = safe_copy
+        item["text_overlay"] = safe_copy.rstrip("。")[:24]
+    return records
+
+
 def generate_narration(
     topic: str,
     brief: dict,
@@ -335,9 +410,13 @@ def generate_narration(
     issues = [*issues, *deterministic_evidence_issues(proposal, related_events)]
     approved = approved and not issues
     if approved:
+        guard_records = apply_overclaim_guard(
+            proposal["scenes"], scenes, brief.get("logistics_nodes") or [],
+        )
         return proposal, {
             "planner": planner_meta, "critic": critic_meta,
             "prompt_version": PROMPT_VERSION, "revision_count": 0,
+            "overclaim_guard": guard_records,
         }
 
     revision_messages = [
@@ -352,8 +431,12 @@ def generate_narration(
     approved = approved and not revised_issues
     if not approved:
         raise ValueError("Qwen 旁白未通过事实审计：" + "；".join(revised_issues[:3]))
+    guard_records = apply_overclaim_guard(
+        revised["scenes"], scenes, brief.get("logistics_nodes") or [],
+    )
     return revised, {
         "planner": revised_planner_meta, "critic": revised_critic_meta,
         "initial_critic": {"approved": False, "issues": issues, **critic_meta},
         "prompt_version": PROMPT_VERSION, "revision_count": 1,
+        "overclaim_guard": guard_records,
     }

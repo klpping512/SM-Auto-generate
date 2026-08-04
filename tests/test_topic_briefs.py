@@ -72,12 +72,17 @@ def test_custom_topic_does_not_use_same_source_but_unrelated_hotspot_clip():
     assert all(scene.get("event_clip_id") != 1 for scene in scenes)
 
 
-def test_custom_customs_and_last_mile_brief_rejects_warehouse_and_generic_stock():
+def test_custom_customs_and_last_mile_brief_admits_owned_warehouse_but_not_generic_stock():
+    # 放闸(preparation 模式)后：清关+末端 brief 允许自有 warehouse 素材作准备
+    # 上下文；通用授权库存（mixkit）仍不得入片；口播只能是准备式文案，
+    # 绝不含「已清关/已送达」类完成词（由 overclaim 门禁兜底）。
+    from hotspot_preview_narration import overclaim_completion_issues
     from hotspot_video_planner import plan_followup_scenes
 
+    brief = {"topic_brief_id": "brief-1", "logistics_topic": "南非清关与末端配送风险",
+             "logistics_nodes": ["清关", "末端"], "angle": "核对节点", "hotspot_type": "unknown"}
     scenes = plan_followup_scenes(
-        {"topic_brief_id": "brief-1", "logistics_topic": "南非清关与末端配送风险",
-         "logistics_nodes": ["清关", "末端"], "angle": "核对节点", "hotspot_type": "unknown"},
+        brief,
         [],
         [
             {"id": 1, "asset_id": 1, "asset_file_type": "video", "primary_category": "warehouse", "asset_name": "Buffalo 仓库", "asset_source": "upload"},
@@ -85,7 +90,13 @@ def test_custom_customs_and_last_mile_brief_rejects_warehouse_and_generic_stock(
         ],
     )
 
-    assert scenes == []
+    owned = [scene for scene in scenes if scene.get("scene_role") == "owned_proof"]
+    assert {scene["asset_segment_id"] for scene in owned} == {1}  # 通用库存仍被拒
+    for scene in owned:
+        voiceover = scene["voiceover"]
+        assert "已清关" not in voiceover and "已送达" not in voiceover
+        assert overclaim_completion_issues(voiceover, scene.get("primary_category") or "warehouse",
+                                           brief["logistics_nodes"]) == []
 
 
 def test_custom_last_mile_brief_can_use_delivery_and_explicit_pre_delivery_preparation():

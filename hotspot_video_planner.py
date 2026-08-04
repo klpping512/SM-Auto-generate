@@ -154,11 +154,12 @@ def _eligible_owned_categories(brief: dict) -> set[str] | None:
     if not brief.get("topic_brief_id"):
         return None
     nodes = [str(node).casefold() for node in (brief.get("logistics_nodes") or [])]
-    # Customs is a distinct regulated step.  A combined customs + delivery
-    # brief must wait for customs evidence instead of silently treating a
-    # warehouse preparation shot as customs proof.
     if any(node in {"清关", "customs", "关税"} for node in nodes):
-        return {"customs"}
+        # 放闸(preparation 模式)：无真 customs 素材时，允许 warehouse(备货)/
+        # delivery(发运)作为"清关前准备"上下文。customs 真素材仍由 rank()
+        # 的节点标签相关性优先选中；准入放宽的同时，文案必须由
+        # overclaim_completion_issues 门禁确保只说准备、不宣称已清关。
+        return {"customs", "warehouse", "delivery"}
     categories: set[str] = set()
     for node in nodes:
         categories.update(NODE_CATEGORY_RULES.get(str(node).casefold(), set()))
@@ -554,6 +555,33 @@ def _owned_image_candidates(images: Iterable[dict], brief: dict) -> list[dict]:
     return result
 
 
+def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
+                                  min_chars: int | None = None) -> str:
+    """清关 preparation 模式的安全兼底文案：只说准备、绝不含完成词。
+
+    纯确定性、无模型调用；供规划模板与过度宣称门禁回退共用。
+    长句在前、短句在后，按字数边界选最长可用档位。
+    """
+    labels = {"warehouse": "仓内备货", "delivery": "发运准备",
+              "staff": "分拣与核对", "facility": "现场准备"}
+    label = labels.get(str(category or "").casefold(), "仓内准备")
+    variants = (
+        f"清关前的{label}：先在仓内把单证与货物备齐，等待海关放行。",
+        f"清关前的{label}：单证与货物正在备齐，等待海关放行。",
+        f"清关前的{label}：先把单证与货物备齐。",
+        f"清关前的{label}：单证与货物备齐中。",
+    )
+    fallback = variants[-1]
+    for copy in variants:
+        compact_length = len("".join(copy.split()))
+        if min_chars is not None and compact_length < min_chars:
+            continue
+        if max_chars is not None and compact_length > max_chars:
+            continue
+        return copy
+    return fallback
+
+
 def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "") -> str:
     topic = brief.get("logistics_topic") or "物流体验"
     if role == "hotspot_evidence":
@@ -576,6 +604,14 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
             for node in (brief.get("logistics_nodes") or [])
         ):
             return f"{openings[(index - 1) % len(openings)]}配送前的{labels.get(category, '仓内准备')}，先把异常留在仓内。"
+        if category in {"warehouse", "delivery"} and any(
+            str(node).casefold() in {"清关", "customs", "关税"}
+            for node in (brief.get("logistics_nodes") or [])
+        ):
+            # preparation 模式安全基线：非真 customs 素材只能作清关前准备
+            # 上下文；文案只用准备词，绝不宣称已清关/已放行。不加开场
+            # 前缀，避免叠加后突破预览链的单镜字数上限。
+            return safe_customs_preparation_copy(category)
         return f"{openings[(index - 1) % len(openings)]}Buffalo 用{labels.get(category, '仓配流程')}承接每一步。"
     return "热点会变化，履约准备要先到位。"
 
@@ -757,6 +793,8 @@ def plan_followup_scenes(
                 "voiceover": _voiceover(brief, "owned_proof", position, "", category),
                 "text_overlay": f"{brief.get('logistics_topic', '物流体验')}｜{category or '履约现场'}"[:24],
                 "asset_id": segment.get("asset_id"), "asset_segment_id": segment.get("id"),
+                # 文案门禁需要按镜头主分类精准拦截过度宣称。
+                "primary_category": category,
                 "asset_start_ms": segment.get("start_ms", 0), "asset_end_ms": segment.get("end_ms", 0),
                 "copy_anchor": _owned_copy_anchor(segment),
                 "action_key": _owned_action_key(segment),

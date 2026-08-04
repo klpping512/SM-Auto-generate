@@ -264,8 +264,10 @@ def test_transport_topic_admits_misclassified_warehouse_when_port_tags_prove_del
     assert [item["id"] for item in candidates] == [201]
 
 
-def test_customs_node_still_rejects_port_tags_without_customs_evidence():
-    from hotspot_video_planner import _owned_candidates
+def test_customs_node_admits_warehouse_preparation_assets_after_gate_open():
+    # 放闸(preparation 模式)后：customs 节点允许 warehouse 素材作清关前准备
+    # 上下文（总指挥拍板，防过度宣称由 overclaim 文案门禁负责，不在准入层拦）。
+    from hotspot_video_planner import _eligible_owned_categories, _owned_candidates
 
     brief = {"topic_brief_id": 1, "logistics_topic": "清关风险", "logistics_nodes": ["清关"]}
     port_only = {
@@ -282,8 +284,9 @@ def test_customs_node_still_rejects_port_tags_without_customs_evidence():
         "tags": [{"dimension": "scene", "value": "清关"}],
     }
 
+    assert _eligible_owned_categories(brief) == {"customs", "warehouse", "delivery"}
     candidates = _owned_candidates([port_only, customs_clip], brief)
-    assert [item["id"] for item in candidates] == [302]
+    assert {item["id"] for item in candidates} == {301, 302}
 
 
 def test_transport_ranking_prefers_port_tag_overlap_over_generic_delivery_quality():
