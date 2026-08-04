@@ -16,5 +16,10 @@ def test_assets_page_exposes_manual_segment_tagging_for_admins():
     assert "待复核" in page
     assert "分类为其他" in page
     assert "保存此镜头标签" in page
-    assert "主场景（影响物流节点匹配）" in page
+    assert "主场景（粗分类，只做节点门禁；细匹配看下方标签）" in page
     assert "后续自动重建不会覆盖" in page
+    assert "港口码头" in page
+    assert "集装箱堆场" in page
+    assert "吊机" in page
+    assert "堆放" in page
+    assert "粗分类，只做物流节点门禁" in page

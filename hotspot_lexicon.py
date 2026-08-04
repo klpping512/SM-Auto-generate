@@ -124,6 +124,10 @@ NODE_EXPANSIONS: dict[str, tuple[str, ...]] = {
         "末端", "配送", "交付", "delivery", "traffic", "congestion",
         "road", "screening", "拥堵", "道路",
     ),
+    "运输": (
+        "运输", "干线", "港口", "port", "harbour", "卡车", "shipping", "transport",
+        "集装箱", "船舶", "货轮", "港口作业", "港口码头", "集装箱堆场", "吊机", "装卸",
+    ),
     "仓储": ("仓储", "仓库", "入库", "分拣", "warehouse"),
     "入库": ("仓储", "仓库", "入库", "warehouse"),
     "分拣": ("分拣", "仓库", "warehouse"),

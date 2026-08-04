@@ -239,6 +239,77 @@ def test_transport_topic_can_use_branded_truck_at_warehouse_without_reclassifyin
     assert [item["id"] for item in candidates] == [145]
 
 
+def test_transport_topic_admits_misclassified_warehouse_when_port_tags_prove_delivery():
+    from hotspot_video_planner import _functional_categories, _owned_candidates
+
+    brief = {"topic_brief_id": 1, "logistics_topic": "干线运输", "logistics_nodes": ["运输"]}
+    mislabeled_port = {
+        "id": 201, "asset_id": 201, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "warehouse", "quality_score": 0.7,
+        "tags": [
+            {"dimension": "scene", "value": "港口作业"},
+            {"dimension": "object", "value": "集装箱"},
+            {"dimension": "entity", "value": "港口"},
+            {"dimension": "action", "value": "堆放"},
+        ],
+    }
+    plain_warehouse = {
+        "id": 202, "asset_id": 202, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "warehouse", "quality_score": 0.95, "tags": [],
+    }
+
+    assert "delivery" in _functional_categories(mislabeled_port)
+    assert "delivery" not in _functional_categories(plain_warehouse)
+    candidates = _owned_candidates([plain_warehouse, mislabeled_port], brief)
+    assert [item["id"] for item in candidates] == [201]
+
+
+def test_customs_node_still_rejects_port_tags_without_customs_evidence():
+    from hotspot_video_planner import _owned_candidates
+
+    brief = {"topic_brief_id": 1, "logistics_topic": "清关风险", "logistics_nodes": ["清关"]}
+    port_only = {
+        "id": 301, "asset_id": 301, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "warehouse", "quality_score": 0.9,
+        "tags": [
+            {"dimension": "scene", "value": "港口作业"},
+            {"dimension": "object", "value": "集装箱"},
+        ],
+    }
+    customs_clip = {
+        "id": 302, "asset_id": 302, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "customs", "quality_score": 0.8,
+        "tags": [{"dimension": "scene", "value": "清关"}],
+    }
+
+    candidates = _owned_candidates([port_only, customs_clip], brief)
+    assert [item["id"] for item in candidates] == [302]
+
+
+def test_transport_ranking_prefers_port_tag_overlap_over_generic_delivery_quality():
+    from hotspot_video_planner import _owned_candidates
+
+    brief = {"topic_brief_id": 1, "logistics_topic": "干线运输", "logistics_nodes": ["运输"]}
+    generic_delivery = {
+        "id": 401, "asset_id": 401, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "delivery", "quality_score": 0.95,
+        "tags": [{"dimension": "brand", "value": "Buffalo"}],
+    }
+    port_delivery = {
+        "id": 402, "asset_id": 402, "asset_file_type": "video", "asset_source": "upload",
+        "primary_category": "delivery", "quality_score": 0.7,
+        "tags": [
+            {"dimension": "brand", "value": "Buffalo"},
+            {"dimension": "scene", "value": "港口作业"},
+            {"dimension": "object", "value": "集装箱"},
+            {"dimension": "entity", "value": "船舶"},
+        ],
+    }
+
+    candidates = _owned_candidates([generic_delivery, port_delivery], brief)
+    assert [item["id"] for item in candidates] == [402, 401]
+
+
 def test_road_disruption_can_use_warehouse_preparation_as_delivery_context():
     from hotspot_video_planner import _owned_candidates
 

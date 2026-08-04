@@ -117,23 +117,27 @@ TAG_TERMS = {
     },
     "entity": {
         "卡车": ("卡车", "货车", "拖车", "truck"),
-        "集装箱": ("集装箱", "container"),
+        "集装箱": ("集装箱", "货柜", "container"),
         "船舶": ("船舶", "货轮", "vessel", "ship"),
+        "吊机": ("吊机", "起重机", "龙门吊", "crane", "gantry"),
         "仓库": ("海外仓", "仓库", "warehouse"),
-        "港口": ("港口", "port", "terminal"),
+        "港口": ("港口", "码头", "port", "harbour", "terminal"),
         "团队": ("团队", "员工", "staff", "team"),
     },
     "action": {
         "排队": ("排队", "拥堵", "queue", "congestion"),
         "分拣": ("分拣", "sorting", "sort"),
         "装卸": ("装卸", "loading", "unloading"),
+        "堆放": ("堆放", "堆码", "stacking", "stacked"),
         "运输": ("运输", "行驶", "shipping", "transport"),
         "签收": ("签收", "receipt", "received"),
         "入库": ("入库", "inbound"),
         "出库": ("出库", "outbound"),
     },
     "scene": {
-        "港口作业": ("港口", "port", "terminal"),
+        "港口作业": ("港口", "port", "terminal", "harbour"),
+        "港口码头": ("码头", "port terminal", "quay", "berth"),
+        "集装箱堆场": ("堆场", "container yard", "container terminal"),
         "仓库作业": ("海外仓", "仓库", "分拣", "入库", "出库", "warehouse", "sorting"),
         "道路运输": ("卡车", "运输", "truck", "transport"),
     },
@@ -145,9 +149,21 @@ MODEL_TAG_ALIASES = {
     "scene": {
         "delivery": "道路运输", "road transport": "道路运输", "transport": "道路运输",
         "warehouse": "仓库作业", "warehouse operation": "仓库作业",
+        "port": "港口作业", "port operation": "港口作业", "harbour": "港口作业",
+        "port terminal": "港口码头", "quay": "港口码头",
+        "container yard": "集装箱堆场", "container terminal": "集装箱堆场",
     },
     "object": {
         "truck": "卡车", "lorry": "卡车", "trailer": "拖车", "van": "货车",
+        "container": "集装箱", "crane": "吊机", "gantry": "吊机",
+        "ship": "船舶", "vessel": "船舶",
+    },
+    "action": {
+        "stacking": "堆放", "stacked": "堆放", "loading": "装卸", "unloading": "装卸",
+    },
+    "entity": {
+        "port": "港口", "harbour": "港口", "terminal": "港口",
+        "ship": "船舶", "vessel": "船舶", "crane": "吊机",
     },
 }
 

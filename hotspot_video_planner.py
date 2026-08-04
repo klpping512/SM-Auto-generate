@@ -186,6 +186,22 @@ def _eligible_owned_categories(brief: dict) -> set[str] | None:
     return categories
 
 
+# 多维标签 → 干线/配送能力。主场景误标成仓库时，港口/集装箱等标签仍可进入运输节点。
+_DELIVERY_TAG_VALUES = frozenset({
+    "道路运输", "delivery", "road transport", "transport",
+    "卡车", "货车", "truck", "trailer", "拖车",
+    "港口作业", "港口", "港口码头", "集装箱堆场", "集装箱", "货柜",
+    "船舶", "货轮", "吊机", "装卸", "堆放",
+    "port", "harbour", "terminal", "container", "crane", "vessel", "ship",
+})
+_WAREHOUSE_TAG_VALUES = frozenset({
+    "仓库作业", "仓库", "warehouse", "warehouse operation", "货架", "分拣", "入库", "出库",
+})
+_CUSTOMS_TAG_VALUES = frozenset({
+    "清关", "海关", "customs", "clearance", "报关", "关税",
+})
+
+
 def _functional_categories(segment: dict) -> set[str]:
     """从主分类和已识别画面语义共同推导可支持的物流能力。
 
@@ -198,13 +214,54 @@ def _functional_categories(segment: dict) -> set[str]:
         for tag in (segment.get("tags") or [])
         if str(tag.get("dimension") or "") in {"scene", "object", "entity", "action"}
     }
-    if values & {"道路运输", "delivery", "road transport", "transport", "卡车", "货车", "truck", "trailer", "拖车"}:
+    if values & _DELIVERY_TAG_VALUES:
         categories.add("delivery")
-    if values & {"仓库作业", "仓库", "warehouse", "warehouse operation"}:
+    if values & _WAREHOUSE_TAG_VALUES:
         categories.add("warehouse")
-    if values & {"清关", "海关", "customs", "clearance"}:
+    if values & _CUSTOMS_TAG_VALUES:
         categories.add("customs")
     return categories - {""}
+
+
+def _owned_tag_values(item: dict) -> set[str]:
+    return {
+        str(tag.get("value") or "").casefold()
+        for tag in (item.get("tags") or [])
+        if str(tag.get("dimension") or "") in {"scene", "object", "entity", "action"}
+        and str(tag.get("value") or "").strip()
+    }
+
+
+def _brief_wanted_tag_terms(brief: dict) -> set[str]:
+    """当前物流节点期望的多维标签词，用于候选排序而非硬门禁。"""
+    wanted: set[str] = set()
+    for node in brief.get("logistics_nodes") or []:
+        wanted.update(str(term).casefold() for term in hotspot_lexicon.expand_node_terms(node))
+        normalized = str(node).casefold()
+        if normalized in {"运输", "配送", "末端", "last_mile", "交付"}:
+            wanted.update(_DELIVERY_TAG_VALUES)
+        if normalized in {"仓储", "入库", "分拣"}:
+            wanted.update(_WAREHOUSE_TAG_VALUES)
+        if normalized in {"清关", "customs", "关税"}:
+            wanted.update(_CUSTOMS_TAG_VALUES)
+    topic = str(brief.get("logistics_topic") or "").casefold()
+    if any(token in topic for token in ("运输", "港口", "干线", "配送", "port", "shipping")):
+        wanted.update(_DELIVERY_TAG_VALUES)
+    if any(token in topic for token in ("仓储", "仓库", "分拣", "入库", "warehouse")):
+        wanted.update(_WAREHOUSE_TAG_VALUES)
+    if any(token in topic for token in ("清关", "海关", "customs", "关税")):
+        wanted.update(_CUSTOMS_TAG_VALUES)
+    return {term for term in wanted if term}
+
+
+def _owned_node_tag_relevance(item: dict, brief: dict) -> float:
+    wanted = _brief_wanted_tag_terms(brief)
+    if not wanted:
+        return 0.0
+    overlap = len(wanted & _owned_tag_values(item))
+    if not overlap:
+        return 0.0
+    return overlap / max(3.0, min(float(len(wanted)), 8.0))
 
 
 def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
@@ -221,16 +278,21 @@ def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
         if eligible_categories is not None and not (functional_categories & eligible_categories):
             continue
         videos.append(item)
-    def rank(item: dict) -> tuple[float, float, int]:
+    def rank(item: dict) -> tuple[float, float, float, int]:
         # 保持功能分类作为准入门槛；在同类 Buffalo 自有视频里，优先使用可见
-        # 品牌标识的卡车/人员/仓库画面，避免成片出现泛物流素材却没有品牌承接。
+        # 品牌标识，其次与当前物流节点重合的多维标签，避免港口运输主题误选泛仓库镜头。
         visible_brands = {
             str(tag.get("value") or "").casefold()
             for tag in (item.get("tags") or [])
             if str(tag.get("dimension") or "") == "brand"
         }
         branded = 1.0 if "buffalo" in visible_brands else 0.0
-        return branded, float(item.get("quality_score") or 0), -int(item.get("id") or 0)
+        return (
+            branded,
+            _owned_node_tag_relevance(item, brief),
+            float(item.get("quality_score") or 0),
+            -int(item.get("id") or 0),
+        )
 
     videos.sort(key=rank, reverse=True)
     # 一个原始 Buffalo 视频无论被切成多少分析片段，在一条成片里也只能用一次。
