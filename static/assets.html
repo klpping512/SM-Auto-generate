@@ -19,10 +19,14 @@ let oneClickAssetId=null,oneClickBusy=false,oneClickSelected=new Set();
 const MAX_VIDEO_UPLOAD=2147483648,MAX_IMAGE_UPLOAD=15728640;
 const categoryNames={warehouse:'海外仓',delivery:'配送',customs:'清关',brand:'品牌',staff:'工作人员',facility:'设备设施',customer:'客户案例',other:'其他'};
 const TAG_DIMENSIONS=[['scene','场景'],['object','对象'],['action','动作'],['entity','实体'],['brand','品牌'],['region','地区']];
-const TAG_PRESETS={scene:['仓库作业','道路运输','港口作业','港口码头','集装箱堆场'],object:['卡车','集装箱','货架','叉车','包裹','传送带','货柜','吊机','货轮'],action:['分拣','装卸','运输','入库','出库','排队','签收','堆放'],entity:['仓库','港口','团队','船舶','吊机'],brand:['Buffalo'],region:['德班','开普敦','约翰内斯堡','南非']};
+const TAG_PRESETS={scene:['仓库作业','道路运输','港口作业','港口码头','集装箱堆场','货物存储','货架通道','货物分拣','装卸货区'],object:['卡车','集装箱','货架','叉车','包裹','货物','纸箱','托盘','周转箱','包装盒','传送带','货柜','吊机','货轮'],action:['分拣','装卸','运输','入库','出库','排队','签收','堆放','搬运货物','装卸货物','处理包裹','打包'],entity:['仓库','港口','团队','船舶','吊机','货物','集装箱'],brand:['Buffalo'],region:['德班','开普敦','约翰内斯堡','南非']};
 const QUICK_TAG_PRESETS=[
   {id:'buffalo',label:'Buffalo 品牌',tags:[{dimension:'brand',value:'Buffalo'}]},
   {id:'warehouse',label:'仓库作业',tags:[{dimension:'scene',value:'仓库作业'},{dimension:'entity',value:'仓库'}]},
+  {id:'cargo',label:'货物纸箱',tags:[{dimension:'object',value:'货物'},{dimension:'object',value:'纸箱'},{dimension:'entity',value:'货物'}]},
+  {id:'parcel',label:'包裹托盘',tags:[{dimension:'object',value:'包裹'},{dimension:'object',value:'托盘'},{dimension:'action',value:'处理包裹'}]},
+  {id:'cargo_move',label:'搬运装卸货',tags:[{dimension:'action',value:'搬运货物'},{dimension:'action',value:'装卸货物'},{dimension:'scene',value:'装卸货区'}]},
+  {id:'cargo_store',label:'货物存储',tags:[{dimension:'scene',value:'货物存储'},{dimension:'object',value:'货架'},{dimension:'action',value:'堆放'}]},
   {id:'road',label:'道路运输',tags:[{dimension:'scene',value:'道路运输'},{dimension:'object',value:'卡车'},{dimension:'action',value:'运输'}]},
   {id:'port',label:'港口作业',tags:[{dimension:'scene',value:'港口作业'},{dimension:'entity',value:'港口'}]},
   {id:'staff',label:'工作人员',tags:[{dimension:'entity',value:'团队'},{dimension:'action',value:'分拣'}]},

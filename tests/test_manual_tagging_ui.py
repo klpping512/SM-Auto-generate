@@ -23,6 +23,13 @@ def test_assets_page_exposes_manual_segment_tagging_for_admins():
     assert "吊机" in page
     assert "堆放" in page
     assert "粗分类，只做物流节点门禁" in page
+    assert "货物" in page
+    assert "纸箱" in page
+    assert "托盘" in page
+    assert "搬运货物" in page
+    assert "货物纸箱" in page
+    assert "包裹托盘" in page
+    assert "货物存储" in page
 
 
 def test_assets_page_exposes_multi_shot_tagging_workbench():
@@ -62,6 +69,11 @@ def test_assets_page_exposes_one_click_tagging_for_long_videos():
     assert "||'?'" not in page
     assert "applyOneClickViaSegments" in page
     assert "一键打标接口未加载，请重启 8080 后再试" in page
+    assert "id:'cargo'" in page
+    assert "label:'货物纸箱'" in page
+    assert "label:'包裹托盘'" in page
+    assert "label:'搬运装卸货'" in page
+    assert "label:'货物存储'" in page
 
 
 def test_assets_page_preserves_library_scroll_on_select_and_tag():

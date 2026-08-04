@@ -196,6 +196,10 @@ _DELIVERY_TAG_VALUES = frozenset({
 })
 _WAREHOUSE_TAG_VALUES = frozenset({
     "仓库作业", "仓库", "warehouse", "warehouse operation", "货架", "分拣", "入库", "出库",
+    "货物", "纸箱", "托盘", "包裹", "周转箱", "包装盒",
+    "货物存储", "货架通道", "货物分拣", "装卸货区",
+    "搬运货物", "装卸货物", "处理包裹", "打包",
+    "cargo", "parcel", "package", "pallet", "carton",
 })
 _CUSTOMS_TAG_VALUES = frozenset({
     "清关", "海关", "customs", "clearance", "报关", "关税",
