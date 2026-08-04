@@ -10,7 +10,9 @@
 | 1 | [画面素材分类统一](画面素材分类统一-Cursor执行指令.md) | 把散在多处的画面素材分类词表收敛到单一 `asset_taxonomy.py`，修两份 `CATEGORY_KEYWORDS` 漂移 bug | ✅已验收(主体) | 阶段 A+B 已验收（commit `0cbd945`+`d423323`）：四噪词干净删除、并集词无误删、边界守住。**验收新发现**：`asset_processing.py:97 CATEGORY_TERMS` 是第三份"关键词→分类"词表（且是**入库真正的规则分类器**），未并入、仍含「访谈」、与真源口径不一致（关税 vs 通关）。**阶段 C**（未做）范围因此扩为：①`semantic_matching._tag_map.category_tags` 对齐 ②`asset_processing.CATEGORY_TERMS` 改为 import `asset_taxonomy.CATEGORY_KEYWORDS`。速修：删 `CATEGORY_TERMS.staff` 的「访谈」一行 |
 | 2 | [P0 匹配诊断仪表盘](P0-匹配诊断仪表盘-Cursor执行指令.md) | 匹配不足时暴露"饿在哪一侧、死在哪道闸"，停止盲目人工打标 | ✅已验收 | commit `8be5c70`+`364cb8d`。闸门谓词与 `_owned_candidates` 共享、零副作用、732 passed。**首跑 topic=清关**：verdict=category_mismatch，265 可用片过 customs 闸=0，库存全是 warehouse256/delivery83、**无 customs**；热点侧 4 hook 对得上。结论：清关是"严闸+零库存"内容缺口，语义向量救不了；两杠杆=放闸(抄末端 preparation 模式)/补内容 |
 
-| 3 | [P1 话题扫描](P1-话题扫描-Cursor执行指令.md) | 扫 8 个代表话题，分清三种死法各占多少，再决定 P1 买哪副药 | 🟡待执行 | 只循环调用 P0 现成端点，零新逻辑、不改 app.py。产出 Markdown 表 + `sweep-result.json` 回给总指挥 |
+| 3 | [P1 话题扫描](P1-话题扫描-Cursor执行指令.md) | 扫 8 个代表话题，分清三种死法各占多少，再决定 P1 买哪副药 | ✅已验收 | commit `01ba0f1`+`cc2fc24`。**读表修正**：`healthy 7/8` 是假象——`app.py:4315` 节点推导只认 5 词、其余塌缩到「运输」(eligible=delivery)，故关税/港口/成本/断链 4 行 funnel 全同=没测到。真测到 4 个：清关(customs 缺口)/末端(healthy)/仓储(owned 够但 hotspot=0 饿热点侧)/干线(healthy)。**结论**：无"关键词漏配"证据→不买语义向量；真信号=customs 内容缺口+节点推导覆盖窄 |
+
+| 4 | [P1.5 节点推导补覆盖+重扫](P1.5-节点推导补覆盖+重扫-Cursor执行指令.md) | 补「关税→清关(customs)」等缺失映射，重扫验证真实死法分布 | 🟡待执行 | 只追加 `_chat_video_logistics_nodes` 的 append 块，不动词表真源。**验证靶心=关税**是否跳成第 2 个 customs 缺口。会上生产：关税 eligible 收紧 delivery→customs |
 
 ## 背景速记（为什么做这些）
 
@@ -21,6 +23,8 @@
 ## 调优路线图（性价比排序）
 
 - **P0** 匹配诊断仪表盘 ← 指令 #2（先跑，最便宜，防止力气使错方向）
-- **P1** 匹配算法改造 ← **先扫一圈再拍板**。P0 清关跑出"内容缺口"这一种死法，语义向量救不了它。定 P1 前先跑一批话题(清关/末端/仓储/运输/关税/成本/港口/断链)分清三种死法：①`category_mismatch`+库有货但闸太严 → 改 NODE_CATEGORY_RULES 放闸(便宜)；②闸内有货但关键词 Jaccard 漏配 → 上语义向量(贵、治本)；③`empty_pool` 真没货 → 补内容。哪种占多数才决定买哪副药
+- **P1 已扫，结论=不买语义向量**。8 话题扫描后真测到 4 个，无"闸内有货却关键词漏配"证据。真实病灶两条，都不是匹配精度：①**customs 内容缺口 + 最严闸**(清关；关税补上节点覆盖后大概率也塌)；②**节点推导覆盖窄**(`app.py:4315` 仅认 清关/末端/配送/仓储/运输，其余塌缩到运输→delivery，卡在最上游)。
+- **P1.5 下一步(最高杠杆、便宜)**：补齐节点推导覆盖(关税→customs、港口→delivery/port 等)→重扫关税/港口/成本/断链验证真实死法→再定终局。预测终局=**customs 补内容 + 清关/关税放闸(抄末端 preparation 模式)**，非重写算法。
+- 另一条独立轨：**仓储 hotspot_pool=0** = 热点抓取覆盖问题(批次 07-24 无仓储 hook)，属抓取侧非打标侧。
 - **P2** 渲染参数快赢：字幕烧录 crf 28→18–20、preset veryfast→medium、TTS 加音色（立竿见影）
 - **P3** 质量闭环：评估权重偏向可改轴、重生成应重选素材而非同输入再渲

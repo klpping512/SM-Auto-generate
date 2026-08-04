@@ -454,25 +454,25 @@
   "关税": {
     "topic": "关税",
     "logistics_nodes": [
-      "运输"
+      "清关"
     ],
-    "starving_side": "none",
-    "hotspot_pool": 18,
-    "owned_pool": 45,
+    "starving_side": "owned",
+    "hotspot_pool": 4,
+    "owned_pool": 0,
     "hotspot_batch_age": "2026-07-24T09:16:37",
     "diagnostics": {
       "eligible_categories": [
-        "delivery"
+        "customs"
       ],
       "logistics_nodes": [
-        "运输"
+        "清关"
       ],
       "total_segments": 410,
       "funnel": {
         "is_video": 271,
         "not_licensed_stock": 265,
-        "category_match": 83,
-        "after_dedup": 45
+        "category_match": 0,
+        "after_dedup": 0
       },
       "dropped_by_category_mismatch": [
         {
@@ -497,6 +497,17 @@
         },
         {
           "asset_id": 5,
+          "segment_id": 4882,
+          "primary_category": "warehouse",
+          "functional_categories": [
+            "delivery",
+            "warehouse"
+          ],
+          "brand_visible": false,
+          "description": "海外仓全景2 仓库内部，地面堆放着纸箱，背景有货架和金属屋顶结构。 S"
+        },
+        {
+          "asset_id": 5,
           "segment_id": 4883,
           "primary_category": "warehouse",
           "functional_categories": [
@@ -514,6 +525,17 @@
           ],
           "brand_visible": false,
           "description": "海外仓展示2 仓库内景，大量纸箱堆放在货架和地面上的托盘中。"
+        },
+        {
+          "asset_id": 7,
+          "segment_id": 4885,
+          "primary_category": "warehouse",
+          "functional_categories": [
+            "delivery",
+            "warehouse"
+          ],
+          "brand_visible": false,
+          "description": "海外仓展示2 仓库内托盘上堆放着多个纸箱，背景是整齐的货架和库房空间。"
         },
         {
           "asset_id": 7,
@@ -554,39 +576,20 @@
           ],
           "brand_visible": false,
           "description": "海外仓展示6 仓库内部长长的过道，两侧是摆满纸箱的金属货架。"
-        },
-        {
-          "asset_id": 10,
-          "segment_id": 4890,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示6 仓库通道，两侧是排列整齐的货架和纸箱，远处有堆叠的货物。"
-        },
-        {
-          "asset_id": 46,
-          "segment_id": 4892,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示 仓库内部场景，地面堆放大量纸箱，背景有高层货架。"
         }
       ],
       "category_inventory": {
-        "warehouse": 178,
-        "facility": 9,
-        "brand": 1,
+        "warehouse": 256,
+        "delivery": 83,
+        "facility": 10,
+        "brand": 3,
         "staff": 3,
         "other": 1
       },
-      "verdict": "healthy",
-      "starving_side": "none",
-      "hotspot_pool": 18,
-      "owned_pool": 45,
+      "verdict": "category_mismatch",
+      "starving_side": "owned",
+      "hotspot_pool": 4,
+      "owned_pool": 0,
       "hotspot_batch_age": "2026-07-24T09:16:37"
     }
   },
@@ -871,139 +874,59 @@
   "供应链中断": {
     "topic": "供应链中断",
     "logistics_nodes": [
-      "运输"
+      "配送"
     ],
     "starving_side": "none",
-    "hotspot_pool": 18,
-    "owned_pool": 45,
+    "hotspot_pool": 7,
+    "owned_pool": 116,
     "hotspot_batch_age": "2026-07-24T09:16:37",
     "diagnostics": {
       "eligible_categories": [
-        "delivery"
+        "delivery",
+        "facility",
+        "staff",
+        "warehouse"
       ],
       "logistics_nodes": [
-        "运输"
+        "配送"
       ],
       "total_segments": 410,
       "funnel": {
         "is_video": 271,
         "not_licensed_stock": 265,
-        "category_match": 83,
-        "after_dedup": 45
+        "category_match": 263,
+        "after_dedup": 116
       },
       "dropped_by_category_mismatch": [
         {
-          "asset_id": 1,
-          "segment_id": 4880,
-          "primary_category": "warehouse",
+          "asset_id": 69,
+          "segment_id": 4933,
+          "primary_category": "brand",
           "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "俯瞰全景 一个宽敞的仓库内部，地面堆放着大量用塑料膜包裹或裸露的纸箱和托盘，远处"
-        },
-        {
-          "asset_id": 4,
-          "segment_id": 4881,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓全景 室内仓库场景，空旷的混凝土地面上有货架和堆叠的托盘货物。"
-        },
-        {
-          "asset_id": 5,
-          "segment_id": 4883,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓全景2 大型现代化仓库内部，地面有导向标线，货架上存放着货物，背景有“E-"
-        },
-        {
-          "asset_id": 7,
-          "segment_id": 4884,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示2 仓库内景，大量纸箱堆放在货架和地面上的托盘中。"
-        },
-        {
-          "asset_id": 7,
-          "segment_id": 4886,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示2 仓库内部，地面有标线，货架上堆满纸箱，一人穿着反光背心走过。"
-        },
-        {
-          "asset_id": 7,
-          "segment_id": 4887,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示2 仓库内部，地面空旷，后方有货架和堆放的货物。"
-        },
-        {
-          "asset_id": 9,
-          "segment_id": 4888,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
+            "brand"
           ],
           "brand_visible": true,
-          "description": "海外仓展示5 仓库内堆放着大量纸箱和货架，前景有破损的包裹。 23 歪"
+          "description": "IMG_5864 户外场景，右侧有BUFFALO物流品牌标识牌，一名男子坐在路边"
         },
         {
-          "asset_id": 10,
-          "segment_id": 4889,
-          "primary_category": "warehouse",
+          "asset_id": 126,
+          "segment_id": 5037,
+          "primary_category": "other",
           "functional_categories": [
-            "warehouse"
+            "other"
           ],
-          "brand_visible": false,
-          "description": "海外仓展示6 仓库内部长长的过道，两侧是摆满纸箱的金属货架。"
-        },
-        {
-          "asset_id": 10,
-          "segment_id": 4890,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示6 仓库通道，两侧是排列整齐的货架和纸箱，远处有堆叠的货物。"
-        },
-        {
-          "asset_id": 46,
-          "segment_id": 4892,
-          "primary_category": "warehouse",
-          "functional_categories": [
-            "warehouse"
-          ],
-          "brand_visible": false,
-          "description": "海外仓展示 仓库内部场景，地面堆放大量纸箱，背景有高层货架。"
+          "brand_visible": true,
+          "description": "IMG_6008 从车内视角透过车窗看到户外的广告牌，上方有圆形标志和文字。 C"
         }
       ],
       "category_inventory": {
-        "warehouse": 178,
-        "facility": 9,
         "brand": 1,
-        "staff": 3,
         "other": 1
       },
       "verdict": "healthy",
       "starving_side": "none",
-      "hotspot_pool": 18,
-      "owned_pool": 45,
+      "hotspot_pool": 7,
+      "owned_pool": 116,
       "hotspot_batch_age": "2026-07-24T09:16:37"
     }
   }

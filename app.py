@@ -4309,6 +4309,18 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
     # 可见准备动作，仍由文案门禁禁止承诺时效或路线结果。
     if any(term in " ".join((topic, evidence_text)).casefold() for term in ("道路", "路况", "路线", "卡车", "r60")):
         nodes.append("配送")
+    # 关税/进口税属海关事务：映射到清关节点，让 owned 匹配要求 customs 证据，
+    # 而不是把仓库/运输画面默认当作关税话题的合法素材（否则 eligible 会误落 delivery）。
+    combined = " ".join((topic, evidence_text)).casefold()
+    if any(term in combined for term in ("关税", "进口税", "出口税", "tariff", "duty")):
+        nodes.append("清关")
+    # 港口/码头作业属运输能力；显式补上，避免它靠 ["运输"] 兜底才凑巧命中。
+    if any(term in combined for term in ("港口", "港区", "码头", "港口作业", "港口码头", "port", "harbour", "harbor", "海运")):
+        nodes.append("运输")
+    # 供应链中断/罢工/拥堵直接改变提货、入库前准备与分拨安排：归到配送节点，
+    # 由规划器用仓内/人员实拍解释可见准备动作；文案门禁仍禁止承诺时效或路线结果。
+    if any(term in combined for term in ("中断", "断链", "供应链", "停摆", "罢工", "拥堵", "延误", "disruption", "strike", "congestion")):
+        nodes.append("配送")
     # The Hook curator has already confirmed a logistics bridge.  Without a
     # narrower node, use transport only as a preparation/action category; the
     # planner prompt still forbids claiming a completed delivery outcome.
