@@ -31,6 +31,11 @@ from video_duration_budget import rebalance_scenes_to_budget, platform_budget_ms
 QWEN_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 VOICES = {"Cherry"}
 MIMO_TTS_VOICE = "mimo_default"
+# 正式成片编码档位（仅非-fast 路径生效；preview/fast 路径仍走 ultrafast+crf28 保持快）
+# 原则：中间过渡片近视觉无损，只让"交付段"做真正压缩，减少三段重编码的代际损失。
+RENDER_FINAL_PRESET = os.environ.get("RENDER_PRESET", "medium")          # was veryfast — 同 crf 下压缩更充分=更锐
+RENDER_INTERMEDIATE_CRF = os.environ.get("RENDER_INTERMEDIATE_CRF", "18")  # 中间片近视觉无损
+RENDER_FINAL_CRF = os.environ.get("RENDER_FINAL_CRF", "20")              # 交付段压缩档
 FORMAL_MIN_SCENES = 7
 FORMAL_MAX_SCENES = 10
 FORMAL_MIN_DURATION_MS = 50_000
@@ -848,8 +853,8 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
         command += ["-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", "[mixed_audio]"]
     else:
         command += ["-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", f"{audio_index}:a"]
-    preset = "ultrafast" if fast else "veryfast"
-    crf_args = ["-crf", "28"] if fast else []
+    preset = "ultrafast" if fast else RENDER_FINAL_PRESET
+    crf_args = ["-crf", "28"] if fast else ["-crf", RENDER_INTERMEDIATE_CRF]
     return command + ["-r", "30", "-c:v", "libx264", "-preset", preset, *crf_args,
                       "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", str(segment)]
 
@@ -866,8 +871,8 @@ def _clip_source_command(
     command = [ffmpeg, "-y", "-ss", str(max(0, source_start)), "-i", str(source)]
     if source_end is not None and source_end > source_start:
         command += ["-t", str(round(source_end - source_start, 3))]
-    preset = "ultrafast" if fast else "veryfast"
-    crf = "28" if fast else "20"
+    preset = "ultrafast" if fast else RENDER_FINAL_PRESET
+    crf = "28" if fast else RENDER_INTERMEDIATE_CRF
     return command + [
         "-r", "30", "-c:v", "libx264", "-preset", preset, "-crf", crf,
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
@@ -942,7 +947,7 @@ def _transition_concat_command(
     command += [
         "-filter_complex", ";".join(filters),
         "-map", f"[{video_label}]", "-map", f"[{audio_label}]",
-        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-r", "30", "-c:v", "libx264", "-preset", RENDER_FINAL_PRESET, "-crf", RENDER_FINAL_CRF,
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
         "-movflags", "+faststart", str(output),
     ]

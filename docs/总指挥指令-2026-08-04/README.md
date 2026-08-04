@@ -12,7 +12,9 @@
 
 | 3 | [P1 话题扫描](P1-话题扫描-Cursor执行指令.md) | 扫 8 个代表话题，分清三种死法各占多少，再决定 P1 买哪副药 | ✅已验收 | commit `01ba0f1`+`cc2fc24`。**读表修正**：`healthy 7/8` 是假象——`app.py:4315` 节点推导只认 5 词、其余塌缩到「运输」(eligible=delivery)，故关税/港口/成本/断链 4 行 funnel 全同=没测到。真测到 4 个：清关(customs 缺口)/末端(healthy)/仓储(owned 够但 hotspot=0 饿热点侧)/干线(healthy)。**结论**：无"关键词漏配"证据→不买语义向量；真信号=customs 内容缺口+节点推导覆盖窄 |
 
-| 4 | [P1.5 节点推导补覆盖+重扫](P1.5-节点推导补覆盖+重扫-Cursor执行指令.md) | 补「关税→清关(customs)」等缺失映射，重扫验证真实死法分布 | 🟡待执行 | 只追加 `_chat_video_logistics_nodes` 的 append 块，不动词表真源。**验证靶心=关税**是否跳成第 2 个 customs 缺口。会上生产：关税 eligible 收紧 delivery→customs |
+| 4 | [P1.5 节点推导补覆盖+重扫](P1.5-节点推导补覆盖+重扫-Cursor执行指令.md) | 补「关税→清关(customs)」等缺失映射，重扫验证真实死法分布 | ✅已验收 | commit `7af451d`+`a5072ba`。预测 3/3 全中：关税跳成第 2 个 customs 缺口(0/0/owned/customs)、港口/成本/断链正确节点下真 healthy、无旧断言需改。**P1 诊断结案**：唯一 category_mismatch 来源=customs 内容缺口(清关+关税)，语义向量正式搁置 |
+
+| 5 | [P2 渲染参数快赢](P2-渲染参数快赢-Cursor执行指令.md) | 正式片锐化：中间片近视觉无损(crf18)+交付段 medium 预设，减代际损失 | ✅已验收 | 4 处参数已改（`video_renderer.py`），新增 `RENDER_PRESET/RENDER_INTERMEDIATE_CRF/RENDER_FINAL_CRF` 环境档位。**真实 job A/B 实测**（a5104b2e 重放）：总耗时 38.0s→60.8s(+60%)、体积 14.5MB→20.0MB(+37.5%)、字幕文字边缘能量+5%~15%（拉普拉斯客观度量）、质量门禁全过；preview 路径仍 ultrafast+crf28 未变。单条 ffmpeg 最长 22.9s≪180s 子进程超时，`cleanup_stale_jobs` 仅启动时跑一次→300s 红线风险低；首个 50–90s 正式片仍需观察 |
 
 ## 背景速记（为什么做这些）
 
