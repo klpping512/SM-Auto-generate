@@ -18,6 +18,7 @@ from typing import Callable
 import httpx
 from PIL import Image, ImageDraw, ImageFont
 
+import asset_taxonomy
 import database as db
 from video_clip_refs import ClipReferenceError, resolve_clip_ref
 from video_composition_policy import (
@@ -251,23 +252,9 @@ def run_cancelable_process(
                 if not active:
                     _ACTIVE_PROCESSES.pop(job_id, None)
 
-# 与 media_assets.CATEGORY_KEYWORDS 保持同步，用于渲染兜底时的场景关键词→分类匹配
-CATEGORY_KEYWORDS = {
-    "warehouse": ("海外仓", "仓库", "仓储", "warehouse", "storage", "stock", "货架", "外景",
-                  "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
-                  "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描", "货物"),
-    "delivery": ("配送", "快递", "物流", "运输", "派送", "卡车", "车辆", "路线",
-                 "delivery", "courier", "shipping", "logistics"),
-    "customs": ("清关", "海关", "报关", "通关", "customs", "clearance", "文件", "单据"),
-    "brand": ("品牌", "商标", "brand", "logo", "标识", "信息卡", "结尾"),
-    "staff": ("工作人员", "员工", "职员", "staff", "团队", "培训", "工人",
-              "办公", "开会", "会议", "面试", "合照", "团建"),
-    "facility": ("设备", "设施", "facility", "叉车", "传送带", "机器", "流水线"),
-    "customer": ("客户", "customer", "案例", "好评", "反馈", "见证", "采访"),
-}
-
-# 分类优先级：平分时按此顺序选择（物流场景仓库优先于人员）
-CATEGORY_PRIORITY = ["warehouse", "delivery", "customs", "facility", "brand", "customer", "staff"]
+# Back-compat aliases; canonical keyword/priority tables live in asset_taxonomy.
+CATEGORY_KEYWORDS = asset_taxonomy.CATEGORY_KEYWORDS
+CATEGORY_PRIORITY = asset_taxonomy.CATEGORY_PRIORITY
 
 
 def _match_asset_by_scene(scene_visual: str, available_assets: list[dict],

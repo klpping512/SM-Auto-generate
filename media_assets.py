@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from PIL import Image
 
+import asset_taxonomy
 import database as db
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -19,31 +20,9 @@ VIDEO_EXTS = {".mp4", ".mov", ".webm"}
 MAX_IMAGE = 15 * 1024 * 1024
 MAX_VIDEO = 2 * 1024 * 1024 * 1024
 UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
-CATEGORIES = {"warehouse", "delivery", "customs", "brand", "staff", "facility", "customer", "other"}
-
-# 子目录名 / 文件名关键词 → 分类映射。子目录优先于文件名。
-# 新增分类时在这里加关键词即可，无需改其他地方。
-CATEGORY_KEYWORDS = {
-    "warehouse": (
-        "海外仓", "仓库", "仓储", "warehouse", "storage", "stock", "货架", "外景",
-        # 仓库作业场景 — 这些是仓库运营的一部分，不是独立的人员素材
-        "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
-        "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描",
-    ),
-    "delivery": (
-        "配送", "快递", "物流", "运输", "派送", "卡车", "货车", "拖车", "厢式车",
-        "delivery", "courier", "shipping", "logistics", "truck", "van", "trailer",
-    ),
-    "customs": ("清关", "海关", "报关", "通关", "customs", "clearance"),
-    "brand": ("品牌", "商标", "brand", "logo", "标识"),
-    "staff": (
-        # 以人物为主体：肖像、团队照、办公场景、采访
-        "工作人员", "员工", "职员", "staff", "团队", "培训", "工人",
-        "办公", "开会", "会议", "面试", "访谈", "合照", "团建",
-    ),
-    "facility": ("设备", "设施", "facility", "叉车", "传送带", "机器", "流水线"),
-    "customer": ("客户", "customer", "案例", "好评", "反馈", "见证"),
-}
+# Back-compat aliases; canonical sets live in asset_taxonomy.
+CATEGORIES = asset_taxonomy.CATEGORIES
+CATEGORY_KEYWORDS = asset_taxonomy.CATEGORY_KEYWORDS
 
 
 def guess_category(path: Path, import_root: Path | None = None) -> str:

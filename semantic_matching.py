@@ -5,6 +5,7 @@ import math
 import re
 from datetime import datetime, timezone
 
+import asset_taxonomy
 from asset_processing import TAG_TERMS
 
 
@@ -34,13 +35,8 @@ MOOD_TERMS = {
 
 HOTSPOT_SCENE_ROLES = {"hotspot_hook", "hotspot_evidence", "fact_context", "impact_explainer"}
 OWNED_SCENE_ROLES = {"brand_proof", "owned_proof", "brand_close"}
-ROLE_CATEGORY_FIT = {
-    # 这是“画面职责→素材分类”的确定性证据，不是把任意素材抬成高分。
-    "brand_proof": {"warehouse", "staff", "facility", "delivery", "brand"},
-    "owned_proof": {"warehouse", "staff", "facility", "delivery", "brand"},
-    "brand_close": {"delivery", "warehouse", "facility", "brand"},
-    "impact_explainer": {"warehouse", "facility", "delivery"},
-}
+# Back-compat alias; canonical fit map lives in asset_taxonomy.
+ROLE_CATEGORY_FIT = asset_taxonomy.ROLE_CATEGORY_FIT
 SCENE_ROLE_ALIASES = {
     "事实钩子": "hotspot_hook",
     "事实说明": "fact_context",
@@ -117,6 +113,7 @@ def _tag_map(segment: dict) -> dict[str, set[str]]:
     # 两者在匹配时等价，保留向后兼容。
     result.setdefault("entity", set()).update(result.get("object", set()))
     category = segment.get("primary_category")
+    # TODO: 与 asset_taxonomy 对齐（category→标签反向映射，阶段 C）
     category_tags = {
         "warehouse": {"entity": {"仓库"}, "scene": {"仓库作业"}},
         "delivery": {"scene": {"道路运输"}},

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from video_composition_policy import source_usage_report
 from video_duration_budget import rebalance_scenes_to_budget
+import asset_taxonomy
 import hotspot_lexicon
 
 
@@ -51,25 +52,8 @@ def _usable_source_duration_ms(item: dict, *, start_ms: int | None = None, end_m
         return 0
     return min(7_000, measured)
 
-# A topic may only use a Buffalo clip when the clip's reviewed category can
-# actually support the node being discussed.  A warehouse aisle is useful for
-# "入库/分拣", but it is not proof of customs clearance or final-mile delivery.
-NODE_CATEGORY_RULES = {
-    "清关": {"customs"},
-    "customs": {"customs"},
-    "关税": {"customs"},
-    # A warehouse or sorting shot may support the *preparation before*
-    # delivery.  The narration below must label it as preparation, never as
-    # proof that the final-mile hand-off happened.
-    "末端": {"delivery", "warehouse", "staff", "facility"},
-    "last_mile": {"delivery", "warehouse", "staff", "facility"},
-    "配送": {"delivery", "warehouse", "staff", "facility"},
-    "交付": {"delivery", "warehouse", "staff", "facility"},
-    "运输": {"delivery"},
-    "仓储": {"warehouse", "staff", "facility"},
-    "入库": {"warehouse", "staff", "facility"},
-    "分拣": {"warehouse", "staff", "facility"},
-}
+# Back-compat aliases; canonical rules/tags live in asset_taxonomy.
+NODE_CATEGORY_RULES = asset_taxonomy.NODE_CATEGORY_RULES
 
 # Back-compat alias; expansions live in hotspot_lexicon.NODE_EXPANSIONS.
 NODE_TERMS = hotspot_lexicon.NODE_EXPANSIONS
@@ -186,24 +170,10 @@ def _eligible_owned_categories(brief: dict) -> set[str] | None:
     return categories
 
 
-# 多维标签 → 干线/配送能力。主场景误标成仓库时，港口/集装箱等标签仍可进入运输节点。
-_DELIVERY_TAG_VALUES = frozenset({
-    "道路运输", "delivery", "road transport", "transport",
-    "卡车", "货车", "truck", "trailer", "拖车",
-    "港口作业", "港口", "港口码头", "集装箱堆场", "集装箱", "货柜",
-    "船舶", "货轮", "吊机", "装卸", "堆放",
-    "port", "harbour", "terminal", "container", "crane", "vessel", "ship",
-})
-_WAREHOUSE_TAG_VALUES = frozenset({
-    "仓库作业", "仓库", "warehouse", "warehouse operation", "货架", "分拣", "入库", "出库",
-    "货物", "纸箱", "托盘", "包裹", "周转箱", "包装盒",
-    "货物存储", "货架通道", "货物分拣", "装卸货区",
-    "搬运货物", "装卸货物", "处理包裹", "打包",
-    "cargo", "parcel", "package", "pallet", "carton",
-})
-_CUSTOMS_TAG_VALUES = frozenset({
-    "清关", "海关", "customs", "clearance", "报关", "关税",
-})
+# Back-compat aliases; canonical capability tags live in asset_taxonomy.
+_DELIVERY_TAG_VALUES = asset_taxonomy.DELIVERY_TAG_VALUES
+_WAREHOUSE_TAG_VALUES = asset_taxonomy.WAREHOUSE_TAG_VALUES
+_CUSTOMS_TAG_VALUES = asset_taxonomy.CUSTOMS_TAG_VALUES
 
 
 def _functional_categories(segment: dict) -> set[str]:
