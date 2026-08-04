@@ -148,6 +148,34 @@ def test_manual_segment_classification_updates_asset_card_category(tmp_db):
     assert card["primary_category_source"] == "manual"
 
 
+def test_manual_brand_primary_category_updates_asset_card(tmp_db):
+    """回归：主场景选「品牌」后，卡片应显示 brand，不能仍是海外仓。"""
+    admin_client, admin_headers, _ = _client(tmp_db, username="brand-card-admin")
+    asset_id, segment_id = _asset_and_segment(tmp_db)
+    with tmp_db.get_conn() as conn:
+        conn.execute(
+            "UPDATE assets SET category='warehouse',primary_category='warehouse',primary_category_source='model' WHERE id=?",
+            (asset_id,),
+        )
+
+    response = admin_client.put(
+        f"/api/asset-segments/{segment_id}/classification", headers=admin_headers,
+        json={
+            "primary_category": "brand",
+            "tags": [{"dimension": "brand", "value": "Buffalo"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["primary_category"] == "brand"
+    asset = tmp_db.get_asset(asset_id)
+    assert asset["category"] == "brand"
+    assert asset["primary_category"] == "brand"
+    assert asset["primary_category_source"] == "manual"
+    card = next(item for item in admin_client.get("/api/assets", headers=admin_headers).json() if item["id"] == asset_id)
+    assert card["category"] == "brand"
+    assert card["primary_category"] == "brand"
+
+
 def test_sync_assets_to_manual_segment_categories_repairs_stale_cards(tmp_db):
     asset_id, segment_id = _asset_and_segment(tmp_db)
     with tmp_db.get_conn() as conn:

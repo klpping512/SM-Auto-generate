@@ -123,6 +123,9 @@ async def lifespan(app: FastAPI):
     os.environ.setdefault("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "1")
     os.environ.setdefault("HOTSPOT_PREWARM_ENABLED", "1")
     db.init_db()
+    repaired_manual_categories = db.sync_assets_to_manual_segment_categories()
+    if repaired_manual_categories:
+        logger.info("已同步 %s 个母片分类到人工确认的镜头主场景", repaired_manual_categories)
     recovered_fetch_runs = db.recover_interrupted_hotspot_fetch_runs()
     if recovered_fetch_runs:
         logger.warning("已恢复 %s 个被服务重启中断的热点抓取任务", recovered_fetch_runs)
