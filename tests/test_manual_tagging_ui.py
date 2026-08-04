@@ -62,3 +62,20 @@ def test_assets_page_exposes_one_click_tagging_for_long_videos():
     assert "||'?'" not in page
     assert "applyOneClickViaSegments" in page
     assert "一键打标接口未加载，请重启 8080 后再试" in page
+
+
+def test_assets_page_preserves_library_scroll_on_select_and_tag():
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "captureLibraryScroll" in page
+    assert "restoreLibraryScroll" in page
+    assert "requestAnimationFrame(()=>{apply();requestAnimationFrame(apply);})" in page
+    assert 'data-asset-id="${a.id}"' in page
+    assert "syncSelectionChrome" in page
+    assert "toggleSelect-fallback" in page
+    assert "toggleSelectAll-fallback" in page
+    assert "closeOneClickTag();await loadAssets();patchAssetCardCategory(taggedId,primary);}" in page
+    assert "closeOneClickTag();await loadAssets();patchAssetCardCategory(result.asset_id||oneClickAssetId,primary);render();}" not in page
+    assert "panel.outerHTML=html" in page
+    assert "data-brand-badge" in page
+    assert "assets[index]" not in page
