@@ -1495,6 +1495,23 @@ def list_asset_brand_tags(asset_ids: list[int]) -> dict[int, list[str]]:
     return result
 
 
+def list_asset_segment_counts(asset_ids: list[int]) -> dict[int, int]:
+    """返回每个素材的有效镜头数，供卡片决定是否展示一键打标。"""
+    ids = sorted({int(asset_id) for asset_id in asset_ids if asset_id is not None})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT asset_id, COUNT(*) AS cnt
+                 FROM asset_segments
+                 WHERE asset_id IN ({placeholders}) AND status='active'
+                 GROUP BY asset_id""",
+            ids,
+        ).fetchall()
+    return {int(row["asset_id"]): int(row["cnt"]) for row in rows}
+
+
 def backfill_visible_brand_tags(brand: str, markers: tuple[str, ...]) -> dict:
     """从既有 OCR/描述恢复确定可见的品牌标签，不猜测、不更改主分类。"""
     clean_brand = str(brand or "").strip()
@@ -4148,6 +4165,87 @@ def sync_assets_to_manual_segment_categories() -> int:
         return len(updates)
 
 
+def classify_all_asset_segments(
+    asset_id: int,
+    primary_category: str,
+    tags: list[dict] | None = None,
+    *,
+    replace_tags: bool = False,
+    updated_by: int | None = None,
+) -> dict:
+    """一键打标：同一主场景应用到全部镜头；默认合并细标签，可选覆盖。"""
+    preset_tags: list[dict] = []
+    for item in tags or []:
+        dimension = str(item.get("dimension") or "").strip()[:40]
+        value = str(item.get("value") or "").strip()[:100]
+        if not dimension or not value:
+            continue
+        preset_tags.append({
+            "dimension": dimension,
+            "value": value,
+            "confidence": 1.0,
+            "source": "manual",
+            "confirmed": True,
+        })
+
+    with get_conn() as conn:
+        asset_row = conn.execute("SELECT id FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not asset_row:
+            raise ValueError("素材不存在")
+        segment_rows = conn.execute(
+            """SELECT id FROM asset_segments
+               WHERE asset_id=? AND status='active'
+               ORDER BY segment_index, id""",
+            (asset_id,),
+        ).fetchall()
+        segment_ids = [int(row["id"]) for row in segment_rows]
+        if not segment_ids:
+            raise ValueError("素材尚无镜头")
+
+        for segment_id in segment_ids:
+            conn.execute(
+                "UPDATE asset_segments SET primary_category=?,primary_category_source='manual' WHERE id=?",
+                (primary_category, segment_id),
+            )
+            if replace_tags:
+                final_tags = list(preset_tags)
+            else:
+                merged: dict[tuple[str, str], dict] = {}
+                for tag in _segment_tags(conn, segment_id):
+                    key = (str(tag["dimension"]), _normalized_tag(tag["value"]))
+                    merged[key] = {
+                        "dimension": tag["dimension"],
+                        "value": tag["value"],
+                        "confidence": float(tag.get("confidence") or 0),
+                        "source": tag.get("source") or "rule",
+                        "confirmed": bool(tag.get("confirmed")),
+                    }
+                for tag in preset_tags:
+                    key = (tag["dimension"], _normalized_tag(tag["value"]))
+                    merged[key] = tag
+                final_tags = list(merged.values())
+            _replace_segment_tags_on_conn(conn, segment_id, final_tags, updated_by=updated_by)
+
+        conn.execute(
+            "UPDATE assets SET category=?,primary_category=?,primary_category_source='manual' WHERE id=?",
+            (primary_category, primary_category, asset_id),
+        )
+        conn.execute(
+            "UPDATE assets SET processing_status='ready' WHERE id=? AND processing_status='review_required'",
+            (asset_id,),
+        )
+        updated = len(segment_ids)
+
+    return {
+        "asset_id": asset_id,
+        "primary_category": primary_category,
+        "replace_tags": bool(replace_tags),
+        "updated": updated,
+        "total": updated,
+        "segment_ids": segment_ids,
+    }
+
+
 def create_asset_processing_job(asset_id: int, requested_by: int | None = None,
                                 processing_version: str = "semantic-v1") -> str:
     job_id = uuid4().hex
@@ -4408,35 +4506,39 @@ def recover_interrupted_local_asset_import_jobs() -> int:
         return len(rows)
 
 
+def _replace_segment_tags_on_conn(conn, segment_id: int, tags: list[dict], updated_by: int | None = None):
+    if not conn.execute("SELECT 1 FROM asset_segments WHERE id=?", (segment_id,)).fetchone():
+        raise ValueError("镜头不存在")
+    conn.execute("DELETE FROM segment_tags WHERE segment_id=?", (segment_id,))
+    for raw in tags:
+        dimension = str(raw.get("dimension") or "").strip()
+        value = str(raw.get("value") or "").strip()
+        normalized = _normalized_tag(value)
+        if not dimension or not normalized:
+            continue
+        conn.execute(
+            """INSERT INTO tags (dimension,normalized_value,display_value) VALUES (?,?,?)
+               ON CONFLICT(dimension,normalized_value) DO UPDATE SET display_value=excluded.display_value""",
+            (dimension, normalized, value),
+        )
+        tag_id = conn.execute(
+            "SELECT id FROM tags WHERE dimension=? AND normalized_value=?",
+            (dimension, normalized),
+        ).fetchone()["id"]
+        source = str(raw.get("source") or "rule")
+        confirmed = bool(raw.get("confirmed", source == "manual"))
+        conn.execute(
+            """INSERT INTO segment_tags
+               (segment_id,tag_id,confidence,source,confirmed,updated_by)
+               VALUES (?,?,?,?,?,?)""",
+            (segment_id, tag_id, float(raw.get("confidence") or 0), source, int(confirmed), updated_by),
+        )
+    _refresh_segment_fts(conn, segment_id)
+
+
 def replace_segment_tags(segment_id: int, tags: list[dict], updated_by: int | None = None):
     with get_conn() as conn:
-        if not conn.execute("SELECT 1 FROM asset_segments WHERE id=?", (segment_id,)).fetchone():
-            raise ValueError("镜头不存在")
-        conn.execute("DELETE FROM segment_tags WHERE segment_id=?", (segment_id,))
-        for raw in tags:
-            dimension = str(raw.get("dimension") or "").strip()
-            value = str(raw.get("value") or "").strip()
-            normalized = _normalized_tag(value)
-            if not dimension or not normalized:
-                continue
-            conn.execute(
-                """INSERT INTO tags (dimension,normalized_value,display_value) VALUES (?,?,?)
-                   ON CONFLICT(dimension,normalized_value) DO UPDATE SET display_value=excluded.display_value""",
-                (dimension, normalized, value),
-            )
-            tag_id = conn.execute(
-                "SELECT id FROM tags WHERE dimension=? AND normalized_value=?",
-                (dimension, normalized),
-            ).fetchone()["id"]
-            source = str(raw.get("source") or "rule")
-            confirmed = bool(raw.get("confirmed", source == "manual"))
-            conn.execute(
-                """INSERT INTO segment_tags
-                   (segment_id,tag_id,confidence,source,confirmed,updated_by)
-                   VALUES (?,?,?,?,?,?)""",
-                (segment_id, tag_id, float(raw.get("confidence") or 0), source, int(confirmed), updated_by),
-            )
-        _refresh_segment_fts(conn, segment_id)
+        _replace_segment_tags_on_conn(conn, segment_id, tags, updated_by=updated_by)
 
 
 def search_asset_segments(query: str = "", limit: int = 50, status: str = "active") -> list[dict]:

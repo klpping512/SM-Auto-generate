@@ -193,3 +193,90 @@ def test_sync_assets_to_manual_segment_categories_repairs_stale_cards(tmp_db):
     assert asset["category"] == "staff"
     assert asset["primary_category"] == "staff"
     assert asset["primary_category_source"] == "manual"
+
+
+def _asset_with_segments(tmp_db, count=3):
+    asset_id = tmp_db.create_asset({
+        "name": "长视频多镜", "filepath": "assets/library/video/long.mp4", "file_type": "video",
+        "category": "other", "duration": 60, "width": 1080, "height": 1920, "size": 200,
+        "thumbnail": "assets/thumbnails/long.jpg", "sha256": "e" * 64,
+        "source": "upload", "status": "active", "created_by": None,
+    })
+    segment_ids = []
+    for index in range(count):
+        segment_id = tmp_db.create_asset_segment({
+            "asset_id": asset_id, "segment_index": index,
+            "start_ms": index * 5_000, "end_ms": (index + 1) * 5_000,
+            "description": f"镜头 {index + 1}", "primary_category": "other",
+            "quality_score": 0.8, "orientation": "portrait",
+        })
+        tmp_db.replace_segment_tags(segment_id, [
+            {"dimension": "region", "value": "南非", "confidence": 0.7, "source": "model"},
+        ])
+        segment_ids.append(segment_id)
+    return asset_id, segment_ids
+
+
+def test_classify_all_requires_admin(tmp_db):
+    admin_client, admin_headers, _ = _client(tmp_db, username="classify-all-admin")
+    asset_id, _ = _asset_with_segments(tmp_db, count=2)
+    editor_client, editor_headers, _ = _client(tmp_db, role="editor", username="classify-all-editor")
+
+    assert editor_client.post(
+        f"/api/assets/{asset_id}/classify-all", headers=editor_headers,
+        json={"primary_category": "warehouse", "tags": []},
+    ).status_code == 403
+    response = admin_client.post(
+        f"/api/assets/{asset_id}/classify-all", headers=admin_headers,
+        json={
+            "primary_category": "warehouse",
+            "tags": [{"dimension": "scene", "value": "仓库作业"}, {"dimension": "brand", "value": "Buffalo"}],
+            "replace_tags": False,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["updated"] == 2
+    assert body["total"] == 2
+    assert body["primary_category"] == "warehouse"
+    assert body["asset"]["category"] == "warehouse"
+    assert body["asset"]["primary_category_source"] == "manual"
+
+    for segment in tmp_db.list_asset_segments(asset_id=asset_id):
+        assert segment["primary_category"] == "warehouse"
+        assert segment["primary_category_source"] == "manual"
+        values = {(tag["dimension"], tag["value"]) for tag in segment["tags"]}
+        assert ("region", "南非") in values
+        assert ("scene", "仓库作业") in values
+        assert ("brand", "Buffalo") in values
+
+
+def test_classify_all_replace_tags_wipes_existing_fine_tags(tmp_db):
+    admin_client, admin_headers, _ = _client(tmp_db, username="classify-all-replace")
+    asset_id, _ = _asset_with_segments(tmp_db, count=3)
+
+    response = admin_client.post(
+        f"/api/assets/{asset_id}/classify-all", headers=admin_headers,
+        json={
+            "primary_category": "brand",
+            "tags": [{"dimension": "brand", "value": "Buffalo"}],
+            "replace_tags": True,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["updated"] == 3
+    for segment in tmp_db.list_asset_segments(asset_id=asset_id):
+        assert segment["primary_category"] == "brand"
+        assert [tag["value"] for tag in segment["tags"]] == ["Buffalo"]
+    asset = tmp_db.get_asset(asset_id)
+    assert asset["category"] == "brand"
+    assert asset["primary_category"] == "brand"
+
+
+def test_assets_list_includes_segment_count(tmp_db):
+    client, headers, _ = _client(tmp_db, username="segment-count-user")
+    asset_id, _ = _asset_with_segments(tmp_db, count=4)
+
+    listed = client.get("/api/assets", headers=headers).json()
+    card = next(item for item in listed if item["id"] == asset_id)
+    assert card["segment_count"] == 4

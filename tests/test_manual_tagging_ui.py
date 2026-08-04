@@ -7,7 +7,7 @@ PAGE = Path(__file__).parents[1] / "static" / "assets.html"
 def test_assets_page_exposes_manual_segment_tagging_for_admins():
     page = PAGE.read_text(encoding="utf-8")
 
-    assert "人工打标" in page
+    assert "人工打标" in page or "逐镜精修" in page
     assert "saveSegmentClassification" in page
     assert "/api/asset-segments/${segmentId}/classification" in page
     assert "TAG_PRESETS" in page
@@ -40,3 +40,19 @@ def test_assets_page_exposes_multi_shot_tagging_workbench():
     assert "goNext:true" in page
     assert "skipAssetReload" in page
     assert "进度 ${confirmed}/${total}" in page
+
+
+def test_assets_page_exposes_one_click_tagging_for_long_videos():
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "一键打标" in page
+    assert "openOneClickTag" in page
+    assert "submitOneClickTag" in page
+    assert "QUICK_TAG_PRESETS" in page
+    assert "oneClickTagModal" in page
+    assert "/api/assets/${oneClickAssetId}/classify-all" in page
+    assert "覆盖细标签" in page
+    assert "已打标 ${updated}/${total}" in page
+    assert "逐镜精修" in page
+    assert "segment_count" in page
+    assert "应用到全部镜头" in page

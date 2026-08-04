@@ -57,6 +57,7 @@ from models import (
     GenerateRequest, GenerateResponse,
     QueueCreateRequest, AccountCreateRequest, AccountCredentialsRequest, ReviewRequest, ChatRequest, ChatDualLibraryVideoRequest,
     UserRole, SemanticMatchRequest, MatchSelectionRequest, SegmentClassificationRequest,
+    AssetClassifyAllRequest,
     InspirationCreateRequest, InspirationBatchRequest, InspirationRightsRequest,
     InspirationMaterializeRequest,
     HotspotMediaAttachRequest, HotspotMediaRightsRequest, HotspotMediaMaterializeRequest,
@@ -948,11 +949,14 @@ async def upload_file(file: UploadFile = File(...), user=Depends(get_current_use
 @app.get("/api/assets")
 async def list_media_assets(type: str = None, category: str = None, query: str = None, status: str = "active", user=Depends(get_current_user)):
     items = db.list_assets(type, category, query, status)
-    brand_tags = db.list_asset_brand_tags([item["id"] for item in items])
+    asset_ids = [item["id"] for item in items]
+    brand_tags = db.list_asset_brand_tags(asset_ids)
+    segment_counts = db.list_asset_segment_counts(asset_ids)
     result = []
     for item in items:
         public = media_assets.public_asset(item)
         public["brand_tags"] = brand_tags.get(int(item["id"]), [])
+        public["segment_count"] = segment_counts.get(int(item["id"]), 0)
         result.append(public)
     return result
 
@@ -2407,6 +2411,40 @@ async def update_segment_classification(
     db.replace_segment_tags(segment_id, tags, updated_by=user["id"])
     db.add_audit_log(user["id"], user["username"], "classify_asset_segment", target=str(segment_id))
     return db.get_asset_segment(segment_id)
+
+
+@app.post("/api/assets/{asset_id}/classify-all")
+async def classify_all_asset_segments(
+    asset_id: int, req: AssetClassifyAllRequest,
+    user=Depends(require_role(UserRole.ADMIN)),
+):
+    """一键打标：把同一主场景（及可选细标签）应用到母片全部镜头。"""
+    if req.primary_category not in asset_processing.PRIMARY_CATEGORIES:
+        raise HTTPException(400, "主分类无效")
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "素材不存在")
+    try:
+        result = db.classify_all_asset_segments(
+            asset_id,
+            req.primary_category,
+            req.tags,
+            replace_tags=bool(req.replace_tags),
+            updated_by=user["id"],
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(404 if ("不存在" in detail or "尚无" in detail) else 400, detail)
+    db.add_audit_log(
+        user["id"], user["username"], "classify_all_asset_segments",
+        target=str(asset_id),
+        detail=f"{result['updated']}/{result['total']} {req.primary_category}",
+    )
+    asset = db.get_asset(asset_id)
+    public = media_assets.public_asset(asset) if asset else {"id": asset_id}
+    public["brand_tags"] = db.list_asset_brand_tags([asset_id]).get(asset_id, [])
+    public["segment_count"] = result["total"]
+    return {**result, "asset": public}
 
 
 @app.post("/api/semantic-match", status_code=201)

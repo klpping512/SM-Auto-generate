@@ -204,6 +204,13 @@ class SegmentClassificationRequest(BaseModel):
     quality_score: float | None = None
 
 
+class AssetClassifyAllRequest(BaseModel):
+    """一键打标：同一主场景（+可选细标签）应用到母片全部镜头。"""
+    primary_category: str
+    tags: list[dict] = Field(default_factory=list)
+    replace_tags: bool = False
+
+
 class InspirationCreateRequest(BaseModel):
     url: str
     title: str = ""
