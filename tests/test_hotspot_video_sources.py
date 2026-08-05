@@ -23,11 +23,18 @@ def test_default_youtube_sources_are_the_approved_channels():
     import hotspot_video_sources
 
     assert [item["url"] for item in hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS] == [
-        "https://www.youtube.com/@SAtoday",
-        "https://www.youtube.com/@SouthAfricaNow1",
-        "https://www.youtube.com/@sabcdigitalnews",
         "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA",
         "https://www.youtube.com/@NewzroomAfrikaTV",
+        "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ",
+        "https://www.youtube.com/@BusinessDayTelevision",
+        "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw",
+    ]
+    assert [item["name"] for item in hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS] == [
+        "eNCA",
+        "Newzroom Afrika",
+        "CNBC Africa",
+        "BusinessDayTV",
+        "Transnet NPA",
     ]
 
 

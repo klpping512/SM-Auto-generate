@@ -265,20 +265,21 @@ SA_HOTSPOT_VIDEO_CHANNELS_JSON=[{"name":"SABC Digital News","url":"https://www.y
 
 ## 5. 附录：调整后信源全景（预期，以 Step 0 为准）
 
-**RSS（启用 ≤12，禁止 enabled 死源）**：SARS、Moneyweb、Daily Maverick、Department of Transport、SAnews、The South African、＋ Step 0 通过的垂直源（Freight / Logistics / SCN）。  
-**已停用**：gov.za、SARB、The Citizen、BusinessTech。
+**YouTube（定稿 5，env 整体覆盖）**：eNCA、Newzroom Afrika、CNBC Africa、BusinessDayTV（观察席）、Transnet NPA。  
+**本轮砍**：SA Today、South Africa Now、SABC（体量薄时首个回补）、Moneyweb YT（只留 RSS）。
 
-**YouTube（约 6，观察席另计）**：eNCA、Newzroom Afrika、SABC（观察）、CNBC Africa、BusinessDayTV、Transnet NPA；（SAN/Moneyweb YT 可选）。
+**RSS（启用 7）**：SAnews、SARS、Department of Transport、Moneyweb、Daily Maverick、The South African、Freight News。  
+**已停用**：gov.za、SARB、The Citizen、BusinessTech。
 
 **已核验地址**：
 
 - CNBC Africa — `youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ`
 - BusinessDayTV — `youtube.com/@BusinessDayTelevision`
 - Transnet NPA — `youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw`
-- 垂直 RSS feed 路径 — **必须** Step 0 探测确认
+- Freight News — `https://www.freightnews.co.za/rss`（Step 0 确认 10/10）
 
 **明确不承诺**：本轮单独填平 customs=0 或 warehouse hotspot_pool=0；那两条继续走「免版权管线 / 清关放闸」轨道。
 
 ---
 
-*v2.1：决策表批准；铁律 A–E 折入 Step 0。c5f2661 等探针把 YT+RSS 真实存活刷绿后再推。*
+*v2.2：总指挥定稿 5 YT + Freight；铁律 A–E 门禁已执行。终验看剔除技术失败后的真 H-hit。*

@@ -64,31 +64,13 @@ DEFAULT_OFFICIAL_SOURCES = [
         "allowed_domains": ["transport.gov.za"],
         "purpose": "道路、港口、货运与交通运行信息",
     },
-    {
-        "name": "South African Government",
-        "url": "https://www.gov.za/news-feed",
-        "allowed_domains": ["gov.za"],
-        "purpose": "政府声明、部门公告和政策信息",
-    },
-    {
-        "name": "South African Reserve Bank",
-        "url": "https://www.resbank.co.za/bin/sarb/solr/publications/rss",
-        "allowed_domains": ["resbank.co.za"],
-        "purpose": "汇率、利率、支付与宏观金融背景",
-    },
-    # 以下为主流商业/综合新闻媒体信源：线索层广采，配合 KEYWORDS 过滤出
-    # 物流相关条目；下载与使用仍走既有授权门禁。
+    # 主流商业/综合新闻：线索层广采，配合 KEYWORDS 过滤出物流相关条目。
+    # 2026-08-05 已移除 gov.za / SARB / The Citizen / BusinessTech（死源或物流信号过低）。
     {
         "name": "Moneyweb",
         "url": "https://www.moneyweb.co.za/feed/",
         "allowed_domains": ["moneyweb.co.za"],
         "purpose": "财经与企业新闻，覆盖 Transnet、港口、燃油与供应链成本",
-    },
-    {
-        "name": "BusinessTech",
-        "url": "https://businesstech.co.za/news/feed/",
-        "allowed_domains": ["businesstech.co.za"],
-        "purpose": "商业与民生新闻，覆盖电商、快递、道路与基础设施",
     },
     {
         "name": "Daily Maverick",
@@ -97,16 +79,16 @@ DEFAULT_OFFICIAL_SOURCES = [
         "purpose": "深度时事报道，覆盖港口拥堵、铁路与边境口岸事件",
     },
     {
-        "name": "The Citizen",
-        "url": "https://citizen.co.za/feed/",
-        "allowed_domains": ["citizen.co.za"],
-        "purpose": "综合新闻，覆盖罢工、封路、天气等履约影响事件",
-    },
-    {
         "name": "The South African",
         "url": "https://www.thesouthafrican.com/feed/",
         "allowed_domains": ["thesouthafrican.com"],
         "purpose": "综合新闻与民生话题，补充 C 端视角热点",
+    },
+    {
+        "name": "Freight News",
+        "url": "https://www.freightnews.co.za/rss",
+        "allowed_domains": ["freightnews.co.za"],
+        "purpose": "南非专业货运/进出口门户，垂直物流线索",
     },
 ]
 

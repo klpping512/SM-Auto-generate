@@ -1,0 +1,47 @@
+{
+  "publishers": [
+    "BusinessDayTV",
+    "CNBC Africa",
+    "Newzroom Afrika",
+    "Transnet NPA",
+    "eNCA"
+  ],
+  "since": "2026-08-05T02:54:17.345912+00:00",
+  "mothers_scanned": 9,
+  "tech_fail_count": 0,
+  "tech_fails": [],
+  "curated_denominator_mothers": 1,
+  "mothers_with_any_hook": 0,
+  "mothers_no_qualified_hooks": 1,
+  "total_confirmed_hooks": 0,
+  "logistics_hooks": 0,
+  "H_hit_hook_share": null,
+  "H_hit_mother_share": 0.0,
+  "per_publisher": {
+    "Transnet NPA": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "curated_denominator": 0,
+      "with_hooks": 0,
+      "hooks": 0,
+      "logistics_hooks": 0
+    },
+    "BusinessDayTV": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "curated_denominator": 1,
+      "with_hooks": 0,
+      "hooks": 0,
+      "logistics_hooks": 0
+    },
+    "CNBC Africa": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "curated_denominator": 0,
+      "with_hooks": 0,
+      "hooks": 0,
+      "logistics_hooks": 0
+    }
+  },
+  "iron_E_note": "tech_fail_count 已从 H-hit 分母剔除；in-flight 母片亦不计入分母"
+}

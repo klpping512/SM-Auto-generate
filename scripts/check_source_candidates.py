@@ -95,7 +95,6 @@ MONEYWEB_YT_CANDIDATES = [
 
 # 草案：总指挥定稿前的预期生效集（不含 SAN/Moneyweb，待 Step 0 后圈定）
 DRAFT_EXPECTED_CHANNELS = [
-    {"name": "SABC Digital News", "url": "https://www.youtube.com/@sabcdigitalnews"},
     {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
     {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV"},
     {"name": "CNBC Africa", "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"},

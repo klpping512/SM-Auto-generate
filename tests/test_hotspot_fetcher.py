@@ -195,12 +195,53 @@ def test_default_sources_seed_all_defaults_without_overwriting_admin_changes(tmp
     assert {source["feed_url"] for source in sources} == {
         source["url"] for source in hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES
     }
+    names = {source["name"] for source in sources}
+    assert "Freight News" in names
+    assert "South African Government" not in names
+    assert "BusinessTech" not in names
+    assert "The Citizen" not in names
 
     assert hotspot_fetcher.seed_default_sources() == 0
     assert len(tmp_db.list_hotspot_sources(enabled_only=True)) == default_count
     assert "https://www.transport.gov.za/?feed=rss2" in {
         source["feed_url"] for source in sources
     }
+
+
+def test_reseed_disables_dead_sources_before_enabling_freight(tmp_db):
+    """铁律 A：先停死源腾坑，再启用 Freight；启用集正好 7 个。"""
+    import importlib.util
+    from pathlib import Path
+
+    # 先灌满旧默认死源占坑
+    for source in [
+        {"name": "SAnews", "url": "https://www.sanews.gov.za/south-africa-news-stories.xml", "domains": ["sanews.gov.za"]},
+        {"name": "SARS", "url": "https://www.sars.gov.za/feed/?post_type=latest_news", "domains": ["sars.gov.za"]},
+        {"name": "Department of Transport", "url": "https://www.transport.gov.za/?feed=rss2", "domains": ["transport.gov.za"]},
+        {"name": "South African Government", "url": "https://www.gov.za/news-feed", "domains": ["gov.za"]},
+        {"name": "South African Reserve Bank", "url": "https://www.resbank.co.za/bin/sarb/solr/publications/rss", "domains": ["resbank.co.za"]},
+        {"name": "Moneyweb", "url": "https://www.moneyweb.co.za/feed/", "domains": ["moneyweb.co.za"]},
+        {"name": "BusinessTech", "url": "https://businesstech.co.za/news/feed/", "domains": ["businesstech.co.za"]},
+        {"name": "Daily Maverick", "url": "https://www.dailymaverick.co.za/dmrss/", "domains": ["dailymaverick.co.za"]},
+        {"name": "The Citizen", "url": "https://citizen.co.za/feed/", "domains": ["citizen.co.za"]},
+        {"name": "The South African", "url": "https://www.thesouthafrican.com/feed/", "domains": ["thesouthafrican.com"]},
+    ]:
+        tmp_db.create_hotspot_source(source["name"], source["url"], source["domains"], None, True)
+
+    assert sum(1 for s in tmp_db.list_hotspot_sources() if s["enabled"]) == 10
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "reseed_hotspot_sources.py"
+    spec = importlib.util.spec_from_file_location("reseed_hotspot_sources", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.reseed(dry_run=False)
+    assert report["ok"] is True
+    assert report["enabled_count"] == 7
+    assert "Freight News" in report["enabled_names"]
+    assert all(name not in report["enabled_names"] for name in (
+        "South African Government", "South African Reserve Bank", "BusinessTech", "The Citizen",
+    ))
+
 
 
 def test_default_sources_replaces_broken_legacy_statssa_feed(tmp_db):

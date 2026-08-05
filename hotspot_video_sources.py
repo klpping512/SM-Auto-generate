@@ -14,12 +14,12 @@ import hotspot_topic_packages
 
 
 DEFAULT_YOUTUBE_CHANNELS = [
-    {"name": "SA Today", "url": "https://www.youtube.com/@SAtoday"},
-    {"name": "South Africa Now", "url": "https://www.youtube.com/@SouthAfricaNow1"},
-    {"name": "SABC Digital News", "url": "https://www.youtube.com/@sabcdigitalnews"},
-    # 南非主流 24 小时新闻台：现场类新闻视频密度高，是 Hook 素材的主要来源。
+    # 2026-08-05 定稿：综合走量骨架 + 商业/港口垂直。不含 SA Today / SAN / SABC / Moneyweb YT。
     {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
     {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV"},
+    {"name": "CNBC Africa", "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"},
+    {"name": "BusinessDayTV", "url": "https://www.youtube.com/@BusinessDayTelevision"},
+    {"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"},
 ]
 DEFAULT_CHANNEL_VIDEO_LIMIT = 8
 MAX_CHANNEL_VIDEO_LIMIT = 24
