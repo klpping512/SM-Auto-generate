@@ -1,0 +1,72 @@
+{
+  "scope": "media_ids 850-858 (本轮新抓定稿频道样本，每频道最多3条)",
+  "gates": {
+    "youtube_assert": "PASS env_override==5台",
+    "rss_assert": "PASS enabled==7（含Freight，无4死源）",
+    "AUTHORIZED": "1（断言绿后翻）"
+  },
+  "tech_fail_count": 0,
+  "tech_fails": [],
+  "materialization_unavailable": [
+    {
+      "media_id": 856,
+      "publisher": "Transnet NPA",
+      "error": "yt-dlp: This video is not available"
+    },
+    {
+      "media_id": 857,
+      "publisher": "Transnet NPA",
+      "error": "yt-dlp: This video is not available"
+    },
+    {
+      "media_id": 858,
+      "publisher": "Transnet NPA",
+      "error": "yt-dlp: This video is not available"
+    }
+  ],
+  "curated_denominator_mothers": 6,
+  "mothers_no_qualified_hooks": 6,
+  "total_confirmed_hooks": 0,
+  "logistics_hooks": 0,
+  "H_hit_hook_share": null,
+  "H_hit_mother_share": 0.0,
+  "per_publisher": {
+    "CNBC Africa": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "materialization_unavailable": 0,
+      "denom": 3,
+      "no_qualified_hooks": 3,
+      "hooks": 0,
+      "logistics_hooks": 0
+    },
+    "BusinessDayTV": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "materialization_unavailable": 0,
+      "denom": 3,
+      "no_qualified_hooks": 3,
+      "hooks": 0,
+      "logistics_hooks": 0
+    },
+    "Transnet NPA": {
+      "mothers": 3,
+      "tech_fail": 0,
+      "materialization_unavailable": 3,
+      "denom": 0,
+      "no_qualified_hooks": 0,
+      "hooks": 0,
+      "logistics_hooks": 0
+    },
+    "eNCA": {
+      "mothers": 0,
+      "note": "本轮样本窗内无新母片进入850-858集合（历史库另计）"
+    },
+    "Newzroom Afrika": {
+      "mothers": 0,
+      "note": "同上"
+    }
+  },
+  "iron_E": "budget/JSON/disconnect 技术失败=0，已从分母剔除；Transnet 单视频不可用单列为 materialization_unavailable，不计入 H-hit 分母",
+  "reading": "在可策展的6条母片上，确认 Hook=0 → H-hit_mother=0%。CNBC/BusinessDayTV 本批近期片均为股票/商业谈话，模型判无合格物流 Hook（非技术故障）。Transnet 频道列表可拉但单视频对当前代理环境不可用，头号资产本批未形成母片。"
+}
