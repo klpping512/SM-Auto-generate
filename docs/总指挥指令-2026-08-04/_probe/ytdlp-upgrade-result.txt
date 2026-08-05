@@ -1,0 +1,10 @@
+version_after=2026.07.04
+=== retest FAILING recent after upgrade ===
+fail_exit=1
+=== retest OK older after upgrade ===
+ok_exit=1
+=== smoke download OK older (worst format) ===
+smoke_exit=1
+total 0
+drwx------@   2 ylanlll  staff     64 Aug  5 13:09 .
+drwx------@ 502 ylanlll  staff  16064 Aug  5 13:09 ..

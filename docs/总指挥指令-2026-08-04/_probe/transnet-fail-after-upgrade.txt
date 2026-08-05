@@ -1,0 +1,4 @@
+[youtube] Extracting URL: https://www.youtube.com/watch?v=U1AvMFUzfgk
+[youtube] U1AvMFUzfgk: Downloading webpage
+[youtube] U1AvMFUzfgk: Downloading android vr player API JSON
+ERROR: [youtube] U1AvMFUzfgk: This video is not available

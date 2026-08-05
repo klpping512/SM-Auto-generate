@@ -1,0 +1,19 @@
+[youtube] Extracting URL: https://www.youtube.com/watch?v=RK8Jw-yc53Q
+[youtube] RK8Jw-yc53Q: Downloading webpage
+WARNING: [youtube] No supported JavaScript runtime could be found. Only deno is enabled by default; to use another runtime add  --js-runtimes RUNTIME[:PATH]  to your command/config. YouTube extraction without a JS runtime has been deprecated, and some formats may be missing. See  https://github.com/yt-dlp/yt-dlp/wiki/EJS  for details on installing one
+[youtube] RK8Jw-yc53Q: Downloading android vr player API JSON
+[info] Available formats for RK8Jw-yc53Q:
+ID  EXT   RESOLUTION FPS CH |  FILESIZE   TBR PROTO | VCODEC        VBR ACODEC      ABR ASR MORE INFO
+------------------------------------------------------------------------------------------------------------------------------------------------------
+sb3 mhtml 48x27        0    |                 mhtml | images                                storyboard
+sb2 mhtml 80x45        0    |                 mhtml | images                                storyboard
+sb1 mhtml 160x90       0    |                 mhtml | images                                storyboard
+sb0 mhtml 320x180      0    |                 mhtml | images                                storyboard
+139 m4a   audio only      2 |   2.07MiB   49k https | audio only        mp4a.40.5   49k 22k [en-US] English (US) original (default), low, m4a_dash
+140 m4a   audio only      2 |   5.49MiB  129k https | audio only        mp4a.40.2  129k 44k [en-US] English (US) original (default), medium, m4a_dash
+251 webm  audio only      2 |   4.51MiB  106k https | audio only        opus       106k 48k [en-US] English (US) original (default), medium, webm_dash
+160 mp4   256x144     25    |   2.25MiB   53k https | avc1.4d400c   53k video only          144p, mp4_dash
+134 mp4   640x360     25    |   9.16MiB  216k https | avc1.4d401e  216k video only          360p, mp4_dash
+18  mp4   640x360     25  2 |  11.18MiB  264k https | avc1.42001E       mp4a.40.2       22k [en] 360p
+136 mp4   1280x720    25    |  34.64MiB  817k https | avc1.64001f  817k video only          720p, mp4_dash
+137 mp4   1920x1080   25    |  68.99MiB 1627k https | avc1.640028 1627k video only          1080p, mp4_dash
