@@ -31,26 +31,38 @@ RSS 的价值是：选题包、`logistics_relevance`、文字信号、（可选�
 | **H-hit** | 本轮新策展成功的 Hook 片段中，primary/节点可归到 warehouse\|delivery\|customs\|port\|border 的占比 | Hook / segment 表 |
 | **死源率** | `source_health` 中 `blocked`+`error` 且 `items=0` 的启用源数 / 启用源总数 | 抓取 `source_health` |
 | **坑位利用率** | 启用且本轮 `items>0` 的 RSS 数 / `MAX_ENABLED_SOURCES` | 同上 |
+| **H-hit（卫生）** | 同上，但分母**剔除** budget 死锁 / JSON 解析失败 / server-disconnect 等技术性失败，技术失败单列 | Hook 策展结果字段 |
 
-验收只认这四类数字的前后对比，不认「感觉物流多了」。
+验收只认这些数字的前后对比，不认「感觉物流多了」。**H-hit 若不剔技术失败，会把「源不对口」和「策展故障」混成一锅。**
 
-### 0.3 杠杆排序（先贵后便宜会白干）
+### 0.3 杠杆排序（顺序反了会白干 / 误授权）
 
-1. **通授权开关**：`HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1`（否则换频道只多 metadata）
-2. **通策展墙**：Hook JSON bug（多数路径已修，见 §0.4）
-3. **换 YouTube 频道组合**（直接改母片分子分母）← 本文档主战场
-4. **砍 RSS 死源、腾坑位给垂直 RSS**（改线索质量与坑位，间接帮选题）
-5. **标题/入池过滤（Step 3）**：对仍保留的泛新闻台止血 ← 单独立项，避免与换源混因
+1. **通策展墙**：Hook JSON bug（多数路径已修，见 §0.4）
+2. **先清源清单**：DB 停用死源腾出 `MAX_ENABLED_SOURCES=12` 坑 → 定稿 YouTube 频道集（见铁律 A/D）
+3. **换 YouTube 频道组合**（直接改母片分子分母）← 本文档 P0
+4. **加垂直 RSS**（仅 Step 0 存活且坑位已腾出）
+5. **最后才翻** `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1`（全局闸，见铁律 D）
+6. **标题/入池过滤（Step 3）**：单独立项，避免与换源混因
 
 ### 0.4 前置依赖（状态已更新）
 
 | 依赖 | 状态 | 说明 |
 |---|---|---|
-| Hook 策展 JSON（MiMo thinking 污染） | ✅ 主体已修（2026-08-04，`hotspot_hook_curator` + `model_router` + requeue） | 仍有少量拒答/坏 JSON 残余；**换源前**用 `reprocess_hotspot_hook_source.py --requeue-uncurated` 确认主路径不再整批卡死即可 |
+| Hook 策展 JSON（MiMo thinking 污染） | ✅ 主体已修（2026-08-04，`hotspot_hook_curator` + `model_router` + requeue） | 仍有少量拒答/坏 JSON 残余；技术失败须从 H-hit 分母单列（铁律 E） |
 | 同目录 `Hook策展JSON修复-Cursor执行指令` | ❌ 文件不存在 | 勿再引用失踪文档；以改进日志该条 + 代码为准 |
-| `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED` | ⚠️ `.env.example` 默认 `0` | **换源验收前必须确认生产 `.env` 已为 `1`**，否则 Y-hit/H-hit 测不到母片 |
+| `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED` | ⚠️ `.env.example` 默认 `0` | **源清单定稿之后**再翻 `1`；绝不能在死源/未审源仍启用时开全局授权 |
 
-**顺序不变**：先确认策展墙可过 + 授权开关打开 → 再换 YouTube → 再动 RSS → 最后才做相关性过滤。
+**放行顺序**：策展墙可过 → Step 0 探针刷绿 → **先停死源腾坑** → 定稿频道/RSS → 断言生效清单 → **最后**翻授权 → 再跑预热验收。
+
+### 0.5 开跑铁律 A–E（缺一条 Step 0/换源都会静默翻车）
+
+| 铁律 | 内容 |
+|---|---|
+| **A. 12 坑顺序陷阱** | `seed_default_sources` 仅在 `enabled_count < 12` 时把新源标启用；坑被死源占满时，新垂直源会被 **INSERT 成禁用、零产出、无报错**。操作含义＝坑位利用率：**必须先 DB 停用死源腾坑 → 再加/启用新源 → 最后断言启用集正好是预期那批（≤12）**。顺序反了全白搭。 |
+| **B. 探针必须覆盖 YouTube** | 母片层=YouTube=P0；`FEED_FILTER` 只管 RSS。Step 0 **必须**经代理解析频道并拉到近期视频（母片层真验活）。只探 RSS＝验了线索层、漏了母片层。 |
+| **C. 生效清单断言（#4 精确版）** | 合法非空的 `SA_HOTSPOT_VIDEO_CHANNELS_JSON` **确实整体覆盖**；仅当 env 为空 / JSON 非法 / 全部条目不合规时才静默回落到含 SA Today 的默认表。硬化＝启动或探针 **断言「当前 `configured_channels()` == 预期清单」**，回落就报错炸出。双改 DEFAULT 删 SA Today 可作兜底，**断言不能省**。 |
+| **D. 授权是全局闸** | `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1` 会把当前配置源一次性标可自动下载。必须 **先清干净源清单（停死源、定稿频道集），最后才翻授权**；死源/未审源仍启用时开闸＝误授权。 |
+| **E. H-hit 指标卫生** | budget 死锁 + 残余 JSON 失败会伪装成「no hook」把 H-hit 假性拉低。换源后统计须把技术性失败（budget / JSON / server-disconnect）从分母剔除并单列，否则分不清「源不对口」还是「技术故障」。 |
 
 ---
 
@@ -65,10 +77,10 @@ RSS 的价值是：选题包、`logistics_relevance`、文字信号、（可选�
 | E | `seed_default_sources` 只插入、**从不停用**已删默认源 | 只改 `DEFAULT_OFFICIAL_SOURCES`，DB 里 gov.za/SARB 永远还在 | 必须提供 **显式 disable + insert** 脚本，禁止只改常量 |
 | F | Step 0 要求复用 `_is_bot_challenge(exc)` 判 Cloudflare | 该函数签名吃的是 **Exception**，探测成功/失败响应不能直接塞进 | 探测脚本按 **status+headers** 自判；或构造 `HTTPStatusError` 再调 |
 | G | Step 0 用 feedparser，生产 `parse_feed` 用 ElementTree + `FEED_FILTER` | 探测「能解析」≠「生产会入库」 | 探测末段应用 **同一 `KEYWORDS`/`FEED_FILTER_PATTERN`** 统计会入库条数 |
-| H | 只改 `.env` 覆盖频道，不改 `DEFAULT_YOUTUBE_CHANNELS` | 新环境/漏配 env 仍回落到含 SA Today 的默认 5 台 | **代码默认清单与 env 同步改**；env 作运行覆盖 |
-| I | 验收「source_health 显示 7 频道」 | 未核对授权开关与母片下载 | 验收强制查 `authorization_status` 分布 + Y-hit |
+| H | 只改 `.env`、漏断言 | env 非法时静默回落含 SA Today 的默认表且不报警 | **断言生效清单==预期**（铁律 C）；DEFAULT 删 SA Today 仅作兜底 |
+| I | 验收「source_health 显示 7 频道」 | 未核对授权时序与母片下载 | 源定稿后才翻授权（铁律 D）+ Y-hit；H-hit 剔技术失败（铁律 E） |
 | J | South Africa Now「聚合、一般」却保留，只砍 SA Today | 标准不一 | SAN 降为 **观察席**：Step 0 后若近 N 条物流命中≈0，本轮一并砍 |
-| K | 附录 RSS 列了 10 活源 + BusinessTech，看似 ≤12，但未扣死源 | Citizen+BusinessTech 占 2 坑零产出时，垂直源加不满或加了仍超有效产能 | **先停用全部 blocked 死源，再按优先级加垂直源** |
+| K | 先加源再停死源 / 忽略 12 坑 | 新源被 INSERT 成禁用零产出无报错 | **铁律 A**：先停再用，断言启用集 |
 | L | 与「仓储 hotspot_pool=0」「customs 内容缺口」未对齐 | 换商业台不保证出 warehouse/customs 画面；Transnet 主要补 **port/delivery 视觉** | 预期写清：本轮优先补 **港口/货运/干线**；customs/warehouse 仍靠免版权管线 / 放闸，不承诺本轮填平 |
 
 ---
@@ -120,54 +132,71 @@ RSS 的价值是：选题包、`logistics_relevance`、文字信号、（可选�
 
 ## 3. 执行步骤
 
-### Step 0 — 连通性预验证（先验后加）
+### Step 0 — 连通性预验证（先验后加；必须含铁律 A–E）
 
-垂直站极易 Cloudflare；频道也可能拉不到列表。
+垂直站极易 Cloudflare；**母片层必须探 YouTube**（铁律 B）。本步**只探测、不写库、不改配置、不翻授权**。
 
 **给 Cursor 的指令（可直接粘贴）：**
 
 ```
-在 distribution-manager 新建 scripts/check_source_candidates.py，纯探测、不写库、不改配置。
+在 distribution-manager 新建并运行 scripts/check_source_candidates.py。
+纯探测：不写库、不改 DEFAULT、不改 .env、不设置 HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1。
 
-【代理】httpx / yt-dlp 均复用 SA_HOTSPOT_PROXY，缺则回退 SA_YOUTUBE_PROXY。
+【代理】httpx / yt-dlp 均复用 SA_HOTSPOT_PROXY，缺则回退 SA_YOUTUBE_PROXY；启动时打印实际代理（可打码端口外主机）。
 
-【RSS 候选】对每个站按序尝试常见 feed 路径，命中即停：
-  - Freight News: https://www.freightnews.co.za/rss 、/feed 、/rss.xml
-  - Logistics News SA: https://logisticsnews.co.za/feed 、/feed/ 、/rss
-  - Supply Chain News Africa: https://scnafrica.com/feed 、/feed/
+【铁律 C · 生效清单断言】
+  - 打印 configured_channels() 当前生效清单，并标注来源：env_override | default_fallback
+  - 若提供 --expected-channels-json（或内置 EXPECTED 草案），断言生效清单的 (name,url) 集合 == 预期；
+    不一致则打印 FAIL（含是否回落到含 SA Today 的默认表），exit code 非 0 可选，但汇总必须醒目。
+  - 合法非空 env 才是整体覆盖；空/非法/全不合规会静默回落——断言就是为炸出这种回落。
+
+【YouTube 母片层 · 铁律 B · P0 先跑】
+用 hotspot_video_sources._command 相同参数拉 /videos（playlist-end 5）：
+  保留/观察：SABC Digital News、eNCA、Newzroom Afrika、South Africa Now、SA Today（确认可砍）
+  新增候选：CNBC Africa、BusinessDayTV、Transnet NPA
+  Moneyweb：尝试 @Moneyweb / @moneyweb / 常见 channel URL；都失败则标不可用
+打印：频道 | 存活? | 可拉条数 | 前5标题 | 标题命中 FEED_FILTER_PATTERN 条数（粗 Y-hit）
+「YouTube 可用」= 经代理成功解析且条数 ≥ 1。
+
+【RSS 线索层】
+对每个站按序尝试 feed 路径，命中即停：
+  - Freight News: /rss 、/feed 、/rss.xml
+  - Logistics News SA: /feed 、/feed/ 、/rss
+  - Supply Chain News Africa: /feed 、/feed/
   - 对照基线 Moneyweb: https://www.moneyweb.co.za/feed/
+  - 死源复核（预期 blocked）：BusinessTech feed、The Citizen feed
+对每个 URL 打印：HTTP状态 | Cloudflare?(status∈{403,429,503} 且 cf-mitigated 或 server~cloudflare)
+  | 原始条目数 | parse_feed（生产同款，已含 FEED_FILTER）条数 | 前3标题
+不要把 response 塞进 _is_bot_challenge；按 status+headers 自判。
+「RSS 可用」= 非 CF、HTTP 2xx、parse_feed 条数 ≥ 1。
 
-对每个 URL 打印：
-  URL | HTTP状态 | Cloudflare?(看 response：status∈{403,429,503} 且 headers 含 cf-mitigated 或 server~cloudflare)
-  | 原始条目数 | 经 hotspot_lexicon.FEED_FILTER_PATTERN 过滤后条目数 | 过滤后前3条标题
+【铁律 A · 坑位演算（只打印，本步不改 DB）】
+读取 db.list_hotspot_sources()（只读）：
+  打印当前 enabled 数、其中疑似死源（gov.za/SARB/Citizen/BusinessTech）是否仍 enabled、
+  若现在 INSERT 垂直源会不会因 enabled_count>=12 被标禁用。
+  输出一行：RESEED_ORDER_REQUIRED=yes/no 与「先停用哪些再启用哪些」建议。
 
-注意：
-  - 不要调用 hotspot_fetcher._is_bot_challenge(response)；它只接受 httpx.HTTPStatusError。
-  - 解析优先复用 hotspot_fetcher.parse_feed（与生产一致）；不要只依赖 feedparser 就判「可用」。
-  - 「可用」定义：非 Cloudflare、HTTP 2xx、且 FEED_FILTER 后条目数 ≥ 1。
+【铁律 D】本脚本禁止翻授权；汇总末尾打印提醒：定稿清单之前勿设 AUTHORIZED=1。
 
-【YouTube 候选】用与 hotspot_video_sources._command 相同参数
-（python -m yt_dlp --flat-playlist --playlist-end 5 --dump-single-json）拉 /videos：
-  - CNBC Africa: https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ
-  - BusinessDayTV: https://www.youtube.com/@BusinessDayTelevision
-  - Transnet NPA: https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw
-  - South Africa Now: https://www.youtube.com/@SouthAfricaNow1 （观察席抽样）
-  - Moneyweb: 先确认官方频道 URL 再验
+【铁律 E】汇总末尾提醒：日后 H-hit 须单列 budget/JSON/disconnect 技术失败，勿与无 hook 混分母。
 
-打印：频道 | 可拉条数 | 前5条标题 | 标题命中 FEED_FILTER_PATTERN 的条数（作粗 Y-hit 代理）
-
-任一失败只 warning 继续。最后输出「可用/不可用」汇总表 + 建议启用清单（按本文档优先级）。
-把汇总贴回总指挥定夺后再进 Step 1/2。
+任一候选失败只 warning 继续。最终输出：
+  1) YouTube 可用/不可用表（含粗 Y-hit）
+  2) RSS 可用/不可用表
+  3) 坑位演算 + 建议启用清单（Freight>Logistics>SCN；YT 按存活与粗 Y-hit）
+把完整汇总贴回总指挥定最终频道集，再放行 Step 1/2。
 ```
 
-> ⚠️ Step 1/2 **只加** Step 0 判定可用的源。Cloudflare RSS 禁止硬塞。
+> ⚠️ Step 1/2 **只加** Step 0 判定可用的源。Cloudflare RSS 禁止硬塞。  
+> ⚠️ **先停死源腾坑，再启用新源，再断言启用集**（铁律 A）。  
+> ⚠️ **源清单定稿并断言生效频道后，才翻全局授权**（铁律 D）。
 
 ### Step 1 — YouTube 调整（代码默认 + env 覆盖，P0）
 
-1. 改 `hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS`：去掉 SA Today；按总指挥圈定加入垂直台；SAN 按 Step 0 决定去留。
-2. 生产 `.env` 用 `SA_HOTSPOT_VIDEO_CHANNELS_JSON` **整体覆盖**为同一清单（非法 JSON 会静默回落默认——改完应用脚本 `json.loads` 自检）。
-3. 确认 `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1`。
-4. `.env.example` 已有注释示例；补一句：「整体替换不是追加；须含全部要保留频道」。
+1. 改 `hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS`：去掉 SA Today；按总指挥圈定加入垂直台；SAN 按 Step 0 决定去留（兜底，不能代替断言）。
+2. 生产 `.env` 用 `SA_HOTSPOT_VIDEO_CHANNELS_JSON` **整体覆盖**为同一清单；写入后立刻跑探针/`configured_channels()` **断言生效==预期**（铁律 C）。
+3. **此时仍保持** `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=0`（或勿改）；等 Step 2 死源停用 + 启用集断言通过后，**最后**再翻 `1`（铁律 D）。
+4. `.env.example` 补一句：「整体替换不是追加；须含全部要保留频道；非法 JSON 会静默回落默认表」。
 
 参考清单（最终以 Step 0 + 总指挥圈定为准）：
 
@@ -221,15 +250,14 @@ SA_HOTSPOT_VIDEO_CHANNELS_JSON=[{"name":"SABC Digital News","url":"https://www.y
 
 ## 4. 验收清单
 
-- [ ] 前置：策展主路径不再整批「未返回合法 JSON」；生产 `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1`
-- [ ] Step 0：汇总表已出；总指挥圈定实际清单；SAN/Moneyweb YT 去留有书面结论
-- [ ] Step 1：`DEFAULT_YOUTUBE_CHANNELS` 与 `.env` JSON 一致；无 SA Today；JSON 可 `json.loads`
-- [ ] Step 2：死源 DB `enabled=0`；垂直源已启用；启用数 ≤ 12；无「blocked 却 enabled」；相关测试绿
-- [ ] 跑一轮 `run_authorized_hotspot_prewarm.py`（或等价授权预热），记录：
-  - 调整前基线（若无，先抓一轮只读基线再改配置）
-  - 调整后 **Y-hit、H-hit、死源率、坑位利用率**
-  - Transnet/CNBC 是否出现港口/货运类母片（抽 5 条人工看）
-- [ ] 数据贴回总指挥 → 决定是否立 Step 3（YouTube 标题过滤）及是否砍 SABC/SAN
+- [ ] Step 0：YouTube **与** RSS 探针汇总已出；生效频道断言结果已贴；坑位演算 `RESEED_ORDER_REQUIRED` 已出
+- [ ] 总指挥圈定最终频道集 / RSS 启用集；SAN、Moneyweb YT 去留有书面结论
+- [ ] Step 1+2：**先** DB 停用死源腾坑 → 再启用新源 → **断言启用集==预期**（铁律 A）
+- [ ] Step 1：`configured_channels()` 断言==预期清单（铁律 C）；DEFAULT 已去 SA Today 作兜底
+- [ ] **最后**才设 `HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1`（铁律 D）；此前保持未开或确认无未审源启用
+- [ ] 跑预热后记录 Y-hit；**H-hit 分母剔除** budget/JSON/disconnect 并单列（铁律 E）
+- [ ] Transnet/CNBC 抽 5 条人工看是否港口/货运母片
+- [ ] 数据贴回总指挥 → 是否立 Step 3 / 是否砍 SABC/SAN
 
 **本轮成功线（建议）**：Y-hit 相对基线 **+15pct 及以上**，或垂直频道贡献的新母片中物流标题占比 **≥50%**；死源率下降。未达则优先 Step 3，而不是继续加源。
 
@@ -253,4 +281,4 @@ SA_HOTSPOT_VIDEO_CHANNELS_JSON=[{"name":"SABC Digital News","url":"https://www.y
 
 ---
 
-*v2：只换对口且能产出的源，并把母片层与线索层拆开度量；相关性过滤(Step 3)留待数据到手后单独立项。*
+*v2.1：决策表批准；铁律 A–E 折入 Step 0。c5f2661 等探针把 YT+RSS 真实存活刷绿后再推。*

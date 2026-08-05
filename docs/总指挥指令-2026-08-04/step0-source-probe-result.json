@@ -1,0 +1,421 @@
+{
+  "channel_assert": {
+    "ok": false,
+    "source": "default_fallback",
+    "effective": [
+      {
+        "name": "Newzroom Afrika",
+        "url": "https://www.youtube.com/@NewzroomAfrikaTV"
+      },
+      {
+        "name": "SA Today",
+        "url": "https://www.youtube.com/@SAtoday"
+      },
+      {
+        "name": "SABC Digital News",
+        "url": "https://www.youtube.com/@sabcdigitalnews"
+      },
+      {
+        "name": "South Africa Now",
+        "url": "https://www.youtube.com/@SouthAfricaNow1"
+      },
+      {
+        "name": "eNCA",
+        "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"
+      }
+    ],
+    "expected": [
+      {
+        "name": "BusinessDayTV",
+        "url": "https://www.youtube.com/@BusinessDayTelevision"
+      },
+      {
+        "name": "CNBC Africa",
+        "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"
+      },
+      {
+        "name": "Newzroom Afrika",
+        "url": "https://www.youtube.com/@NewzroomAfrikaTV"
+      },
+      {
+        "name": "SABC Digital News",
+        "url": "https://www.youtube.com/@sabcdigitalnews"
+      },
+      {
+        "name": "Transnet NPA",
+        "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"
+      },
+      {
+        "name": "eNCA",
+        "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"
+      }
+    ],
+    "missing": [
+      {
+        "name": "BusinessDayTV",
+        "url": "https://www.youtube.com/@BusinessDayTelevision"
+      },
+      {
+        "name": "CNBC Africa",
+        "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"
+      },
+      {
+        "name": "Transnet NPA",
+        "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"
+      }
+    ],
+    "extra": [
+      {
+        "name": "SA Today",
+        "url": "https://www.youtube.com/@SAtoday"
+      },
+      {
+        "name": "South Africa Now",
+        "url": "https://www.youtube.com/@SouthAfricaNow1"
+      }
+    ],
+    "has_sa_today": true
+  },
+  "youtube": [
+    {
+      "name": "SABC Digital News",
+      "url": "https://www.youtube.com/@sabcdigitalnews",
+      "role": "keep_observe",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 0,
+      "titles": [
+        "Arson attack ruins entrepreneur's business",
+        "Raising awareness about environmental degradation",
+        "G4S workers in limbo as govt takes over prison",
+        "SCOPA report flags RAF security spending",
+        "NUMSA approaches court over Ekapa Mine rescue"
+      ],
+      "error": ""
+    },
+    {
+      "name": "eNCA",
+      "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA",
+      "role": "keep",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 0,
+      "titles": [
+        "SA Explained | Madlanga Commission Update: Andrea Johnson and the IDAC Fallout | 4 August 2026",
+        "eNCA News Bite | KZN tanker death, Khutsong school crime and All Blacks opener | 4 August 2026",
+        "Number Of The Day | $5.7 billion | 4 August 2026",
+        "IEC gears up for next phase of 2026 local elections",
+        "Making Sense Podcast"
+      ],
+      "error": ""
+    },
+    {
+      "name": "Newzroom Afrika",
+      "url": "https://www.youtube.com/@NewzroomAfrikaTV",
+      "role": "keep",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 0,
+      "titles": [
+        "Mpumalanga to host Kwaito legends festival",
+        "Supporters of Operation Dudula demand the release of Nhlanhla Lux Mohlauli",
+        "Civil society organisations  hand over a memorandum of demands to the police in Hillbrow",
+        "Tshegofatso Pule Foundation reacts to the guilty verdict meted out against Ntuthuko Shoba",
+        "Quest to free Operation Dudula Leader Nhlanhla Lux Mohlauli are underway"
+      ],
+      "error": ""
+    },
+    {
+      "name": "South Africa Now",
+      "url": "https://www.youtube.com/@SouthAfricaNow1",
+      "role": "observe",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 5,
+      "titles": [
+        "What’s Happening Across South Africa Today | 4 August 2026",
+        "What’s Happening Across South Africa Today | 3 August 2026",
+        "What’s Happening Across South Africa Today | 2 August 2026",
+        "What’s Happening Across South Africa Today | 1 August 2026",
+        "What’s Happening Across South Africa Today | 31 July 2026"
+      ],
+      "error": ""
+    },
+    {
+      "name": "SA Today",
+      "url": "https://www.youtube.com/@SAtoday",
+      "role": "cut_confirm",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 5,
+      "titles": [
+        "South Africa Today on 4 August 2026",
+        "South Africa Today on 3 August 2026",
+        "South Africa Today on 2 August 2026",
+        "South Africa Today on 1 August 2026",
+        "South Africa Today on 31 July 2026"
+      ],
+      "error": ""
+    },
+    {
+      "name": "CNBC Africa",
+      "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ",
+      "role": "candidate",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 1,
+      "titles": [
+        "Mohammed: Tier 1 banks interim declaration game changer for August",
+        "EdTech Monday: The Last Mile Education: Collaborative Solutions for Rural & Marginalized Communities",
+        "The CNBC Africa Corporate Golf Challenge: Durban Edition",
+        "Launching FORBES WOMEN AFRICA Leading Women Summit 2027",
+        "Africa Side Hustle: Turning pre-loved fashion into profit"
+      ],
+      "error": ""
+    },
+    {
+      "name": "BusinessDayTV",
+      "url": "https://www.youtube.com/@BusinessDayTelevision",
+      "role": "candidate",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 0,
+      "titles": [
+        "WATCH: Stock Pick - Microsoft and SK Hynix",
+        "Stock Watch - 04 Aug 2026 | The Close",
+        "Business News - 04 Aug 2026",
+        "WATCH: Nedbank sees stronger second half despite flat interim earnings",
+        "WATCH: Market Wrap - 04 Aug 2026"
+      ],
+      "error": ""
+    },
+    {
+      "name": "Transnet NPA",
+      "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw",
+      "role": "candidate",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 3,
+      "titles": [
+        "At Khayelitsha Special School, learners now have access to a multi-purpose facility and jungle gym.",
+        "TNPA hosted its annual Safety Proficiency Day 2026 at the Port of Cape Town!",
+        "TNPA Dredging Services Strengthen Community Support In Umlazi",
+        "Know Your Ports   Presenting the Port of East London",
+        "Know Your Ports   Presenting the Port of Richards Bay"
+      ],
+      "error": ""
+    },
+    {
+      "name": "Moneyweb",
+      "url": "https://www.youtube.com/channel/UCJAfFuVIJki_tlG41Ud0FUw",
+      "role": "candidate",
+      "alive": true,
+      "count": 5,
+      "filter_hits": 0,
+      "titles": [
+        "[WATCH] You need a strong stomach for deep value investing",
+        "[FULL SHOW] Crypto takes centre stage, Nedbank's interims, and SA's entrepreneurial outlook",
+        "Markets: Volatility remains the name of the game",
+        "How can South African producers remain profitable in an unpredictable global environment?",
+        "Nedbank lifts dividend as profits hold firm"
+      ],
+      "error": "",
+      "moneyweb_attempts": [
+        {
+          "url": "https://www.youtube.com/channel/UCJAfFuVIJki_tlG41Ud0FUw",
+          "alive": true,
+          "count": 5,
+          "error": ""
+        }
+      ]
+    }
+  ],
+  "rss": [
+    {
+      "name": "Freight News",
+      "role": "candidate",
+      "alive": true,
+      "hit_url": "https://www.freightnews.co.za/rss.xml?q=/rss.xml",
+      "attempts": [
+        {
+          "url": "https://www.freightnews.co.za/rss",
+          "status": 200,
+          "cloudflare": false,
+          "error": "",
+          "raw_items": 10,
+          "filtered_items": 10
+        }
+      ],
+      "raw_items": 10,
+      "filtered_items": 10,
+      "titles": [
+        "Customs weekly list of unentered goods",
+        "Customs: Advance Import Payments",
+        "Customs: Registration, Licensing and Accreditation (RLA)"
+      ],
+      "cloudflare": false,
+      "error": ""
+    },
+    {
+      "name": "Logistics News SA",
+      "role": "candidate",
+      "alive": false,
+      "hit_url": "",
+      "attempts": [
+        {
+          "url": "https://logisticsnews.co.za/feed",
+          "status": 404,
+          "cloudflare": false,
+          "error": "http 404"
+        },
+        {
+          "url": "https://logisticsnews.co.za/feed/",
+          "status": 404,
+          "cloudflare": false,
+          "error": "http 404"
+        },
+        {
+          "url": "https://logisticsnews.co.za/rss",
+          "status": 404,
+          "cloudflare": false,
+          "error": "http 404"
+        }
+      ],
+      "raw_items": 0,
+      "filtered_items": 0,
+      "titles": [],
+      "cloudflare": false,
+      "error": "http 404"
+    },
+    {
+      "name": "Supply Chain News Africa",
+      "role": "candidate",
+      "alive": false,
+      "hit_url": "",
+      "attempts": [
+        {
+          "url": "https://scnafrica.com/feed",
+          "status": 429,
+          "cloudflare": true,
+          "error": ""
+        },
+        {
+          "url": "https://scnafrica.com/feed/",
+          "status": 429,
+          "cloudflare": true,
+          "error": ""
+        }
+      ],
+      "raw_items": 0,
+      "filtered_items": 0,
+      "titles": [],
+      "cloudflare": true,
+      "error": "cloudflare challenge"
+    },
+    {
+      "name": "Moneyweb",
+      "role": "baseline",
+      "alive": true,
+      "hit_url": "https://www.moneyweb.co.za/feed/",
+      "attempts": [
+        {
+          "url": "https://www.moneyweb.co.za/feed/",
+          "status": 200,
+          "cloudflare": false,
+          "error": "",
+          "raw_items": 10,
+          "filtered_items": 4
+        }
+      ],
+      "raw_items": 10,
+      "filtered_items": 4,
+      "titles": [
+        "New cross-border crypto rules could drive business, jobs offshore",
+        "SA seeks advisors for creditor talks on Eskom spin-off",
+        "Salga wants brakes on Eskom’s municipal takeover"
+      ],
+      "cloudflare": false,
+      "error": ""
+    },
+    {
+      "name": "BusinessTech",
+      "role": "dead_expect",
+      "alive": false,
+      "hit_url": "",
+      "attempts": [
+        {
+          "url": "https://businesstech.co.za/news/feed/",
+          "status": 403,
+          "cloudflare": true,
+          "error": ""
+        }
+      ],
+      "raw_items": 0,
+      "filtered_items": 0,
+      "titles": [],
+      "cloudflare": true,
+      "error": "cloudflare challenge"
+    },
+    {
+      "name": "The Citizen",
+      "role": "dead_expect",
+      "alive": false,
+      "hit_url": "",
+      "attempts": [
+        {
+          "url": "https://citizen.co.za/feed/",
+          "status": 403,
+          "cloudflare": true,
+          "error": ""
+        }
+      ],
+      "raw_items": 0,
+      "filtered_items": 0,
+      "titles": [],
+      "cloudflare": true,
+      "error": "cloudflare challenge"
+    }
+  ],
+  "slots": {
+    "max_enabled": 12,
+    "enabled_count": 10,
+    "total_configured": 10,
+    "dead_still_enabled": [
+      {
+        "id": 4,
+        "name": "South African Government",
+        "feed_url": "https://www.gov.za/news-feed"
+      },
+      {
+        "id": 5,
+        "name": "South African Reserve Bank",
+        "feed_url": "https://www.resbank.co.za/bin/sarb/solr/publications/rss"
+      },
+      {
+        "id": 7,
+        "name": "BusinessTech",
+        "feed_url": "https://businesstech.co.za/news/feed/"
+      },
+      {
+        "id": 9,
+        "name": "The Citizen",
+        "feed_url": "https://citizen.co.za/feed/"
+      }
+    ],
+    "room_for_new_enabled": 2,
+    "RESEED_ORDER_REQUIRED": "yes",
+    "advice": "先停用 4 个死源腾坑，再 INSERT/启用垂直源；当前 enabled=10/12，若直接 seed 新源：最多还能启用 2 个",
+    "enabled_names": [
+      "SAnews",
+      "SARS",
+      "Department of Transport",
+      "South African Government",
+      "South African Reserve Bank",
+      "Moneyweb",
+      "BusinessTech",
+      "Daily Maverick",
+      "The Citizen",
+      "The South African"
+    ]
+  }
+}
