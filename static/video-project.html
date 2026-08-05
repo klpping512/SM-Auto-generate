@@ -460,7 +460,7 @@ function qualityDiagnostics(){
   const decision=report.regeneration_decision||{};
   const score=Number(evaluation.overall_score);
   const failed=!(evaluation.passed===true)||score<80||evaluation.evaluation_status!=='completed';
-  const blockedReason=['maximum_attempts_reached','no_meaningful_improvement'].includes(decision.reason)?decision.reason:null;
+  const blockedReason=['maximum_attempts_reached','no_meaningful_improvement','actionable_axes_healthy'].includes(decision.reason)?decision.reason:null;
   const optimized=report.optimized_generation||{};
   return {evaluation,decision,score,failed,blockedReason,optimized,regeneration:evaluation.regeneration||{}};
 }
@@ -469,6 +469,9 @@ function renderDiagnosticsDecision(diag){
   const d=diag.decision;const reason=d.reason||'';
   const delta=d.score_delta!=null?`（上次 ${Number(d.previous_score).toFixed(0)} → 本次 ${diag.score.toFixed(0)}，Δ ${(d.score_delta>=0?'+':'')+d.score_delta}）`:'';
   if(diag.blockedReason){
+    if(reason==='actionable_axes_healthy'){
+      return `<div class="qd-decision blocked">可改轴已达标，本片失分主要在画面素材本身，重生成难改善——建议人工复核或换素材/话题${delta}</div>`;
+    }
     const label=reason==='maximum_attempts_reached'?'已达重生成上限（2 次）':'重跑提升不足 3 分';
     return `<div class="qd-decision blocked">${label}：已禁用继续重生成，请人工复核或换选题${delta}</div>`;
   }
@@ -489,7 +492,7 @@ function renderDiagnosticsPanel(){
   const issuesHtml=issues.map(issue=>`<div class="qd-issue${issue.severity==='high'?' high':''}"><div class="meta">${escapeHtml(issue.severity||'')} · ${escapeHtml(issue.category||'')} · ${Number(issue.start_second||0).toFixed(1)}–${Number(issue.end_second||0).toFixed(1)}s</div><div>${escapeHtml(issue.description||'')}</div><div style="margin-top:5px"><strong>建议：</strong>${escapeHtml(issue.suggested_fix||'')}</div></div>`).join('');
   const optHtml=optimized.required?`<div class="qd-ref"><div class="qd-ref-note">以下为文生视频式建议；本管线用真实素材拼接，改提示词不会改变画面，请以重选素材/改写口播为准。</div>${optimized.revised_prompt?`<div><strong>参考提示词：</strong>${escapeHtml(optimized.revised_prompt)}</div>`:''}${(regeneration.storyboard_changes||[]).length?`<div style="margin-top:5px"><strong>分镜建议：</strong>${regeneration.storyboard_changes.map(c=>escapeHtml(typeof c==='string'?c:JSON.stringify(c))).join('；')}</div>`:''}</div>`:'';
   return `<div class="wb-card" style="margin-top:12px"><h2>AI 质检诊断</h2><div class="qd">
-    <div class="qd-score"><strong>${diag.score.toFixed(0)}</strong><span>/100 · ${evaluation.passed?'通过':'未达 80 分线'}</span>${decision.score_delta!=null?`<span class="delta ${decision.score_delta>=0?'up':'down'}">Δ ${(decision.score_delta>=0?'+':'')+decision.score_delta} vs 上次</span>`:''}</div>
+    <div class="qd-score"><strong>${diag.score.toFixed(0)}</strong><span>/100 · ${evaluation.passed?'通过':'未达 80 分线'}</span>${decision.weighted_actionable_score!=null?`<span title="仅计字幕音频/提示词一致/叙事/平台适配四个重生成改得动的轴">可改轴加权分 ${Number(decision.weighted_actionable_score).toFixed(0)} / 100 · 衡量重生成能改善多少</span>`:''}${decision.score_delta!=null?`<span class="delta ${decision.score_delta>=0?'up':'down'}">Δ ${(decision.score_delta>=0?'+':'')+decision.score_delta} vs 上次</span>`:''}</div>
     ${diag.failed?renderDiagnosticsDecision(diag):''}
     ${axesHtml?`<div class="qd-axes">${axesHtml}</div>`:''}
     ${issuesHtml||'<div class="empty-note">质检未列出具体问题</div>'}
@@ -596,6 +599,9 @@ function primaryActionConfig(){
   if(status==='needs_review'){
     const diag=qualityDiagnostics();
     if(diag?.failed&&diag.blockedReason){
+      if(diag.blockedReason==='actionable_axes_healthy'){
+        return {label:'可改轴已达标，重生成难改善',run:()=>{},disabled:true};
+      }
       return {label:diag.blockedReason==='maximum_attempts_reached'?'已达重生成上限':'重跑提升不足，已禁用',run:()=>{},disabled:true};
     }
     if(diag?.failed)return {label:'按质检建议重生成',run:openQualityFixMode};

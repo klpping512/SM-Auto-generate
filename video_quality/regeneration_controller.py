@@ -8,10 +8,16 @@ spinning forever. With no history the decision keeps the legacy
 """
 from __future__ import annotations
 
-from .schemas import VideoEvaluationReport, quality_failed
+from .schemas import VideoEvaluationReport, quality_failed, weighted_actionable_score
 
 # Reasons that must disable the human "regenerate" action outright.
-BLOCKING_REASONS = frozenset({"maximum_attempts_reached", "no_meaningful_improvement"})
+# actionable_axes_healthy (P3-B): 失分全落在重跑改不动的画面轴，重生成无意义。
+BLOCKING_REASONS = frozenset(
+    {"maximum_attempts_reached", "no_meaningful_improvement", "actionable_axes_healthy"}
+)
+
+# 可改轴加权分≥此值，视为"重跑改善空间有限"（失分在改不动的画面轴）。
+ACTIONABLE_FLOOR = 70
 
 
 def decide_regeneration(
@@ -34,6 +40,9 @@ def decide_regeneration(
             if previous_score is not None else None
         ),
     }
+    # P3-B：可改轴加权分随每一支失败判定带出，供前端展示；它只 gate
+    # "重生成 vs 人工"，不参与 pass/fail。
+    base["weighted_actionable_score"] = weighted_actionable_score(report.scores)
     # Guardrails run before the auto/manual split so human-triggered reruns are
     # bounded too; an empty history keeps the original short-circuit.
     if history:
@@ -47,14 +56,18 @@ def decide_regeneration(
                 "reason": "no_meaningful_improvement",
                 **base,
             }
-        if not auto_enabled:
-            # Guardrails passed but the loop stays human-triggered: the action
-            # now reflects "rerun is allowed" instead of an idle disabled note.
-            return {
-                "action": "manual_review",
-                "reason": "manual_regeneration_allowed",
-                **base,
-            }
+    # P3-B：四道有界护栏（quality_passed/达上限/下滑/提升不足）全过后，若失分
+    # 其实落在重跑改不动的画面轴（可改轴加权分达标），自动与人工重跑一并挡住。
+    if base["weighted_actionable_score"] >= ACTIONABLE_FLOOR:
+        return {"action": "manual_review", "reason": "actionable_axes_healthy", **base}
+    if history and not auto_enabled:
+        # Guardrails passed but the loop stays human-triggered: the action
+        # now reflects "rerun is allowed" instead of an idle disabled note.
+        return {
+            "action": "manual_review",
+            "reason": "manual_regeneration_allowed",
+            **base,
+        }
     if not auto_enabled:
         return {
             "action": "manual_review",

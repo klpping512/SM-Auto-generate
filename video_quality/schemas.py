@@ -81,3 +81,26 @@ def quality_failed(report: VideoEvaluationReport, threshold: float = 80) -> bool
         or report.overall_score < threshold
         or any(issue.severity == "high" for issue in report.issues)
     )
+
+
+# P3-B 可改轴权重表：本管线是 FFmpeg 拼真实素材、无文生视频，重生成只能改善这
+# 四轴；画面六轴（visual/character/product/temporal/motion/camera）权重=0，
+# 失分靠重跑救不了。权重和必须=1.0，与 overall_score 同量纲。
+ACTIONABLE_AXIS_WEIGHTS = {
+    "subtitle_audio_quality": 0.35,  # 字幕/音画，能重烧，最可控
+    "prompt_alignment":       0.30,  # 脚本↔画面对齐，能改脚本/重选素材
+    "storytelling":           0.20,  # 叙事，能改口播/顺序
+    "platform_suitability":   0.15,  # 平台适配（时长/画幅/字幕）
+}
+
+
+def weighted_actionable_score(scores: QualityScores) -> float:
+    """只对"重生成改得动"的四轴做加权，产出 0-100 的辅助分。
+
+    纯函数、不读 overall_score、不改任何门禁；仅供 decide_regeneration
+    判"重生成是否值得"（与 overall_score 并存，不替换）。
+    """
+    total = 0.0
+    for axis, weight in ACTIONABLE_AXIS_WEIGHTS.items():
+        total += float(getattr(scores, axis)) * weight
+    return round(total, 2)

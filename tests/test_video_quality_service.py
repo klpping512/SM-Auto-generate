@@ -6,7 +6,7 @@ import pytest
 from video_quality.schemas import VideoEvaluationReport, VideoQualityInput
 
 
-def _report(score=88, passed=True, severity=None):
+def _report(score=88, passed=True, severity=None, actionable=None):
     issues = []
     if severity:
         issues = [{
@@ -18,22 +18,24 @@ def _report(score=88, passed=True, severity=None):
             "evidence_frame": "FRAME_0001@1.000s",
             "suggested_fix": "重新生成该片段",
         }]
+    # P3-B：可改四轴可用 actionable 单独覆盖（缺省与总分一致）
+    actionable_score = score if actionable is None else actionable
     return VideoEvaluationReport.model_validate({
         "overall_score": score,
         "passed": passed,
         "summary": "测试报告",
         "technical_issues": [],
         "scores": {
-            "prompt_alignment": score,
+            "prompt_alignment": actionable_score,
             "visual_quality": score,
             "character_consistency": score,
             "product_consistency": score,
             "temporal_consistency": score,
             "motion_quality": score,
             "camera_quality": score,
-            "subtitle_audio_quality": score,
-            "storytelling": score,
-            "platform_suitability": score,
+            "subtitle_audio_quality": actionable_score,
+            "storytelling": actionable_score,
+            "platform_suitability": actionable_score,
         },
         "issues": issues,
         "regeneration": {
@@ -154,20 +156,27 @@ def test_risk_windows_expand_merge_and_clamp():
 def test_regeneration_is_manual_by_default():
     from video_quality.regeneration_controller import decide_regeneration
 
-    decision = decide_regeneration(_report(72, False, "high"), history=[], auto_enabled=False)
+    # 可改轴同样失分（加权分 60 < 70）→ 维持旧的 disabled 语义；
+    # 若可改轴达标则由 P3-B 判 actionable_axes_healthy（见新测试文件）。
+    decision = decide_regeneration(
+        _report(72, False, "high", actionable=60), history=[], auto_enabled=False,
+    )
 
     assert decision["action"] == "manual_review"
     assert decision["reason"] == "automatic_regeneration_disabled"
+    assert decision["weighted_actionable_score"] == 60.0
 
 
 def test_regeneration_stops_when_score_declines_or_improves_less_than_three():
     from video_quality.regeneration_controller import decide_regeneration
 
     declined = decide_regeneration(
-        _report(70, False, "high"), history=[{"overall_score": 74}], auto_enabled=True
+        _report(70, False, "high", actionable=60),
+        history=[{"overall_score": 74}], auto_enabled=True,
     )
     flat = decide_regeneration(
-        _report(76, False, "high"), history=[{"overall_score": 74}], auto_enabled=True
+        _report(76, False, "high", actionable=60),
+        history=[{"overall_score": 74}], auto_enabled=True,
     )
 
     assert declined["action"] == "manual_review"

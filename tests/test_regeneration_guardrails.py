@@ -9,13 +9,20 @@ from video_quality.regeneration_controller import BLOCKING_REASONS, decide_regen
 from video_quality.schemas import VideoEvaluationReport
 
 
-def _report(score: float, passed: bool = False) -> VideoEvaluationReport:
+def _report(score: float, passed: bool = False, actionable: float | None = None) -> VideoEvaluationReport:
+    # P3-B：可改四轴（字幕音频/提示词一致/叙事/平台适配）可用 actionable
+    # 单独覆盖；缺省与总分一致。护栏四态断言不受影响。
+    actionable_score = score if actionable is None else actionable
+    actionable_axes = {
+        "subtitle_audio_quality", "prompt_alignment",
+        "storytelling", "platform_suitability",
+    }
     return VideoEvaluationReport.model_validate({
         "overall_score": score,
         "passed": passed,
         "summary": "测试报告",
         "technical_issues": [],
-        "scores": {key: score for key in (
+        "scores": {key: (actionable_score if key in actionable_axes else score) for key in (
             "prompt_alignment", "visual_quality", "character_consistency",
             "product_consistency", "temporal_consistency", "motion_quality",
             "camera_quality", "subtitle_audio_quality", "storytelling",
@@ -58,15 +65,23 @@ def test_guardrail_score_declined_in_manual_mode():
 
 
 def test_guardrails_passed_manual_rerun_allowed():
-    # 前序 70、本次 78（提升≥3、未达上限）→ 不再是空转的 disabled 注记
-    decision = decide_regeneration(_report(78), history=[{"overall_score": 70}], auto_enabled=False)
+    # 前序 70、本次 78（提升≥3、未达上限），且可改轴同样失分（加权 60 < 70）
+    # → 仍是 manual_regeneration_allowed；可改轴达标的场景由 P3-B 另行拦截
+    decision = decide_regeneration(
+        _report(78, actionable=60), history=[{"overall_score": 70}], auto_enabled=False,
+    )
     assert decision["action"] == "manual_review"
     assert decision["reason"] == "manual_regeneration_allowed"
     assert decision["score_delta"] == 8
+    assert decision["weighted_actionable_score"] == 60.0
 
 
 def test_no_history_keeps_legacy_disabled_semantics():
-    decision = decide_regeneration(_report(72), history=[], auto_enabled=False)
+    # 可改轴也失分（加权 60 < 70）时才维持旧 disabled 语义；
+    # 可改轴达标会被 P3-B 判 actionable_axes_healthy（见下方新用例）
+    decision = decide_regeneration(
+        _report(72, actionable=60), history=[], auto_enabled=False,
+    )
     assert decision["reason"] == "automatic_regeneration_disabled"
     assert decision["previous_score"] is None
     assert decision["score_delta"] is None
@@ -78,9 +93,26 @@ def test_quality_passed_short_circuits_before_guardrails():
 
 
 def test_auto_enabled_still_regenerates_when_guardrails_pass():
-    decision = decide_regeneration(_report(78), history=[{"overall_score": 70}], auto_enabled=True)
+    # 可改轴失分（加权 60 < 70）才值得重跑，P3-B 不误伤
+    decision = decide_regeneration(
+        _report(78, actionable=60), history=[{"overall_score": 70}], auto_enabled=True,
+    )
     assert decision["action"] == "regenerate"
     assert decision["next_attempt"] == 2
+
+
+# ---------- P3-B：可改轴加权分边缘决策（四护栏之后） ----------
+
+def test_healthy_actionable_axes_block_rerun_even_when_guardrails_pass():
+    # 护栏全过（提升 8、未达上限）但失分全在改不动的画面轴（可改轴加权 78 ≥ 70）
+    # → 人工重跑同样被挡，且属于 BLOCKING_REASONS（前端禁用重生成按钮）
+    decision = decide_regeneration(
+        _report(78, actionable=78), history=[{"overall_score": 70}], auto_enabled=False,
+    )
+    assert decision["action"] == "manual_review"
+    assert decision["reason"] == "actionable_axes_healthy"
+    assert decision["reason"] in BLOCKING_REASONS
+    assert decision["weighted_actionable_score"] == 78.0
 
 
 # ---------- 血缘持久化与 history 回灌（DB + resume 端到端） ----------
@@ -180,3 +212,8 @@ def test_review_page_renders_diagnostics_and_blocks_on_guardrail():
     assert "maximum_attempts_reached" in html
     assert "no_meaningful_improvement" in html
     assert "已达重生成上限" in html
+    # P3-B：可改轴加权分露出 + actionable_axes_healthy 禁用重生成
+    assert "weighted_actionable_score" in html
+    assert "可改轴加权分" in html
+    assert "actionable_axes_healthy" in html
+    assert "可改轴已达标" in html
