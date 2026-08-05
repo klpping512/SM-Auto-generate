@@ -6,7 +6,7 @@ import re
 import smtplib
 import os
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -127,6 +127,14 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
             item.get("download_status") in {
                 "metadata_ready", "failed", "download_failed", "pending", "downloading",
             }
+            # 最新窗暂不可用：到点后重试（retry_after 未到则跳过）。
+            or (
+                item.get("download_status") == "materialization_retryable"
+                and (
+                    not str(item.get("retry_after") or "").strip()
+                    or str(item.get("retry_after")) <= datetime.now(timezone.utc).isoformat()
+                )
+            )
             # If the service stopped after a source file was saved, resume the
             # built-in analysis from that authorised asset instead of requiring
             # another external download.
@@ -187,55 +195,114 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
     # materializer downloads, runs ASR/OCR/vision, and lets the built-in
     # curator create event titles/descriptions and verified event clips.
     from app import _run_hotspot_media_materialization
+    import random
+    import hotspot_media
+
+    try:
+        concurrency = int(str(os.environ.get("SA_HOTSPOT_DL_CONCURRENCY", "3")).strip() or "3")
+    except ValueError:
+        concurrency = 3
+    concurrency = max(1, min(5, concurrency))
+    semaphore = asyncio.Semaphore(concurrency)
     materialized: list[dict] = []
-    for item in decision_pool:
-        existing_asset = (
-            db.get_asset(int(item["asset_id"]))
-            if str(item.get("asset_id") or "").isdigit()
-            else None
-        )
-        # yt-dlp 可能在服务停止前已写完并登记 asset，但晚到的进度事件仍把
-        # 媒体行停留在 downloading。asset 可用时以本地事实为准，避免重复下载。
-        reuse_downloaded_asset = bool(
-            existing_asset and str(existing_asset.get("file_status") or "available") == "available"
-        )
-        intake_decision = {
-            "admission_mode": "all_authorized_video_analysis",
-            "why": "三天全量任务：已授权资讯视频必须由项目内置模型完成镜头与事件分析。",
-            "source_title": str(item.get("intake_title") or "")[:300],
-            "source_summary": str(item.get("intake_summary") or "")[:1_200],
-        }
-        db.update_hotspot_media_state(
-            item["id"],
-            # 服务重启后已有本地母片的任务必须直接续跑分析；若先重置成 pending，
-            # materializer 会误以为没有 asset，再次走网络下载并拖慢整个全量队列。
-            download_status="downloaded" if reuse_downloaded_asset else "pending",
-            download_progress=65 if reuse_downloaded_asset else 5,
-            progress_detail=(
-                "热点 Hook 入库：复用已下载母片，继续内置模型分析和策展"
-                if reuse_downloaded_asset
-                else "热点 Hook 入库：已进入下载、分析和模型策展队列"
-            ),
-            processing_status="processing" if reuse_downloaded_asset else "not_started",
-            error_message=None,
-            intake_decision_json=_json.dumps(intake_decision, ensure_ascii=False),
-        )
-        await _run_hotspot_media_materialization(item["id"], admin["id"])
-        refreshed = db.get_hotspot_media(int(item["id"])) or {}
-        hook_count = 0
-        if refreshed.get("asset_id"):
-            hook_count = len(db.list_hotspot_event_clips(asset_id=int(refreshed["asset_id"])))
-        materialized.append({
-            "media_id": int(item["id"]), "asset_id": refreshed.get("asset_id"),
-            "download_status": refreshed.get("download_status"),
-            "processing_status": refreshed.get("processing_status"),
-            "hook_count": hook_count,
-            "progress_detail": refreshed.get("progress_detail"),
-        })
-        db.add_audit_log(
-            admin["id"], admin["username"], "prewarm_authorized_hotspot_media", target=str(item["id"]),
-            detail=_json.dumps(intake_decision, ensure_ascii=False),
-        )
+    materialized_lock = asyncio.Lock()
+
+    async def _materialize_one(item: dict) -> None:
+        # 有界并发：提交前抖动，避免同一代理瞬时打满。
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        async with semaphore:
+            existing_asset = (
+                db.get_asset(int(item["asset_id"]))
+                if str(item.get("asset_id") or "").isdigit()
+                else None
+            )
+            reuse_downloaded_asset = bool(
+                existing_asset and str(existing_asset.get("file_status") or "available") == "available"
+            )
+            # 下载前预筛（与 materializer 内再检互为保险；此处提前标记避免无谓排队）。
+            if not reuse_downloaded_asset and item.get("media_kind") != "image":
+                allowed, reason = hotspot_media.prefilter_mother_candidate(item)
+                if not allowed:
+                    logger.info("prefilter skip id=%s reason=%s", item["id"], reason)
+                    db.update_hotspot_media_state(
+                        item["id"],
+                        download_status="prefiltered_skip",
+                        download_progress=0,
+                        progress_detail=f"prefilter skip: {reason}",
+                        processing_status="not_started",
+                        error_message=None,
+                    )
+                    async with materialized_lock:
+                        materialized.append({
+                            "media_id": int(item["id"]), "asset_id": None,
+                            "download_status": "prefiltered_skip",
+                            "processing_status": "not_started",
+                            "hook_count": 0,
+                            "progress_detail": f"prefilter skip: {reason}",
+                        })
+                    return
+            intake_decision = {
+                "admission_mode": "all_authorized_video_analysis",
+                "why": "三天全量任务：已授权资讯视频必须由项目内置模型完成镜头与事件分析。",
+                "source_title": str(item.get("intake_title") or "")[:300],
+                "source_summary": str(item.get("intake_summary") or "")[:1_200],
+            }
+            # Keep previously recorded sample windows when resuming a downloaded mother.
+            prior = {}
+            try:
+                prior = _json.loads(str(item.get("intake_decision_json") or "{}"))
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                prior = {}
+            if isinstance(prior, dict) and prior.get("sample_offsets"):
+                intake_decision["sample_offsets"] = prior["sample_offsets"]
+                if prior.get("analysis_height") is not None:
+                    intake_decision["analysis_height"] = prior.get("analysis_height")
+            db.update_hotspot_media_state(
+                item["id"],
+                # 服务重启后已有本地母片的任务必须直接续跑分析；若先重置成 pending，
+                # materializer 会误以为没有 asset，再次走网络下载并拖慢整个全量队列。
+                download_status="downloaded" if reuse_downloaded_asset else "pending",
+                download_progress=65 if reuse_downloaded_asset else 5,
+                progress_detail=(
+                    "热点 Hook 入库：复用已下载母片，继续内置模型分析和策展"
+                    if reuse_downloaded_asset
+                    else "热点 Hook 入库：已进入下载、分析和模型策展队列"
+                ),
+                processing_status="processing" if reuse_downloaded_asset else "not_started",
+                error_message=None,
+                intake_decision_json=_json.dumps(intake_decision, ensure_ascii=False),
+            )
+            await _run_hotspot_media_materialization(item["id"], admin["id"])
+            refreshed = db.get_hotspot_media(int(item["id"])) or {}
+            hook_count = 0
+            if refreshed.get("asset_id"):
+                hook_count = len(db.list_hotspot_event_clips(asset_id=int(refreshed["asset_id"])))
+            async with materialized_lock:
+                materialized.append({
+                    "media_id": int(item["id"]), "asset_id": refreshed.get("asset_id"),
+                    "download_status": refreshed.get("download_status"),
+                    "processing_status": refreshed.get("processing_status"),
+                    "hook_count": hook_count,
+                    "progress_detail": refreshed.get("progress_detail"),
+                })
+            db.add_audit_log(
+                admin["id"], admin["username"], "prewarm_authorized_hotspot_media", target=str(item["id"]),
+                detail=_json.dumps(intake_decision, ensure_ascii=False),
+            )
+
+    await asyncio.gather(*(_materialize_one(item) for item in decision_pool))
+    ready = sum(1 for row in materialized if row.get("processing_status") == "ready")
+    in_flight = sum(
+        1 for row in materialized
+        if row.get("download_status") in {"pending", "downloading"}
+        or row.get("processing_status") in {"processing", "not_started"}
+    )
+    prefiltered = sum(1 for row in materialized if row.get("download_status") == "prefiltered_skip")
+    confirmed_hooks = sum(int(row.get("hook_count") or 0) for row in materialized)
+    logger.info(
+        "热点预热汇总 concurrency=%s ready=%s in_flight=%s pending=%s prefiltered_skip=%s confirmed_hooks=%s",
+        concurrency, ready, in_flight, len(decision_pool) - ready - prefiltered, prefiltered, confirmed_hooks,
+    )
     return {
         "status": "materialized", "candidate_count": len(metadata_candidates),
         "requested_media_ids": sorted(requested_media_ids),
@@ -246,9 +313,17 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
             "mode": "all_authorized_video_analysis",
             "source_metadata": metadata_report,
             "curator": "planner_text + critic",
+            "dl_concurrency": concurrency,
         },
         "selected_media_ids": [int(item["id"]) for item in decision_pool],
         "materialized": materialized,
+        "summary": {
+            "ready": ready,
+            "in_flight": in_flight,
+            "pending": max(0, len(decision_pool) - ready - prefiltered),
+            "prefiltered_skip": prefiltered,
+            "confirmed_hooks": confirmed_hooks,
+        },
     }
 
 

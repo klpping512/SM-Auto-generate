@@ -48,6 +48,7 @@ import hotspot_preview_narration
 import hotspot_package_service
 import hotspot_hook_selector
 import hotspot_lexicon
+import hotspot_video_sources
 import video_quality.service as video_quality_service
 import douyin_copywriting_sop
 from auth import (
@@ -2960,6 +2961,33 @@ async def update_hotspot_media_rights(
     return db.get_hotspot_media(media_id)
 
 
+def _remap_hooks_to_original_timestamps(
+    hooks: list[dict],
+    sample_offsets: list[tuple[float, float]] | None,
+) -> list[dict]:
+    """分析件相对时间 → 原片真实时间；保留 analysis_* 供回退切片。"""
+    import inspiration_assets
+
+    windows = [(float(a), float(b)) for a, b in (sample_offsets or [])]
+    if not windows:
+        return hooks
+    remapped = []
+    for hook in hooks:
+        analysis_start = int(hook.get("start_ms") or 0)
+        analysis_end = int(hook.get("end_ms") or 0)
+        evidence = dict(hook.get("evidence") or {})
+        evidence["analysis_start_ms"] = analysis_start
+        evidence["analysis_end_ms"] = analysis_end
+        evidence["sample_offsets"] = windows
+        remapped.append({
+            **hook,
+            "start_ms": inspiration_assets.analysis_ms_to_original_ms(analysis_start, windows),
+            "end_ms": inspiration_assets.analysis_ms_to_original_ms(analysis_end, windows),
+            "evidence": evidence,
+        })
+    return remapped
+
+
 async def _run_hotspot_media_materialization(media_id: int, created_by: int):
     item = db.get_hotspot_media(media_id)
     if not item:
@@ -2969,6 +2997,7 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
     # must never overwrite the terminal timeout state in the database.
     download_state_lock = threading.Lock()
     download_timed_out = False
+    sample_offsets: list[tuple[float, float]] = []
     try:
         # 单个外部媒体源不可无限占用三天全量队列。yt-dlp 的 socket timeout
         # 只能覆盖网络读写，无法约束解析器/源站卡住的总时长；这里由项目工作流
@@ -2979,6 +3008,12 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
         asset = None
         if item.get("download_status") == "downloaded" and item.get("asset_id"):
             asset = db.get_asset(int(item["asset_id"]))
+            intake = _normalized_hotspot_intake_decision(item.get("intake_decision_json"))
+            raw_offsets = intake.get("sample_offsets") or []
+            try:
+                sample_offsets = [(float(pair[0]), float(pair[1])) for pair in raw_offsets]
+            except (TypeError, ValueError, IndexError, KeyError):
+                sample_offsets = []
         if asset:
             db.update_hotspot_media_state(
                 media_id, download_status="downloaded", download_progress=65,
@@ -2986,6 +3021,20 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                 processing_status="processing", error_message=None,
             )
         else:
+            # 下载前纯元数据预筛：音乐片/超短/超长直播直接跳过，不进 H-hit 分母。
+            if item.get("media_kind") != "image":
+                allowed, reason = hotspot_media.prefilter_mother_candidate(item)
+                if not allowed:
+                    logger.info("prefilter skip id=%s reason=%s", media_id, reason)
+                    db.update_hotspot_media_state(
+                        media_id,
+                        download_status="prefiltered_skip",
+                        processing_status="not_started",
+                        download_progress=0,
+                        progress_detail=f"prefilter skip: {reason}",
+                        error_message=None,
+                    )
+                    return
             db.update_hotspot_media_state(
                 media_id, download_status="downloading", download_progress=10,
                 progress_detail="正在连接媒体来源", processing_status="not_started", error_message=None
@@ -3034,6 +3083,20 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                     ),
                     timeout=download_timeout,
                 )
+                raw_offsets = asset.get("sample_offsets") or []
+                try:
+                    sample_offsets = [(float(pair[0]), float(pair[1])) for pair in raw_offsets]
+                except (TypeError, ValueError, IndexError, KeyError):
+                    sample_offsets = []
+                # Persist sample windows on the media row so resume/retry can remap timestamps.
+                intake = _normalized_hotspot_intake_decision(item.get("intake_decision_json"))
+                intake["sample_offsets"] = sample_offsets
+                intake["analysis_height"] = int(asset.get("height") or 0) or None
+                db.update_hotspot_media_state(
+                    media_id,
+                    intake_decision_json=_json.dumps(intake, ensure_ascii=False),
+                )
+                item = {**item, "intake_decision_json": _json.dumps(intake, ensure_ascii=False)}
         reusable_segments = []
         if asset and asset.get("file_type") == "video":
             reusable_segments = [
@@ -3114,6 +3177,9 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                 }
             hook_count = len(hooks)
             if hooks:
+                # Multi-window analysis mothers use relative timestamps; remap
+                # confirmed hooks back to original-video time before persisting.
+                hooks = _remap_hooks_to_original_timestamps(hooks, sample_offsets)
                 # A Hook inherits the admission decision that caused its mother
                 # to be downloaded.  This keeps the RAG service boundary with
                 # the short reusable clip instead of losing it after analysis.
@@ -3128,7 +3194,14 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                     hook["evidence"] = evidence
                 hotspot_event_media.remove_materialized_event_clips(STATIC_DIR, int(asset["id"]))
                 created = db.replace_hotspot_event_clips(asset["id"], int(item["hotspot_id"]), hooks)
-                await asyncio.to_thread(hotspot_event_media.materialize_event_clips, STATIC_DIR, asset, created)
+                await asyncio.to_thread(
+                    hotspot_event_media.materialize_event_clips,
+                    STATIC_DIR,
+                    asset,
+                    created,
+                    media_item=item,
+                    sample_offsets=sample_offsets,
+                )
                 curation_status = f"内置模型已筛出 {hook_count} 条精华 Hook 片段"
             else:
                 # 未通过模型策展的镜头不会以“待确认事件”形式进入 Hook 素材库。
@@ -3168,14 +3241,31 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
     except Exception as exc:
         current = db.get_hotspot_media(media_id) or {}
         downloaded = current.get("download_status") == "downloaded"
-        db.update_hotspot_media_state(
-            media_id,
-            download_status="downloaded" if downloaded else "download_failed",
-            processing_status="processing_failed" if downloaded else "not_started",
-            progress_detail=f"处理失败：{str(exc)[:180]}",
-            error_message=str(exc)[:500],
-        )
-        logger.exception("热点媒体素材化失败: %s", media_id)
+        message = str(exc)
+        # 最新窗暂不可用：可重试，不按硬失败永久丢弃（突发新闻台延后重试，常青台可再扫深处）。
+        if (not downloaded) and hotspot_video_sources.is_not_available_error(message):
+            retry_after = hotspot_video_sources.retry_after_iso()
+            db.update_hotspot_media_state(
+                media_id,
+                download_status="materialization_retryable",
+                processing_status="not_started",
+                progress_detail=f"可重试：视频暂不可下载，将于 {retry_after} 后重试。{message[:120]}",
+                error_message=message[:500],
+                materialization_retryable=1,
+                retry_after=retry_after,
+            )
+            logger.warning("热点媒体暂不可用，已标记 materialization_retryable: %s", media_id)
+        else:
+            db.update_hotspot_media_state(
+                media_id,
+                download_status="downloaded" if downloaded else "download_failed",
+                processing_status="processing_failed" if downloaded else "not_started",
+                progress_detail=f"处理失败：{message[:180]}",
+                error_message=message[:500],
+                materialization_retryable=0,
+                retry_after=None,
+            )
+            logger.exception("热点媒体素材化失败: %s", media_id)
 
 
 @app.post("/api/hotspot-media/{media_id}/materialize", status_code=202)

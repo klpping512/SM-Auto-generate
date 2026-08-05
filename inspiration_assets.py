@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import tempfile
@@ -102,16 +103,101 @@ def can_auto_materialize_official(item: dict) -> bool:
         return False
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, default)).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def analysis_height() -> int:
+    return max(144, _env_int("SA_HOTSPOT_ANALYSIS_HEIGHT", 480))
+
+
+def final_height() -> int:
+    return max(144, _env_int("SA_HOTSPOT_FINAL_HEIGHT", 720))
+
+
+def sample_window_sec() -> int:
+    return max(10, _env_int("SA_HOTSPOT_SAMPLE_WINDOW_SEC", 60))
+
+
+def sample_max_total_sec() -> int:
+    return max(sample_window_sec(), _env_int("SA_HOTSPOT_SAMPLE_MAX_TOTAL_SEC", 300))
+
+
+def compute_analysis_sample_windows(duration_seconds: float) -> list[tuple[float, float]]:
+    """全片均匀多窗采样（仅分析档）。短片不下采样窗。
+
+    D<=180：空列表（调用方下整片）。
+    D>180：均匀铺 N 个不重叠 WINDOW 秒窗口，总采样 ≤ MAX_TOTAL。
+    例 D=600、WINDOW=60、MAX_TOTAL=300 → 起点 0/135/270/405/540。
+    """
+    duration = float(duration_seconds or 0)
+    if duration <= 180:
+        return []
+    window = float(sample_window_sec())
+    max_total = float(sample_max_total_sec())
+    n = max(1, min(int(math.floor(max_total / window)), int(math.floor(duration / window))))
+    if n <= 1:
+        return [(0.0, min(window, duration))]
+    span = n * window
+    if span >= duration:
+        # 窗口挤满整片：相邻紧挨
+        return [(i * window, min(duration, (i + 1) * window)) for i in range(n)]
+    gap = (duration - span) / (n - 1)
+    starts = [i * (window + gap) for i in range(n)]
+    return [(start, min(duration, start + window)) for start in starts]
+
+
+def analysis_ms_to_original_ms(local_ms: int, windows: list[tuple[float, float]]) -> int:
+    """把分析件内部相对毫秒换算回原片真实毫秒。"""
+    if not windows:
+        return max(0, int(local_ms))
+    remaining = max(0, int(local_ms))
+    for start_sec, end_sec in windows:
+        span_ms = max(0, int(round((end_sec - start_sec) * 1000)))
+        if remaining <= span_ms:
+            return int(round(start_sec * 1000)) + remaining
+        remaining -= span_ms
+    last_start, last_end = windows[-1]
+    return int(round(last_end * 1000))
+
+
+def original_ms_to_analysis_ms(original_ms: int, windows: list[tuple[float, float]]) -> int | None:
+    """原片真实毫秒 → 分析件相对毫秒；落在窗口缝隙则返回 None。"""
+    if not windows:
+        return max(0, int(original_ms))
+    cursor = 0
+    target = max(0, int(original_ms))
+    for start_sec, end_sec in windows:
+        start_ms = int(round(start_sec * 1000))
+        end_ms = int(round(end_sec * 1000))
+        span_ms = max(0, end_ms - start_ms)
+        if start_ms <= target <= end_ms:
+            return cursor + (target - start_ms)
+        cursor += span_ms
+    return None
+
+
 def build_ytdlp_options(
     source_type: str,
     duration_seconds: float = 0,
     progress_callback=None,
+    *,
+    hi_res: bool = False,
+    explicit_ranges: list[tuple[float, float]] | None = None,
 ) -> dict:
-    """构建受限、可观测的视频下载参数，避免整片长视频占满磁盘。"""
+    """构建受限、可观测的视频下载参数。
+
+    - 分析档（hi_res=False）：默认 480p；长视频均匀多窗采样。
+    - 定稿档（hi_res=True）：默认 720p；按 explicit_ranges 精确下片段，不多窗。
+    """
+    height = final_height() if hi_res else analysis_height()
     options = {
         "noplaylist": True,
         "max_filesize": 2 * 1024 * 1024 * 1024,
-        "format": "bv*[height<=720]+ba/b[height<=720]/b",
+        "format": f"bv*[height<={height}]+ba/b[height<={height}]/b",
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
@@ -137,12 +223,20 @@ def build_ytdlp_options(
         options["proxy"] = proxy
     if progress_callback:
         options["progress_hooks"] = [progress_callback]
-    # Hotspot Hook curation only needs early footage. Downloading a full
-    # 5–10 minute 720p file often exceeds the materialization wall clock.
-    if float(duration_seconds or 0) > 180:
+
+    ranges: list[tuple[float, float]] = []
+    if explicit_ranges:
+        ranges = [(float(a), float(b)) for a, b in explicit_ranges if float(b) > float(a)]
+    elif not hi_res:
+        ranges = compute_analysis_sample_windows(duration_seconds)
+
+    if ranges:
         from yt_dlp.utils import download_range_func
-        options["download_ranges"] = download_range_func(None, [(0, 120)])
+        options["download_ranges"] = download_range_func(None, ranges)
         options["force_keyframes_at_cuts"] = True
+        options["_sample_offsets"] = [(float(a), float(b)) for a, b in ranges]
+    else:
+        options["_sample_offsets"] = []
     return options
 
 
@@ -169,15 +263,42 @@ async def fetch_oembed(url: str) -> dict:
     }
 
 
+def _run_ytdlp_download(
+    canonical: str,
+    options: dict,
+    temp_dir: Path,
+) -> Path:
+    from yt_dlp import YoutubeDL
+
+    options = dict(options)
+    options.pop("_sample_offsets", None)
+    options["outtmpl"] = str(temp_dir / "%(id)s.%(ext)s")
+    with YoutubeDL(options) as downloader:
+        info = downloader.extract_info(canonical, download=True)
+        requested = info.get("requested_downloads") or []
+        candidates = [Path(entry.get("filepath")) for entry in requested if entry.get("filepath")]
+        if info.get("_filename"):
+            candidates.append(Path(info["_filename"]))
+    source = next((path for path in candidates if path.is_file()), None)
+    if source is None:
+        source = next((path for path in temp_dir.iterdir() if path.is_file()), None)
+    if source is None:
+        raise RuntimeError("平台未返回可用媒体文件")
+    return source
+
+
 def download_authorized_media(
     item: dict,
     static_dir: Path,
     created_by: int,
     progress_callback=None,
+    *,
+    hi_res: bool = False,
+    explicit_ranges: list[tuple[float, float]] | None = None,
 ) -> dict:
     """不使用 Cookie、不绕过登录/DRM，下载公开且已登记授权的单条媒体。"""
     try:
-        from yt_dlp import YoutubeDL
+        from yt_dlp import YoutubeDL  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("未安装 yt-dlp，无法执行已授权下载") from exc
     import database as db
@@ -190,19 +311,11 @@ def download_authorized_media(
             item.get("source_type") or "other_link",
             item.get("duration_seconds") or 0,
             progress_callback,
+            hi_res=hi_res,
+            explicit_ranges=explicit_ranges,
         )
-        options["outtmpl"] = str(temp_dir / "%(id)s.%(ext)s")
-        with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(canonical, download=True)
-            requested = info.get("requested_downloads") or []
-            candidates = [Path(entry.get("filepath")) for entry in requested if entry.get("filepath")]
-            if info.get("_filename"):
-                candidates.append(Path(info["_filename"]))
-        source = next((path for path in candidates if path.is_file()), None)
-        if source is None:
-            source = next((path for path in temp_dir.iterdir() if path.is_file()), None)
-        if source is None:
-            raise RuntimeError("平台未返回可用媒体文件")
+        sample_offsets = list(options.get("_sample_offsets") or [])
+        source = _run_ytdlp_download(canonical, options, temp_dir)
         asset = media_assets.ingest_file(
             source, Path(static_dir), category=item.get("primary_category") or "other",
             origin=item["source_type"], created_by=created_by, name=item.get("title") or source.stem,
@@ -210,4 +323,43 @@ def download_authorized_media(
         db.update_asset_provenance(
             asset["id"], canonical, item["license_name"], item["attribution"], item.get("hotspot_id"),
         )
+        asset = dict(asset)
+        asset["sample_offsets"] = sample_offsets
+        asset["download_hi_res"] = bool(hi_res)
         return asset
+
+
+def download_hi_res_range(
+    item: dict,
+    static_dir: Path,
+    start_sec: float,
+    end_sec: float,
+    created_by: int | None = None,
+) -> Path:
+    """定稿：按原片真实时间段精确下载 720p 片段，返回本地文件路径（未入库）。"""
+    try:
+        from yt_dlp import YoutubeDL  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("未安装 yt-dlp，无法执行已授权下载") from exc
+
+    if float(end_sec) <= float(start_sec):
+        raise ValueError("定稿时间段无效")
+    canonical = normalize_url(item["canonical_url"])
+    source_type = item.get("source_type") or source_type_for(canonical)
+    # Pad slightly so keyframe cuts still cover the hook.
+    padded_start = max(0.0, float(start_sec) - 0.25)
+    padded_end = float(end_sec) + 0.25
+    out_dir = Path(static_dir) / "assets" / "hotspot-events" / "_hires_tmp"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="salogiflow-hires-", dir=out_dir) as temp_value:
+        temp_dir = Path(temp_value)
+        options = build_ytdlp_options(
+            source_type,
+            duration_seconds=0,
+            hi_res=True,
+            explicit_ranges=[(padded_start, padded_end)],
+        )
+        source = _run_ytdlp_download(canonical, options, temp_dir)
+        target = out_dir / f"hires-{Path(source).stem}-{int(start_sec * 1000)}-{int(end_sec * 1000)}.mp4"
+        target.write_bytes(source.read_bytes())
+        return target

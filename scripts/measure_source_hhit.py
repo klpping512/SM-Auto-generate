@@ -109,6 +109,11 @@ def measure(publishers: set[str], since: datetime | None) -> dict:
             "with_hooks": 0, "hooks": 0, "logistics_hooks": 0,
         })
         bucket["mothers"] += 1
+        if str(media.get("download_status") or "") == "prefiltered_skip":
+            # 主动不下：单列，不进 H-hit 分母（同铁律 E 隔离思路，但不是 tech_fail）。
+            bucket.setdefault("prefiltered_skip", 0)
+            bucket["prefiltered_skip"] += 1
+            continue
         if _is_tech_fail(media):
             tech_fails.append({
                 "media_id": media.get("id"),

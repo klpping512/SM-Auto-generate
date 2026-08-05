@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -13,9 +14,43 @@ import httpx
 from bs4 import BeautifulSoup
 
 
+logger = logging.getLogger(__name__)
+
 VIDEO_SUFFIXES = (".mp4", ".webm", ".mov", ".m4v", ".m3u8")
 ARTICLE_IMAGE_LIMIT = 12
 MAX_HOTSPOT_IMAGE = 10 * 1024 * 1024
+# 下载前廉价预筛：只砍铁定没戏的（音乐片/超短/超长直播），宁放勿杀。
+PREFILTER_TITLE_BLOCKLIST = (
+    "music video",
+    "official audio",
+    "om music",
+    "jingle",
+    "anthem",
+    "song",
+    "lyric",
+    "主题曲",
+    "宣传曲",
+    "片头曲",
+)
+PREFILTER_MIN_SEC = 8
+PREFILTER_MAX_SEC = 3600
+
+
+def prefilter_mother_candidate(item: dict) -> tuple[bool, str]:
+    """纯元数据预筛：返回 (是否下载, 跳过原因)。不发起任何网络下载。"""
+    title = " ".join(
+        str(item.get(field) or "")
+        for field in ("intake_title", "title", "publisher")
+    ).casefold()
+    for token in PREFILTER_TITLE_BLOCKLIST:
+        if token.casefold() in title:
+            return False, f"title_blocklist:{token}"
+    duration = float(item.get("duration_seconds") or 0)
+    if duration > 0 and duration < PREFILTER_MIN_SEC:
+        return False, f"too_short:{duration:.1f}s"
+    if duration > PREFILTER_MAX_SEC:
+        return False, f"too_long:{duration:.1f}s"
+    return True, ""
 ALLOWED_IMAGE_MIME = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -382,8 +417,16 @@ def download_authorized_image(
             client.close()
 
 
-def download_authorized_video(item: dict, static_dir, created_by: int, progress_callback=None) -> dict:
-    """复用现有授权视频下载与素材入库实现，不携带 Cookie。"""
+def download_authorized_video(
+    item: dict,
+    static_dir,
+    created_by: int,
+    progress_callback=None,
+    *,
+    hi_res: bool = False,
+    explicit_ranges: list[tuple[float, float]] | None = None,
+) -> dict:
+    """复用现有授权视频下载与素材入库实现，不携带 Cookie。默认走分析档（低清）。"""
     import inspiration_assets
 
     source_type = item.get("platform")
@@ -393,14 +436,19 @@ def download_authorized_video(item: dict, static_dir, created_by: int, progress_
         "canonical_url": item["original_media_url"],
         "source_type": source_type,
         "primary_category": "south_africa_hotspot",
-        "title": item.get("publisher") or f"热点视频 {item['id']}",
+        "title": item.get("intake_title") or item.get("publisher") or f"热点视频 {item['id']}",
         "license_name": item.get("license_name") or "",
         "attribution": item.get("attribution") or "",
         "hotspot_id": item.get("hotspot_id"),
         "duration_seconds": item.get("duration_seconds") or 0,
     }
     asset = inspiration_assets.download_authorized_media(
-        adapter_item, static_dir, created_by, progress_callback=progress_callback
+        adapter_item,
+        static_dir,
+        created_by,
+        progress_callback=progress_callback,
+        hi_res=hi_res,
+        explicit_ranges=explicit_ranges,
     )
     if asset.get("file_type") != "video":
         raise RuntimeError("下载结果不是视频文件")
