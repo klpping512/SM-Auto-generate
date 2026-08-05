@@ -412,6 +412,30 @@ def quality_budget_job_id(job_id: str) -> str:
     return f"{job_id}:video-quality"
 
 
+def collect_prior_quality_history(job: dict, *, max_depth: int = 8) -> list[dict]:
+    """P3-A: walk the resume lineage (prior_job_id) and return prior quality
+    evaluations in attempt order (oldest first) so decide_regeneration's
+    guardrails can actually measure human-triggered reruns."""
+    chain: list[dict] = []
+    prior_id = job.get("prior_job_id")
+    seen: set[str] = set()
+    while prior_id and prior_id not in seen and len(chain) < max_depth:
+        seen.add(str(prior_id))
+        prior = db.get_video_generation_job(str(prior_id))
+        if not prior:
+            break
+        evaluation = (prior.get("quality_report") or {}).get("video_evaluation") or {}
+        if isinstance(evaluation, dict) and evaluation.get("overall_score") is not None:
+            chain.append({
+                "job_id": prior_id,
+                "overall_score": evaluation.get("overall_score"),
+                "passed": bool(evaluation.get("passed")),
+            })
+        prior_id = prior.get("prior_job_id")
+    chain.reverse()
+    return chain
+
+
 def lease_owner_identity() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
 
@@ -1117,6 +1141,10 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 auto_regenerate=False,
             )
             try:
+                # P3-A: resume 重生成携带前序质检历史，护栏（达上限/下滑/提升不足）生效
+                quality_history = await asyncio.to_thread(
+                    collect_prior_quality_history, job,
+                ) if job.get("prior_job_id") else []
                 result = await video_quality_service.run_quality_mvp(
                     quality_request,
                     static_dir / "uploads" / "video-quality" / job["id"],
@@ -1125,6 +1153,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     # one auditable quality budget for both global/focused passes.
                     job_id=quality_budget_job_id(job["id"]),
                     allowed_roots=[static_dir],
+                    history=quality_history,
                     cancel_check=lambda: _new_job_cancel_requested(job["id"]),
                 )
                 evaluation_report = _filter_expected_dual_library_editorial_notes(

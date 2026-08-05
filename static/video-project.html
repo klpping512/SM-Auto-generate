@@ -74,6 +74,23 @@
 .replace-panel{margin-top:10px;padding:10px;border:1px dashed var(--border-line);border-radius:7px;background:#fff}
 .candidate{border:1px solid var(--border-light);border-radius:8px;padding:10px;margin-top:8px;font-size:12px}
 .candidate.selected{border-color:#16a34a}
+.qd{display:grid;gap:10px}
+.qd-score{display:flex;align-items:center;gap:12px}
+.qd-score strong{font-size:26px}
+.qd-score .delta{font-size:13px;font-weight:700}
+.delta.up{color:#287a45}.delta.down{color:#991b1b}
+.qd-axes{display:grid;grid-template-columns:repeat(2,1fr);gap:5px}
+.qd-axis{display:flex;justify-content:space-between;gap:6px;padding:4px 8px;background:var(--bg-subcard);border-radius:5px;font-size:11px}
+.qd-axis.low{background:#fef2f2;color:#991b1b;font-weight:700}
+.qd-issue{padding:9px 10px;border-left:3px solid #d97706;background:#fff7ea;border-radius:5px;font-size:12px;line-height:1.55}
+.qd-issue.high{border-left-color:#991b1b;background:#fef2f2}
+.qd-issue .meta{font-size:11px;color:var(--text-muted);margin-bottom:4px}
+.qd-decision{padding:9px 10px;border-radius:5px;font-size:12px;line-height:1.55}
+.qd-decision.blocked{background:#fef2f2;color:#991b1b;font-weight:600}
+.qd-decision.allowed{background:#f0f9f3;color:#25613a}
+.qd-decision.neutral{background:var(--bg-subcard);color:var(--text-secondary)}
+.qd-ref{border:1px dashed var(--border-line);border-radius:7px;padding:10px;font-size:12px;line-height:1.55;background:#fff}
+.qd-ref-note{font-size:11px;color:#b45309;margin-bottom:6px}
 @media(max-width:1024px){
   .wb-body{grid-template-columns:1fr}
   .wb-rail{border-left:0;border-top:1px solid var(--border)}
@@ -113,6 +130,7 @@ let matchSession=null;
 let matchSegments=new Map();
 let activeReplaceScene=-1;
 let fallbackConfirmed=false;
+let qualityFixes=false;
 const MANUAL_PREVIEW_CHECKS=[
   ['hook_authentic','开头 Hook 有吸引力，且画面与热点事件相符'],
   ['no_repeat','没有重复使用同一来源或同一时间段的镜头'],
@@ -124,6 +142,7 @@ const MANUAL_PREVIEW_CHECKS=[
 
 function setStage(stage,{replace=false}={}){
   if(!VALID_STAGES.has(stage))return;
+  if(stage!=='script')qualityFixes=false;
   currentStage=stage;
   const url=new URL(location.href);
   url.searchParams.set('stage',stage);
@@ -244,10 +263,12 @@ function renderBrief(){
 
 function renderScript(){
   const list=scenes();
+  const fixesPanel=qualityFixes?renderQualityFixesPanel():'';
   if(awaitingScript()&&!list.length){
-    document.getElementById('canvas').innerHTML=`<div class="wb-card"><h2>脚本分镜</h2><div class="empty-note">正式分镜正在后台规划（7～10 镜）。就绪后会自动显示，无需离开本页。</div></div>`;
+    document.getElementById('canvas').innerHTML=`${fixesPanel}<div class="wb-card"><h2>脚本分镜</h2><div class="empty-note">正式分镜正在后台规划（7～10 镜）。就绪后会自动显示，无需离开本页。</div></div>`;
   }else{
     document.getElementById('canvas').innerHTML=`
+      ${fixesPanel}
       <div class="wb-card">
         <h2>脚本分镜</h2>
         <p class="project-subtitle" style="margin-bottom:12px">${escapeHtml(classifyDouyinScriptState({durationTarget:Math.round(targetMs()/1000),scenes:list,isFormalPlan:true}).label)}</p>
@@ -431,6 +452,61 @@ function renderQuality(report){
   return Object.keys(checks).length?`<div class="quality-table">${Object.entries(checks).map(([name,passed])=>`<div class="quality-check"><span>${escapeHtml(name)}</span><strong class="${passed?'pass':'fail'}">${passed?'通过':'未通过'}</strong></div>`).join('')}</div>`:'';
 }
 
+const QD_AXES=[['prompt_alignment','提示词一致'],['visual_quality','画质'],['character_consistency','主体一致'],['product_consistency','产品一致'],['temporal_consistency','时序连贯'],['motion_quality','运动质量'],['camera_quality','镜头质量'],['subtitle_audio_quality','字幕音频'],['storytelling','叙事'],['platform_suitability','平台适配']];
+function qualityDiagnostics(){
+  const report=job?.quality_report||{};
+  const evaluation=report.video_evaluation;
+  if(!evaluation||evaluation.overall_score===undefined||evaluation.overall_score===null)return null;
+  const decision=report.regeneration_decision||{};
+  const score=Number(evaluation.overall_score);
+  const failed=!(evaluation.passed===true)||score<80||evaluation.evaluation_status!=='completed';
+  const blockedReason=['maximum_attempts_reached','no_meaningful_improvement'].includes(decision.reason)?decision.reason:null;
+  const optimized=report.optimized_generation||{};
+  return {evaluation,decision,score,failed,blockedReason,optimized,regeneration:evaluation.regeneration||{}};
+}
+function renderDiagnosticsDecision(diag){
+  if(!diag||!diag.failed)return '';
+  const d=diag.decision;const reason=d.reason||'';
+  const delta=d.score_delta!=null?`（上次 ${Number(d.previous_score).toFixed(0)} → 本次 ${diag.score.toFixed(0)}，Δ ${(d.score_delta>=0?'+':'')+d.score_delta}）`:'';
+  if(diag.blockedReason){
+    const label=reason==='maximum_attempts_reached'?'已达重生成上限（2 次）':'重跑提升不足 3 分';
+    return `<div class="qd-decision blocked">${label}：已禁用继续重生成，请人工复核或换选题${delta}</div>`;
+  }
+  if(reason==='score_declined')return `<div class="qd-decision blocked">本次分数低于上次${delta}；继续重生成前请先按建议修改</div>`;
+  if(reason==='manual_regeneration_allowed')return `<div class="qd-decision allowed">护栏通过，可按质检建议重生成${delta}</div>`;
+  return `<div class="qd-decision neutral">判定：${escapeHtml(d.action||'-')} · ${escapeHtml(reason||'-')}${escapeHtml(delta)}</div>`;
+}
+function renderDiagnosticsPanel(){
+  const diag=qualityDiagnostics();
+  if(!diag)return '';
+  const {evaluation,decision,optimized,regeneration}=diag;
+  const scores=evaluation.scores||{};
+  const issues=evaluation.issues||[];
+  const axesHtml=QD_AXES.filter(([key])=>scores[key]!==undefined).map(([key,label])=>{
+    const value=Number(scores[key]);
+    return `<div class="qd-axis${value<80?' low':''}"><span>${label}</span><strong>${value.toFixed(0)}</strong></div>`;
+  }).join('');
+  const issuesHtml=issues.map(issue=>`<div class="qd-issue${issue.severity==='high'?' high':''}"><div class="meta">${escapeHtml(issue.severity||'')} · ${escapeHtml(issue.category||'')} · ${Number(issue.start_second||0).toFixed(1)}–${Number(issue.end_second||0).toFixed(1)}s</div><div>${escapeHtml(issue.description||'')}</div><div style="margin-top:5px"><strong>建议：</strong>${escapeHtml(issue.suggested_fix||'')}</div></div>`).join('');
+  const optHtml=optimized.required?`<div class="qd-ref"><div class="qd-ref-note">以下为文生视频式建议；本管线用真实素材拼接，改提示词不会改变画面，请以重选素材/改写口播为准。</div>${optimized.revised_prompt?`<div><strong>参考提示词：</strong>${escapeHtml(optimized.revised_prompt)}</div>`:''}${(regeneration.storyboard_changes||[]).length?`<div style="margin-top:5px"><strong>分镜建议：</strong>${regeneration.storyboard_changes.map(c=>escapeHtml(typeof c==='string'?c:JSON.stringify(c))).join('；')}</div>`:''}</div>`:'';
+  return `<div class="wb-card" style="margin-top:12px"><h2>AI 质检诊断</h2><div class="qd">
+    <div class="qd-score"><strong>${diag.score.toFixed(0)}</strong><span>/100 · ${evaluation.passed?'通过':'未达 80 分线'}</span>${decision.score_delta!=null?`<span class="delta ${decision.score_delta>=0?'up':'down'}">Δ ${(decision.score_delta>=0?'+':'')+decision.score_delta} vs 上次</span>`:''}</div>
+    ${diag.failed?renderDiagnosticsDecision(diag):''}
+    ${axesHtml?`<div class="qd-axes">${axesHtml}</div>`:''}
+    ${issuesHtml||'<div class="empty-note">质检未列出具体问题</div>'}
+    ${optHtml}
+  </div></div>`;
+}
+function renderQualityFixesPanel(){
+  const diag=qualityDiagnostics();
+  if(!diag||!diag.failed)return '';
+  const issues=diag.evaluation.issues||[];
+  return `<div class="wb-card"><h2>质检修改建议（改完点击下方重生成）</h2>
+    ${renderDiagnosticsDecision(diag)}
+    <div class="qd" style="margin-top:10px">${issues.map(issue=>`<div class="qd-issue${issue.severity==='high'?' high':''}"><div class="meta">${Number(issue.start_second||0).toFixed(1)}–${Number(issue.end_second||0).toFixed(1)}s · ${escapeHtml(issue.category||'')}</div><div>${escapeHtml(issue.description||'')}</div><div style="margin-top:5px"><strong>建议：</strong>${escapeHtml(issue.suggested_fix||'')}</div></div>`).join('')||'<div class="empty-note">无逐条建议，请按诊断轴低分项调整脚本与素材</div>'}</div>
+    <p style="font-size:12px;color:var(--text-muted)">本管线无文生视频：请改旁白/字幕/时长或到素材匹配阶段换镜头，不要只改提示词。</p>
+  </div>`;
+}
+
 function isManualReviewEligible(){
   const report=job?.quality_report||{};const publication=report.publication||{};const technical=report.preview_quality||{};const checks=technical.checks||{};
   const required=['expected_resolution','has_audio','duration_aligned','has_timed_subtitles','no_repeated_source_or_range','final_subtitle_timeline_aligned','transition_audio_video_sync'];
@@ -490,6 +566,7 @@ function renderReview(){
       ${preview+output||'<div class="empty-note">通过质量检查后会显示预览和成片</div>'}
       ${formatRenderProvenance(job?.quality_report,scenes())}
       ${renderManualPreviewReview(manualReview)}
+      ${renderDiagnosticsPanel()}
     </div>`;
   document.getElementById('rail').innerHTML=`
     <div class="wb-card">
@@ -503,7 +580,7 @@ function renderReview(){
 
 function primaryActionConfig(){
   if(currentStage==='brief')return {label:'确认需求，进入分镜',run:()=>setStage('script')};
-  if(currentStage==='script')return {label:'保存并进入素材',run:async()=>{await saveRevision();setStage('match');}};
+  if(currentStage==='script'){if(qualityFixes)return {label:'保存并按建议重生成',run:resumeWithQualityFixes};return {label:'保存并进入素材',run:async()=>{await saveRevision();setStage('match');}};}
   if(currentStage==='match')return {label:'确认匹配，进入配音',run:()=>setStage('voice')};
   if(currentStage==='voice')return {label:'保存音色，进入验收',run:async()=>{await saveRevision();setStage('review');}};
   // review
@@ -516,7 +593,14 @@ function primaryActionConfig(){
     return {label:'生成高清成片（不发布）',run:finalizeManualReview};
   }
   if(status==='needs_review'&&job?.quality_report?.publication?.review_mode==='manual_preview')return {label:'结束任务',run:cancelFromProject,secondary:true};
-  if(status==='needs_review')return {label:'按当前规则重新生成',run:continueGeneration};
+  if(status==='needs_review'){
+    const diag=qualityDiagnostics();
+    if(diag?.failed&&diag.blockedReason){
+      return {label:diag.blockedReason==='maximum_attempts_reached'?'已达重生成上限':'重跑提升不足，已禁用',run:()=>{},disabled:true};
+    }
+    if(diag?.failed)return {label:'按质检建议重生成',run:openQualityFixMode};
+    return {label:'按当前规则重新生成',run:continueGeneration};
+  }
   if(status==='succeeded'&&job?.quality_report?.publication?.review_mode==='manual_preview'&&manualReview?.status==='rejected')return {label:'修改后重新生成',run:regenerateFromManualReview};
   if(['failed','canceled'].includes(status))return {label:'重新生成',run:retryGeneration};
   return {label:'已完成',run:()=>{},disabled:true};
@@ -579,8 +663,17 @@ async function startGeneration(){
 async function continueGeneration(){
   try{
     const response=await apiFetch(`/api/video-generation/jobs/${job.id}/resume`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload:currentPayloadFromForm()})});
-    const result=await response.json();job=result.job;project.active_job_id=job.id;project.current_revision=result.revision;renderAll();startPolling();refreshVideoTaskBadge();
+    const result=await response.json();job=result.job;project.active_job_id=job.id;project.current_revision=result.revision;qualityFixes=false;renderAll();startPolling();refreshVideoTaskBadge();
   }catch(error){showToast(error.message,'error');}
+}
+function openQualityFixMode(){
+  qualityFixes=true;
+  setStage('script');
+  showToast('已带入质检修改建议，改完脚本后点下方重生成');
+}
+async function resumeWithQualityFixes(){
+  await saveRevision();
+  await continueGeneration();
 }
 async function retryGeneration(){
   try{const response=await apiFetch(`/api/video-generation/jobs/${job.id}/retry`,{method:'POST'});const result=await response.json();job=result.job;project.active_job_id=job.id;renderAll();startPolling();refreshVideoTaskBadge();}catch(error){showToast(error.message,'error');}

@@ -366,6 +366,12 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             project["id"], revision["id"], user["id"],
             video_generation.build_idempotency_key(project["id"], revision["id"]),
         )
+        # P3-A 血缘：新 job 指向前序 job，预览质检据此回灌 history 使护栏生效
+        resumed = db.update_video_generation_job(
+            resumed["id"],
+            prior_job_id=job_id,
+            regen_attempt=int(job.get("regen_attempt") or 0) + 1,
+        ) or resumed
         db.add_video_generation_event(resumed["id"], "job_resumed", "修改已保存，重新进入质量检查")
         return {"job": resumed, "revision": revision}
 

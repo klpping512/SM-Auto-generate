@@ -913,6 +913,9 @@ def init_db():
         _ensure_column(conn, "video_render_jobs", "quality_report", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "video_generation_jobs", "output_pinned_at", "TEXT")
         _ensure_column(conn, "video_generation_jobs", "output_purged_at", "TEXT")
+        # P3-A 人在环重生成血缘：resume 新建 job 指向前序 job，质检护栏据此回灌 history
+        _ensure_column(conn, "video_generation_jobs", "prior_job_id", "TEXT")
+        _ensure_column(conn, "video_generation_jobs", "regen_attempt", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "sample_bundles", "preview_path", "TEXT")
         _seed_defaults(conn)
     record_schema_migration("2026-08-03-delivery-loop", "hook_kind/logistics_scenes + schema_migrations baseline")
@@ -3551,6 +3554,7 @@ def update_video_generation_job(job_id: str, **fields) -> dict | None:
         "status", "stage", "progress", "lease_owner", "lease_expires_at",
         "heartbeat_at", "cancel_requested_at", "canceled_at", "error_code",
         "error_message", "preview_path", "output_path", "quality_report", "attempt",
+        "prior_job_id", "regen_attempt",
         "started_at", "finished_at",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
