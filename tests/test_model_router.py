@@ -191,6 +191,35 @@ def test_budget_limit_stops_remote_call(tmp_db):
         model_router.reserve_call(job_id, estimated_input_tokens=30, estimated_output_tokens=10)
 
 
+def test_create_budget_reset_allows_retry_after_exhausted(tmp_db):
+    """Hotspot re-curation must not inherit exhausted sticky budget rows."""
+    import model_router
+
+    job_id = "hotspot-budget-reset"
+    model_router.create_budget(
+        job_id, max_calls=1, max_input_tokens=100, max_output_tokens=50,
+    )
+    model_router.record_call(
+        job_id,
+        "planner_text",
+        cache_key="spent-once",
+        input_tokens=80,
+        output_tokens=20,
+        response={"content": "spent"},
+    )
+    with pytest.raises(model_router.BudgetExceeded):
+        model_router.reserve_call(job_id, estimated_input_tokens=10, estimated_output_tokens=5)
+
+    fresh = model_router.create_budget(
+        job_id, max_calls=1, max_input_tokens=100, max_output_tokens=50, reset=True,
+    )
+    assert fresh["calls_used"] == 0
+    assert fresh["input_tokens_used"] == 0
+    assert fresh["output_tokens_used"] == 0
+    # Retry attempt can reserve again under the same max_calls=1 ceiling.
+    model_router.reserve_call(job_id, estimated_input_tokens=10, estimated_output_tokens=5)
+
+
 def test_model_route_admin_api_never_exposes_environment_secret(tmp_db, monkeypatch):
     from fastapi.testclient import TestClient
     import app, auth

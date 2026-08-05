@@ -892,6 +892,8 @@ def init_db():
         _ensure_column(conn, "hotspot_media", "intake_metadata_checked_at", "TEXT")
         _ensure_column(conn, "hotspot_media", "intake_decision_json", "TEXT")
         _ensure_column(conn, "hotspot_media", "authorization_status", "TEXT NOT NULL DEFAULT 'pending_review'")
+        _ensure_column(conn, "hotspot_media", "materialization_retryable", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "hotspot_media", "retry_after", "TEXT")
         _ensure_column(conn, "hotspot_discovery_requests", "stage", "TEXT")
         _ensure_column(conn, "hotspot_discovery_requests", "error_message", "TEXT")
         conn.execute(
@@ -1825,13 +1827,14 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
         "intake_summary", "intake_metadata_status", "intake_metadata_checked_at", "intake_decision_json", "authorization_status", "rights_tier",
         "rights_note", "license_name", "rights_evidence_url", "attribution", "download_status",
         "processing_status", "error_message", "sha256", "asset_id", "lifecycle_status",
-        "download_progress", "progress_detail",
+        "download_progress", "progress_detail", "materialization_retryable", "retry_after",
     )
     defaults = {
         "platform": "direct", "publisher": "", "author": "", "authorization_status": "pending_review", "rights_tier": "yellow",
         "rights_note": "", "download_status": "discovered", "processing_status": "not_started",
         "lifecycle_status": "active", "download_progress": 0, "intake_title": "",
         "intake_summary": "", "intake_metadata_status": "pending", "intake_decision_json": None,
+        "materialization_retryable": 0, "retry_after": None,
     }
     payload = {**defaults, **data}
     if "authorization_status" not in data:
@@ -1975,6 +1978,7 @@ def update_hotspot_media_state(media_id: int, **changes):
         "media_kind", "local_path", "mime_type", "duration_seconds", "width", "height",
         "download_status", "processing_status", "error_message", "sha256", "asset_id",
         "download_progress", "progress_detail", "intake_decision_json",
+        "materialization_retryable", "retry_after",
     }
     values = {key: value for key, value in changes.items() if key in allowed}
     if not values:
@@ -2451,6 +2455,18 @@ def create_model_budget(
             (job_id, max_calls, max_input_tokens, max_output_tokens),
         )
     return get_model_budget(job_id)
+
+
+def delete_model_budget(job_id: str) -> None:
+    """Remove a sticky budget row so the next create starts from zero usage.
+
+    Usage rows reference model_budgets(job_id); clear them first so SQLite FK
+    allows the parent delete. Prior attempt counters are intentionally discarded
+    when a caller opts into reset (hotspot re-curation).
+    """
+    with get_conn() as conn:
+        conn.execute("DELETE FROM model_call_usage WHERE job_id=?", (job_id,))
+        conn.execute("DELETE FROM model_budgets WHERE job_id=?", (job_id,))
 
 
 def get_model_budget(job_id: str) -> dict | None:

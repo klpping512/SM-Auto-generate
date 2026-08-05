@@ -220,9 +220,12 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
     if not hooks:
         return [], {"status": "nothing_to_audit", "accepted_count": 0}
     job_id = model_router.route_scoped_job_id(_audit_job_id(asset_id, source_title, source_context, hooks), "critic")
+    # reset=True: same mother re-curation reuses a deterministic job_id; sticky
+    # INSERT OR IGNORE would otherwise keep exhausted calls_used and block retry.
     model_router.create_budget(
         job_id, max_calls=1, max_input_tokens=10_000,
         max_output_tokens=model_router.required_output_budget("critic", 400),
+        reset=True,
     )
     result = asyncio.run(model_router.call_text(
         job_id,
@@ -357,9 +360,12 @@ def curate_hook_clips(
     job_id = model_router.route_scoped_job_id(
         _curation_job_id(int(asset_id), source_title, source_context, ordered), "planner_text"
     )
+    # reset=True: deterministic job_id across mother re-runs must not inherit
+    # exhausted sticky budget from the previous attempt.
     model_router.create_budget(
         job_id, max_calls=1, max_input_tokens=14_000,
         max_output_tokens=model_router.required_output_budget("planner_text", 1_000),
+        reset=True,
     )
     result = asyncio.run(model_router.call_text(
         job_id,

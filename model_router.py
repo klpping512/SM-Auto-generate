@@ -174,7 +174,16 @@ def create_budget(
     max_calls: int = 4,
     max_input_tokens: int = 20_000,
     max_output_tokens: int = 6_000,
+    reset: bool = False,
 ) -> dict:
+    """Create or reuse a sticky per-job budget.
+
+    Default keeps INSERT OR IGNORE sticky semantics (cross-restart guard).
+    Pass reset=True for retry-shaped callers (e.g. hotspot re-curation) that
+    must start from zero usage on each attempt while still enforcing max_calls.
+    """
+    if reset:
+        db.delete_model_budget(job_id)
     return db.create_model_budget(
         job_id, max_calls, max_input_tokens, max_output_tokens
     )
