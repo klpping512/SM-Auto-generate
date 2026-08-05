@@ -85,6 +85,9 @@ CATEGORY_KEYWORDS = {
         "打包", "分拣", "理货", "拣货", "上架", "作业", "操作员", "搬运",
         "入库", "出库", "库存", "堆场", "月台", "托盘", "扫描",
         "货物",  # 原仅 video_renderer 有，并入
+        # 阶段C：原仅入库分类器 asset_processing.CATEGORY_TERMS 有，并入真源，
+        # 避免 alias 后港口/码头素材的 primary_category 掉到 other。
+        "装卸", "terminal", "container terminal",
     ),
     "delivery": (
         "配送", "快递", "物流", "运输", "派送", "卡车",
@@ -92,6 +95,9 @@ CATEGORY_KEYWORDS = {
         "车辆", "路线",  # 原仅 video_renderer 有，并入
         "delivery", "courier", "shipping", "logistics",
         "truck", "van", "trailer",  # 原仅 media_assets 有，并入
+        # 阶段C：原仅入库分类器有（真源此前只放在 DELIVERY_TAG_VALUES 能力标签），
+        # 补回主分类词表，港口/船舶素材入库仍命中 delivery。
+        "港口", "船舶", "port",
     ),
     "customs": ("清关", "海关", "报关", "通关", "customs", "clearance"),
     "brand": (
@@ -102,7 +108,16 @@ CATEGORY_KEYWORDS = {
         # 以人物为主体：肖像、团队照、办公场景（不含裸词「访谈/采访」）
         "工作人员", "员工", "职员", "staff", "团队", "培训", "工人",
         "办公", "开会", "会议", "面试", "合照", "团建",
+        "team",  # 阶段C：原仅入库分类器有（英文 transcript/模型描述常见），并入
     ),
-    "facility": ("设备", "设施", "facility", "叉车", "传送带", "机器", "流水线"),
-    "customer": ("客户", "customer", "案例", "好评", "反馈", "见证"),
+    "facility": (
+        "设备", "设施", "facility", "叉车", "传送带", "机器", "流水线",
+        "forklift",  # 阶段C：英文 OCR/模型描述无法命中「叉车」，补英文同义词
+    ),
+    "customer": (
+        "客户", "customer", "案例", "好评", "反馈", "见证",
+        # 阶段C：原仅入库分类器有；「签收」是中文强特征、「delivery receipt」是
+        # 英文 OCR 常见字样，真源原有词无法子串命中，补回以免掉 other。
+        "签收", "delivery receipt",
+    ),
 }

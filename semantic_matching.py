@@ -113,7 +113,12 @@ def _tag_map(segment: dict) -> dict[str, set[str]]:
     # 两者在匹配时等价，保留向后兼容。
     result.setdefault("entity", set()).update(result.get("object", set()))
     category = segment.get("primary_category")
-    # TODO: 与 asset_taxonomy 对齐（category→标签反向映射，阶段 C）
+    # 阶段C：分类→标签反向映射，与真源 asset_taxonomy.CATEGORIES 键集对齐。
+    # 形态不同构（真源是关键词→分类），不合并；仅服务 _score 打分，非入库分类。
+    # 值均取自 TAG_TERMS/BUSINESS_TERMS 标准词。
+    # brand/other 刻意不设映射：brand 类素材未必是 Buffalo，无条件注入
+    # {"brand": {"Buffalo"}} 会伪造品牌露出证据、污染 brand_proof 匹配；
+    # other 本就是无语义兜底类。
     category_tags = {
         "warehouse": {"entity": {"仓库"}, "scene": {"仓库作业"}},
         "delivery": {"scene": {"道路运输"}},

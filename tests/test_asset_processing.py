@@ -280,3 +280,66 @@ def test_scene_detection_uses_low_resolution_ffmpeg_proxy(monkeypatch, tmp_path)
     assert boundaries == [0, 1_400, 4_200]
     assert "fps=5,scale=320:-2" in command[command.index("-vf") + 1]
     assert kwargs["timeout"] <= 120
+
+
+# ── 阶段C：入库分类器收敛到 asset_taxonomy 单一真源 ──────────────────
+
+
+def test_category_terms_is_alias_of_taxonomy_single_source():
+    import asset_processing
+    import asset_taxonomy
+
+    assert asset_processing.CATEGORY_TERMS is asset_taxonomy.CATEGORY_KEYWORDS
+    assert set(asset_processing.CATEGORY_TERMS) == asset_taxonomy.CATEGORIES - {"other"}
+
+
+def test_port_and_vessel_material_still_classifies_as_delivery_after_alias():
+    from asset_processing import classify_evidence
+
+    result = classify_evidence(
+        "港口船舶.mp4",
+        transcript="船舶正在港口装卸集装箱",
+        ocr_text="DURBAN PORT",
+    )
+
+    assert result["primary_category"] == "delivery"
+    hits = [hit for item in result["evidence"] for hit in item["hits"]]
+    assert any(hit in {"港口", "船舶", "port"} for hit in hits)
+
+
+def test_bare_interview_term_no_longer_hits_staff():
+    import asset_processing
+    from asset_processing import classify_evidence
+
+    # 「访谈」已从真源移除：裸词不再命中 staff，落 other 交人工/模型兜底。
+    assert "访谈" not in asset_processing.CATEGORY_TERMS["staff"]
+    result = classify_evidence("访谈.mp4", transcript="访谈")
+    assert result["primary_category"] != "staff"
+
+    # 伴随真源词时仍由 员工/团队 等命中 staff，行为不回退。
+    result = classify_evidence("员工访谈.mp4", transcript="员工接受团队访谈")
+    assert result["primary_category"] == "staff"
+    staff_hits = [hit for item in result["evidence"] if item["category"] == "staff" for hit in item["hits"]]
+    assert "访谈" not in staff_hits
+
+
+def test_customs_terms_unified_to_clearance_wording():
+    import asset_processing
+    import asset_taxonomy
+
+    # 画面关键词侧统一为「通关」，不再含「关税」；
+    # 节点侧「关税」→ customs 由 NODE_CATEGORY_RULES 保留，不受影响。
+    assert "通关" in asset_processing.CATEGORY_TERMS["customs"]
+    assert "关税" not in asset_processing.CATEGORY_TERMS["customs"]
+    assert asset_taxonomy.NODE_CATEGORY_RULES["关税"] == {"customs"}
+
+
+def test_intake_terms_unique_to_old_third_table_are_preserved():
+    from asset_processing import classify_evidence
+
+    # 对抗审查发现：英文 OCR/transcript 无法命中中文等价词，
+    # alias 后这些入库必需词必须仍在真源，否则掉 other。
+    assert classify_evidence("clip.mp4", ocr_text="FORKLIFT OPERATION")["primary_category"] == "facility"
+    assert classify_evidence("clip.mp4", transcript="customer delivery receipt signed")["primary_category"] == "customer"
+    assert classify_evidence("clip.mp4", transcript="our team meeting")["primary_category"] == "staff"
+    assert classify_evidence("clip.mp4", ocr_text="DURBAN CONTAINER TERMINAL")["primary_category"] in {"warehouse", "delivery"}

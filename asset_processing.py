@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import asset_taxonomy
 import database as db
 import model_router
 
@@ -94,15 +95,10 @@ PRIMARY_CATEGORIES = {
     "warehouse", "delivery", "customs", "brand", "staff", "facility", "customer", "other",
 }
 
-CATEGORY_TERMS = {
-    "warehouse": ("海外仓", "仓库", "仓储", "分拣", "入库", "出库", "货架", "堆场", "装卸", "container terminal", "terminal"),
-    "delivery": ("物流", "运输", "配送", "卡车", "船舶", "港口", "shipping", "truck", "port"),
-    "customs": ("清关", "海关", "报关", "关税", "customs", "clearance"),
-    "brand": ("品牌", "标识", "logo", "brand"),
-    "staff": ("员工", "团队", "工作人员", "会议", "访谈", "staff", "team"),
-    "facility": ("叉车", "设备", "传送带", "机器", "facility", "forklift"),
-    "customer": ("客户", "签收", "案例", "反馈", "customer", "delivery receipt"),
-}
+# 收敛到单一真源(阶段C)。入库规则分类器 _category_scores 直接读真源，
+# 「访谈」随之移除、customs 口径统一为「通关」。港口/船舶/port/terminal/装卸/签收/
+# forklift/team 等入库必需词已在改动①补回真源，故入库分类行为不回退。
+CATEGORY_TERMS = asset_taxonomy.CATEGORY_KEYWORDS
 
 TAG_TERMS = {
     "brand": {
