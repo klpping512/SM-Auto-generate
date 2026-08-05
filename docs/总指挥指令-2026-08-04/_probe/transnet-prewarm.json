@@ -1,0 +1,150 @@
+{
+  "status": "materialized",
+  "candidate_count": 10,
+  "requested_media_ids": [
+    875,
+    876,
+    877,
+    878,
+    879,
+    880,
+    881,
+    882,
+    883,
+    884
+  ],
+  "metadata_candidate_ids": [
+    884,
+    883,
+    882,
+    881,
+    880,
+    879,
+    878,
+    877,
+    876,
+    875
+  ],
+  "metadata": {
+    "requested": 10,
+    "ready": 10,
+    "cached": 0,
+    "failed": []
+  },
+  "decision_pool_ids": [
+    884,
+    883,
+    882,
+    881,
+    880,
+    879,
+    878,
+    877,
+    876,
+    875
+  ],
+  "intake": {
+    "mode": "all_authorized_video_analysis",
+    "source_metadata": {
+      "requested": 10,
+      "ready": 10,
+      "cached": 0,
+      "failed": []
+    },
+    "curator": "planner_text + critic"
+  },
+  "selected_media_ids": [
+    884,
+    883,
+    882,
+    881,
+    880,
+    879,
+    878,
+    877,
+    876,
+    875
+  ],
+  "materialized": [
+    {
+      "media_id": 884,
+      "asset_id": 754,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 883,
+      "asset_id": 759,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 2,
+      "progress_detail": "内置模型已筛出 2 条精华 Hook 片段"
+    },
+    {
+      "media_id": 882,
+      "asset_id": 761,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 881,
+      "asset_id": 766,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 880,
+      "asset_id": 769,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 1,
+      "progress_detail": "内置模型已筛出 1 条精华 Hook 片段"
+    },
+    {
+      "media_id": 879,
+      "asset_id": 774,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 878,
+      "asset_id": 776,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 2,
+      "progress_detail": "内置模型已筛出 2 条精华 Hook 片段"
+    },
+    {
+      "media_id": 877,
+      "asset_id": 783,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 876,
+      "asset_id": 790,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 0,
+      "progress_detail": "镜头已分析，但内置模型未筛出可复用 Hook"
+    },
+    {
+      "media_id": 875,
+      "asset_id": 793,
+      "download_status": "downloaded",
+      "processing_status": "ready",
+      "hook_count": 3,
+      "progress_detail": "内置模型已筛出 3 条精华 Hook 片段"
+    }
+  ]
+}

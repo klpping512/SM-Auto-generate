@@ -126,7 +126,15 @@ def measure(publishers: set[str], since: datetime | None) -> dict:
         detail = str(media.get("progress_detail") or "")
         processing = str(media.get("processing_status") or "")
         downloaded = str(media.get("download_status") or "")
-        if downloaded != "downloaded" or processing not in {"ready", "processing_failed", "failed"}:
+        # 兼容：asset 已就绪但 download_status 被重抓误写回 metadata_ready 的母片仍计入分母
+        curated_ready = (
+            (downloaded == "downloaded" and processing in {"ready", "processing_failed", "failed"})
+            or (
+                bool(media.get("asset_id"))
+                and processing in {"ready", "processing_failed", "failed"}
+            )
+        )
+        if not curated_ready:
             # still in flight — exclude from H-hit denominator (not tech fail, not success)
             continue
         curated_ok.append(media)

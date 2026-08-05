@@ -91,7 +91,14 @@ def collect_stats(since: datetime) -> dict:
         if status == "metadata_ready":
             metadata_ready.append(media)
         processing = str(media.get("processing_status") or "")
-        if status == "downloaded" and processing in {"ready", "processing_failed", "failed"}:
+        curated_ready = (
+            (status == "downloaded" and processing in {"ready", "processing_failed", "failed"})
+            or (
+                bool(media.get("asset_id"))
+                and processing in {"ready", "processing_failed", "failed"}
+            )
+        )
+        if curated_ready:
             curated.append(media)
             asset_id = media.get("asset_id")
             events = db.list_hotspot_event_clips(asset_id=int(asset_id)) if asset_id else []

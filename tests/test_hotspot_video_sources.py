@@ -36,6 +36,10 @@ def test_default_youtube_sources_are_the_approved_channels():
         "BusinessDayTV",
         "Transnet NPA",
     ]
+    transnet = hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS[-1]
+    assert transnet["evergreen"] is True
+    assert int(transnet["min_downloadable"]) == 10
+    assert int(transnet["playlist_scan_cap"]) == 20
 
 
 def test_configured_channels_env_overrides_defaults(monkeypatch):
@@ -53,6 +57,21 @@ def test_configured_channels_env_overrides_defaults(monkeypatch):
     assert channels == [
         {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
     ]
+
+
+def test_configured_channels_inherits_evergreen_for_transnet(monkeypatch):
+    import hotspot_video_sources
+
+    monkeypatch.setenv(
+        "SA_HOTSPOT_VIDEO_CHANNELS_JSON",
+        json.dumps([
+            {"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"},
+        ]),
+    )
+    channels = hotspot_video_sources.configured_channels()
+    assert channels[0]["evergreen"] is True
+    assert channels[0]["min_downloadable"] == 10
+    assert channels[0]["playlist_scan_cap"] == 20
 
 
 def test_configured_channels_falls_back_to_defaults(monkeypatch):
@@ -161,13 +180,16 @@ def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):
     result = hotspot_video_sources.fetch_youtube_channel_hotspots(
         [{"name": "SA Today", "url": "https://www.youtube.com/@SAtoday"}],
         runner=runner,
+        precheck=False,
     )
 
     assert result["new"] == 5
     assert result["media"] == 5
-    assert result["source_health"] == [
-        {"name": "YouTube · SA Today", "status": "ok", "items": 5, "error": ""}
-    ]
+    assert result["downloadable"] == 5
+    assert result["source_health"][0]["name"] == "YouTube · SA Today"
+    assert result["source_health"][0]["status"] == "ok"
+    assert result["source_health"][0]["items"] == 5
+    assert result["source_health"][0]["downloadable"] == 5
     command = commands[0]
     assert "--flat-playlist" in command
     assert command[command.index("--playlist-end") + 1] == str(hotspot_video_sources.CHANNEL_VIDEO_LIMIT)
@@ -197,11 +219,115 @@ def test_channel_discovery_allows_a_bounded_admin_backfill_batch(tmp_db):
 
     result = hotspot_video_sources.fetch_youtube_channel_hotspots(
         [{"name": "SA Today", "url": "https://www.youtube.com/@SAtoday"}],
-        runner=runner, limit=5,
+        runner=runner, limit=5, precheck=False,
     )
 
     assert result["new"] == 5
     assert commands[0][commands[0].index("--playlist-end") + 1] == "5"
+
+
+def test_precheck_marks_unavailable_as_retryable_and_keeps_downloadable(tmp_db):
+    import hotspot_video_sources
+
+    entries = [
+        {"id": "good01", "title": "Port dredge master", "duration": 120, "timestamp": 1784690001},
+        {"id": "bad01", "title": "Just published", "duration": 60, "timestamp": 1784690002},
+        {"id": "good02", "title": "Harbour crane", "duration": 90, "timestamp": 1784690003},
+    ]
+
+    def runner(command, **_kwargs):
+        if "-F" in command:
+            url = command[-1]
+            if "bad01" in url:
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="ERROR: This video is not available",
+                )
+            return SimpleNamespace(returncode=0, stdout="137 mp4 1080p\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"entries": entries}), stderr="")
+
+    result = hotspot_video_sources.fetch_youtube_channel_hotspots(
+        [{"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"}],
+        runner=runner,
+        limit=3,
+        precheck=True,
+    )
+    assert result["downloadable"] == 2
+    assert result["retryable"] == 1
+    media = tmp_db.list_hotspot_media(media_kind="video_link", limit=10)
+    by_id = {item["platform_media_id"]: item for item in media}
+    assert by_id["good01"]["download_status"] == "metadata_ready"
+    assert by_id["bad01"]["download_status"] == "materialization_retryable"
+    assert by_id["bad01"]["materialization_retryable"] == 1
+    assert by_id["bad01"]["retry_after"]
+
+
+def test_evergreen_channel_scans_deeper_until_min_downloadable(tmp_db):
+    import hotspot_video_sources
+
+    # 前 4 条不可下，后 3 条可下；scan_cap=8，min_downloadable=3 → 应扫到第 7 条停
+    entries = [
+        {"id": f"v{i:02d}", "title": f"clip {i}", "duration": 80, "timestamp": 1784690000 + i}
+        for i in range(8)
+    ]
+    unavailable = {f"v{i:02d}" for i in range(4)}
+
+    def runner(command, **_kwargs):
+        if "-F" in command:
+            url = command[-1]
+            vid = url.rsplit("=", 1)[-1]
+            if vid in unavailable:
+                return SimpleNamespace(returncode=1, stdout="", stderr="This video is not available")
+            return SimpleNamespace(returncode=0, stdout="22 mp4\n", stderr="")
+        assert command[command.index("--playlist-end") + 1] == "8"
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"entries": entries}), stderr="")
+
+    result = hotspot_video_sources.fetch_youtube_channel_hotspots(
+        [{
+            "name": "Transnet NPA",
+            "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw",
+            "evergreen": True,
+            "min_downloadable": 3,
+            "playlist_scan_cap": 8,
+        }],
+        runner=runner,
+        precheck=True,
+    )
+    assert result["downloadable"] == 3
+    assert result["retryable"] == 4
+    assert result["source_health"][0]["scanned"] == 7
+
+
+def test_refetch_does_not_downgrade_downloaded_mother(tmp_db):
+    import hotspot_video_sources
+
+    entries = [
+        {"id": "kept01", "title": "Port ops", "duration": 90, "timestamp": 1784690001},
+    ]
+
+    def runner(command, **_kwargs):
+        if "-F" in command:
+            return SimpleNamespace(returncode=0, stdout="22 mp4\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"entries": entries}), stderr="")
+
+    hotspot_video_sources.fetch_youtube_channel_hotspots(
+        [{"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"}],
+        runner=runner, limit=1, precheck=True,
+    )
+    media = tmp_db.list_hotspot_media(media_kind="video_link", limit=5)[0]
+    tmp_db.update_hotspot_media_state(
+        media["id"],
+        download_status="downloaded",
+        processing_status="ready",
+        progress_detail="已分析",
+    )
+    hotspot_video_sources.fetch_youtube_channel_hotspots(
+        [{"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"}],
+        runner=runner, limit=1, precheck=True,
+    )
+    refreshed = tmp_db.get_hotspot_media(media["id"])
+    assert refreshed["download_status"] == "downloaded"
+    assert refreshed["processing_status"] == "ready"
+
 
 
 def test_channel_failure_is_isolated_in_health_result(tmp_db):
@@ -228,6 +354,8 @@ async def test_main_hotspot_fetch_combines_youtube_channel_results(tmp_db, tmp_p
     import hotspot_fetcher
 
     def runner(command, **kwargs):
+        if "-F" in command:
+            return SimpleNamespace(returncode=0, stdout="22 mp4 720p\n", stderr="")
         return SimpleNamespace(returncode=0, stdout=json.dumps(_payload()), stderr="")
 
     result = await hotspot_fetcher.fetch_hotspots(
