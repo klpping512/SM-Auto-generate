@@ -309,6 +309,22 @@ DELIVERY_DONE_CLAIMS = (
 _CUSTOMS_NODE_TERMS = {"清关", "customs", "关税"}
 _NON_CUSTOMS_CATEGORIES = {"warehouse", "delivery", "staff", "facility"}
 
+# 白名单正向强制的作用域常量：与黑名单触发范围完全同源（同一对集合），
+# 差别只在动作——黑名单再看文本，白名单命中场景即强制，不看文本。
+BORROWED_CUSTOMS_CONTEXT = frozenset(_NON_CUSTOMS_CATEGORIES)
+CUSTOMS_NODES = frozenset(_CUSTOMS_NODE_TERMS)
+
+
+def requires_safe_customs_copy(primary_category: str, logistics_nodes: list[str]) -> bool:
+    """当一条 scene 用非-customs 素材出现在 customs 节点下(借用清关上下文)时返回 True。
+    此时该 scene 的口播必须强制走安全准备模板——不检测文本，直接剥夺其自由宣称的机会(真气密)。
+    真 customs 素材(primary_category=='customs')返回 False——它有权正常改写。"""
+    category = str(primary_category or "").casefold()
+    if category not in BORROWED_CUSTOMS_CONTEXT:
+        return False
+    nodes = {str(node).casefold() for node in (logistics_nodes or [])}
+    return bool(nodes & CUSTOMS_NODES)
+
 
 def overclaim_completion_issues(voiceover: str, primary_category: str, logistics_nodes: list[str]) -> list[str]:
     """当一条 scene 用非-customs 素材在 customs 节点下宣称已完成受监管结果时，
@@ -335,9 +351,14 @@ def apply_overclaim_guard(
     scenes: list[dict],
     logistics_nodes: list[str],
 ) -> list[dict]:
-    """对模型产出的逐镜文案做后置确定性拦截，命中即回退安全准备式文案。
+    """对模型产出的逐镜文案做后置确定性拦截，两层防线：
 
-    返回 overclaim_guard 命中记录（含原句、分类、替换后文案），供生产链
+    1. 白名单正向强制（whitelist_forced）：借用清关上下文的非-customs scene
+       命中危险场景即无条件替换为安全准备模板，不看模型文本——真气密。
+    2. 黑名单兜底（blacklist_fallback）：其余 scene 保留完成词检测回退
+       （防御纵深，不删）。
+
+    返回 overclaim_guard 命中记录（含 mode、原句、分类、替换后文案），供生产链
     写入渲染报告。回退文案同步到 text_overlay，确保字幕与旁白一致。
     """
     records: list[dict] = []
@@ -345,19 +366,38 @@ def apply_overclaim_guard(
         voiceover = str(item.get("voiceover") or "")
         overlay = str(item.get("text_overlay") or "")
         category = str(scene.get("primary_category") or "")
-        issues = overclaim_completion_issues(f"{voiceover} {overlay}", category, logistics_nodes)
-        if not issues:
-            continue
         try:
             max_chars = scene_voiceover_char_limit(scene)
         except (TypeError, ValueError):
             max_chars = None
+        if requires_safe_customs_copy(category, logistics_nodes):
+            # 第一道（白名单/正向强制）：借来上下文的危险 scene，无条件用安全模板，
+            # 模型那句连看都不看——不给它自由说话的机会（真气密）。
+            safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
+                category, max_chars=max_chars, min_chars=5,
+            )
+            records.append({
+                "scene": index + 1,
+                "primary_category": category,
+                "mode": "whitelist_forced",
+                "issues": [],
+                "original_voiceover": voiceover,
+                "replaced_voiceover": safe_copy,
+            })
+            item["voiceover"] = safe_copy
+            item["text_overlay"] = safe_copy.rstrip("。")[:24]
+            continue
+        # 第二道（黑名单兜底）：其余 scene 保留原有过度宣称检测（防御纵深，不删）。
+        issues = overclaim_completion_issues(f"{voiceover} {overlay}", category, logistics_nodes)
+        if not issues:
+            continue
         safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
             category, max_chars=max_chars, min_chars=5,
         )
         records.append({
             "scene": index + 1,
             "primary_category": category,
+            "mode": "blacklist_fallback",
             "issues": issues,
             "original_voiceover": voiceover,
             "replaced_voiceover": safe_copy,
