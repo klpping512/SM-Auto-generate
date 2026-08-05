@@ -126,16 +126,32 @@ def sample_max_total_sec() -> int:
     return max(sample_window_sec(), _env_int("SA_HOTSPOT_SAMPLE_MAX_TOTAL_SEC", 300))
 
 
+def single_window_sec() -> int:
+    """多窗关闭时的单一连续分析窗秒数（默认 120，沿用老行为）。"""
+    return max(10, _env_int("SA_HOTSPOT_SINGLE_WINDOW_SEC", 120))
+
+
+def multiwindow_enabled() -> bool:
+    """长视频均匀多窗采样开关。默认关闭：真修好前保持单一连续窗，避免 offsets 虚报。"""
+    return str(os.environ.get("SA_HOTSPOT_MULTIWINDOW", "0")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def compute_analysis_sample_windows(duration_seconds: float) -> list[tuple[float, float]]:
-    """全片均匀多窗采样（仅分析档）。短片不下采样窗。
+    """分析档采样窗。短片不下采样窗；长视频默认单一连续窗，多窗需显式开启。
 
     D<=180：空列表（调用方下整片）。
-    D>180：均匀铺 N 个不重叠 WINDOW 秒窗口，总采样 ≤ MAX_TOTAL。
+    D>180 且 multiwindow 关：单一连续窗 [(0, min(SINGLE_WINDOW, D))]。
+    D>180 且 multiwindow 开：均匀铺 N 个不重叠 WINDOW 秒窗口，总采样 ≤ MAX_TOTAL。
     例 D=600、WINDOW=60、MAX_TOTAL=300 → 起点 0/135/270/405/540。
     """
     duration = float(duration_seconds or 0)
     if duration <= 180:
         return []
+    if not multiwindow_enabled():
+        window = float(single_window_sec())
+        return [(0.0, min(window, duration))]
     window = float(sample_window_sec())
     max_total = float(sample_max_total_sec())
     n = max(1, min(int(math.floor(max_total / window)), int(math.floor(duration / window))))
@@ -190,7 +206,7 @@ def build_ytdlp_options(
 ) -> dict:
     """构建受限、可观测的视频下载参数。
 
-    - 分析档（hi_res=False）：默认 480p；长视频均匀多窗采样。
+    - 分析档（hi_res=False）：默认 480p；长视频默认单一连续窗（多窗需 SA_HOTSPOT_MULTIWINDOW=1）。
     - 定稿档（hi_res=True）：默认 720p；按 explicit_ranges 精确下片段，不多窗。
     """
     height = final_height() if hi_res else analysis_height()

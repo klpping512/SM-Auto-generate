@@ -3089,9 +3089,16 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                 except (TypeError, ValueError, IndexError, KeyError):
                     sample_offsets = []
                 # Persist sample windows on the media row so resume/retry can remap timestamps.
+                # analysis_clip_seconds records the downloaded analysis file length;
+                # never let it overwrite original duration_seconds (channel metadata).
                 intake = _normalized_hotspot_intake_decision(item.get("intake_decision_json"))
                 intake["sample_offsets"] = sample_offsets
                 intake["analysis_height"] = int(asset.get("height") or 0) or None
+                if asset.get("duration") is not None:
+                    try:
+                        intake["analysis_clip_seconds"] = float(asset["duration"])
+                    except (TypeError, ValueError):
+                        pass
                 db.update_hotspot_media_state(
                     media_id,
                     intake_decision_json=_json.dumps(intake, ensure_ascii=False),
@@ -3117,7 +3124,6 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
         state = {
             "media_kind": "image" if asset.get("file_type") == "image" else "video_file",
             "local_path": asset.get("filepath"),
-            "duration_seconds": asset.get("duration"),
             "width": asset.get("width"),
             "height": asset.get("height"),
             "sha256": asset.get("sha256"),
@@ -3132,6 +3138,13 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
             "processing_status": "processing",
             "error_message": None,
         }
+        # Preserve original duration_seconds from channel metadata. Analysis clips
+        # may be only 60/120s; writing that back would break re-runs and planners.
+        original_duration = float(item.get("duration_seconds") or 0)
+        analysis_clip = asset.get("duration")
+        if original_duration <= 0 and analysis_clip is not None and not sample_offsets:
+            # Full-file download with no prior metadata: safe to record measured length.
+            state["duration_seconds"] = analysis_clip
         if asset.get("file_type") == "video":
             state["mime_type"] = "video/mp4"
         db.update_hotspot_media_state(media_id, **state)

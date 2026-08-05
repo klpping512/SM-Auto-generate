@@ -130,6 +130,51 @@ def test_materialization_endpoint_requires_confirmation_and_marks_pending(tmp_db
     assert tmp_db.get_hotspot_media(media_id)["download_status"] == "pending"
 
 
+def test_materialization_preserves_original_duration_seconds(tmp_db, monkeypatch, tmp_path):
+    """分析档只有 120s 时，不得把母片 duration_seconds 焊成 120。"""
+    import json
+
+    import app
+
+    _, media_id = _hotspot_and_media(tmp_db, "yellow", confirmed=True)
+    tmp_db.update_hotspot_media_state(media_id, duration_seconds=600)
+    asset_id = tmp_db.create_asset({
+        "name": "分析档短片",
+        "filepath": "assets/library/video/analysis-clip.mp4",
+        "file_type": "video",
+        "category": "other",
+        "duration": 120,
+        "width": 854,
+        "height": 480,
+        "size": 100,
+        "thumbnail": "assets/thumbnails/analysis-clip.jpg",
+        "sha256": "a" * 64,
+        "source": "youtube",
+        "status": "active",
+        "created_by": None,
+    })
+
+    def fake_download(item, static_dir, created_by, progress_callback=None):
+        asset = dict(tmp_db.get_asset(asset_id))
+        asset["sample_offsets"] = [(0.0, 120.0)]
+        return asset
+
+    async def fake_process(job_id):
+        tmp_db.update_asset_processing_job(job_id, status="succeeded", stage="ready", progress=100)
+
+    monkeypatch.setattr(app.hotspot_media, "download_authorized_video", fake_download)
+    monkeypatch.setattr(app, "_run_asset_processing_job", fake_process)
+    monkeypatch.setattr(app, "STATIC_DIR", tmp_path)
+
+    asyncio.run(app._run_hotspot_media_materialization(media_id, created_by=1))
+
+    item = tmp_db.get_hotspot_media(media_id)
+    assert item["duration_seconds"] == 600
+    intake = json.loads(item.get("intake_decision_json") or "{}")
+    assert intake["sample_offsets"] == [[0.0, 120.0]]
+    assert intake["analysis_clip_seconds"] == 120
+
+
 def test_materialization_reuses_asset_processing_and_marks_ready(tmp_db, monkeypatch, tmp_path):
     import app
 

@@ -108,9 +108,22 @@ def test_analysis_vs_hi_res_height_formats(monkeypatch):
     assert high["_sample_offsets"] == [(10.0, 20.0)]
 
 
-def test_long_video_sample_windows_cover_tail(monkeypatch):
+def test_long_video_defaults_to_single_continuous_window(monkeypatch):
+    """多窗默认关闭：长视频只报 1 个真实窗，不再虚报 5 窗覆盖。"""
     import inspiration_assets
 
+    monkeypatch.delenv("SA_HOTSPOT_MULTIWINDOW", raising=False)
+    monkeypatch.delenv("SA_HOTSPOT_SINGLE_WINDOW_SEC", raising=False)
+    windows = inspiration_assets.compute_analysis_sample_windows(600)
+    assert windows == [(0.0, 120.0)]
+    options = inspiration_assets.build_ytdlp_options("youtube", duration_seconds=600, hi_res=False)
+    assert options["_sample_offsets"] == [(0.0, 120.0)]
+
+
+def test_long_video_sample_windows_cover_tail_when_multiwindow_enabled(monkeypatch):
+    import inspiration_assets
+
+    monkeypatch.setenv("SA_HOTSPOT_MULTIWINDOW", "1")
     monkeypatch.delenv("SA_HOTSPOT_SAMPLE_WINDOW_SEC", raising=False)
     monkeypatch.delenv("SA_HOTSPOT_SAMPLE_MAX_TOTAL_SEC", raising=False)
     windows = inspiration_assets.compute_analysis_sample_windows(600)
@@ -131,3 +144,5 @@ def test_hook_timestamp_remaps_to_original_time():
     assert inspiration_assets.original_ms_to_analysis_ms(165_000, windows) == 90_000
     # Gap between windows cannot map back.
     assert inspiration_assets.original_ms_to_analysis_ms(100_000, windows) is None
+    # Single continuous window is an identity map for in-range timestamps.
+    assert inspiration_assets.analysis_ms_to_original_ms(45_000, [(0.0, 120.0)]) == 45_000
