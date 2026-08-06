@@ -223,6 +223,7 @@ app.include_router(video_generation_routes.create_router(lambda: STATIC_DIR))
 scan_login_sessions: dict[str, dict] = {}
 # 手动发布会话：有头浏览器自动填好内容停在发布页，等用户人工点「发布」。
 manual_publish_sessions: dict[str, dict] = {}
+video_render_semaphore = asyncio.Semaphore(max(1, int(os.environ.get("VIDEO_HEAVY_CONCURRENCY", "1"))))
 asset_processing_semaphore = asyncio.Semaphore(max(1, int(os.environ.get("MEDIA_ANALYSIS_CONCURRENCY", "1"))))
 local_asset_import_tasks: set[asyncio.Task] = set()
 
@@ -4042,6 +4043,106 @@ async def media_tts_preview(body: TtsPreviewRequest, user=Depends(get_current_us
 async def sqlite_health(user=Depends(require_role(UserRole.ADMIN))):
     import sqlite_write_queue
     return sqlite_write_queue.get_sqlite_health()
+
+
+async def _run_video_job(job_id: str):
+    async with video_render_semaphore:
+        job = await asyncio.to_thread(db.get_render_job, job_id)
+        script = (job or {}).get("script") or {}
+        provider = str(script.get("tts_provider") or os.environ.get("TTS_PROVIDER", "mimo") or "mimo")
+        await asyncio.to_thread(
+            video_renderer.render_job, job_id, STATIC_DIR,
+            None, (1080, 1920), None, provider,
+        )
+
+
+@app.post("/api/douyin/render")
+async def create_douyin_render(body: dict, user=Depends(get_current_user)):
+    caps = media_assets.capabilities()
+    if not caps["ffmpeg"] or not caps["ffprobe"]:
+        raise HTTPException(503, "未安装 FFmpeg/ffprobe")
+    if str(body.get("source") or "") == "safe_fallback":
+        raise HTTPException(409, "AI 服务降级提示不能生成视频，请等待正式文案生成成功后重试")
+    target_duration_ms = int(
+        body.get("duration_target_ms")
+        or round(float(body.get("duration_target") or 60) * 1000)
+    )
+    if not 50_000 <= target_duration_ms <= 90_000:
+        raise HTTPException(400, "生产视频必须在 50–90 秒之间")
+    scene_count = len([
+        scene for scene in (body.get("scenes") or []) if isinstance(scene, dict)
+    ])
+    if not video_renderer.FORMAL_MIN_SCENES <= scene_count <= video_renderer.FORMAL_MAX_SCENES:
+        raise HTTPException(
+            400,
+            f"正式生产需要 {video_renderer.FORMAL_MIN_SCENES}–"
+            f"{video_renderer.FORMAL_MAX_SCENES} 个完整分镜",
+        )
+    voiceover_chars = sum(
+        len(str(scene.get("voiceover") or "").strip())
+        for scene in (body.get("scenes") or []) if isinstance(scene, dict)
+    )
+    minimum_voiceover_chars = max(140, round(target_duration_ms / 1000 * 2.8))
+    if voiceover_chars < minimum_voiceover_chars:
+        raise HTTPException(
+            409,
+            f"旁白仅 {voiceover_chars} 字，无法支撑 {target_duration_ms // 1000} 秒正式成片；请先生成完整脚本",
+        )
+    try:
+        tts_provider, voice = video_renderer.resolve_tts_selection(
+            body.get("tts_provider"), body.get("voice"), strict=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if tts_provider == "qwen" and not os.environ.get("DASHSCOPE_API_KEY"):
+        raise HTTPException(503, "未配置百炼 API Key，无法使用 Qwen TTS")
+    if tts_provider == "mimo" and not os.environ.get("MIMO_API_KEY"):
+        if not (os.environ.get("TTS_FALLBACK_ENABLED", "1") != "0" and os.environ.get("DASHSCOPE_API_KEY")):
+            raise HTTPException(503, "未配置 MiMo API Key")
+    asset_ids = {asset["id"] for asset in db.list_assets(status="active")}
+    try:
+        script = video_renderer.normalize_script(
+            {**body, "duration_target_ms": target_duration_ms, "tts_provider": tts_provider, "voice": voice},
+            asset_ids,
+            target_duration_ms=target_duration_ms,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    job_id = _uuid4().hex
+    db.create_render_job(job_id, script, voice, user["id"])
+    asyncio.create_task(_run_video_job(job_id))
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/douyin/render/{job_id}")
+async def get_douyin_render(job_id: str, user=Depends(get_current_user)):
+    job = db.get_render_job(job_id)
+    if not job:
+        raise HTTPException(404, "渲染任务不存在")
+    if user["role"] != UserRole.ADMIN.value and job.get("created_by") != user["id"]:
+        raise HTTPException(404, "渲染任务不存在")
+    if job.get("output_path"):
+        job["rendered_video"] = {
+            "type": "video", "path": job["output_path"],
+            "url": "/static/" + job["output_path"], "filename": Path(job["output_path"]).name,
+            "quality_report": job.get("quality_report") or {},
+            "quality_status": (job.get("quality_report") or {}).get("status"),
+        }
+    return job
+
+
+@app.post("/api/douyin/render/{job_id}/retry")
+async def retry_douyin_render(job_id: str, user=Depends(get_current_user)):
+    job = db.get_render_job(job_id)
+    if not job:
+        raise HTTPException(404, "渲染任务不存在")
+    if user["role"] != UserRole.ADMIN.value and job.get("created_by") != user["id"]:
+        raise HTTPException(404, "渲染任务不存在")
+    if job["status"] == "running":
+        raise HTTPException(409, "任务正在运行")
+    db.update_render_job(job_id, status="pending", stage="等待重试", progress=0, error=None, output_path=None)
+    asyncio.create_task(_run_video_job(job_id))
+    return {"job_id": job_id, "status": "pending"}
 
 
 # ==================== API: Prompt Templates ====================
