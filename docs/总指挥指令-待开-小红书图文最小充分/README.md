@@ -102,7 +102,12 @@
 
 ## 整体修复单 · 批次 2 两发现（最小收尾）
 
-**状态：✅ 已执行（2026-08-06）。** 执行指令见 [整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md](整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md)。
+**状态：✅ 已验收（2026-08-06）。** 执行指令见 [整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md](整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md)。
+
+**验收备注（2026-08-06）：** R2/R1 逐条翻码核对 + harness 13/13 断言通过；铁律全绿（零 schema、guard 语义不变、不碰 ratelimit/台账/asset_taxonomy）。一处文档备注见下。
+
+1. **改进日志重复条目（非阻塞）**：`docs/改进日志/2026-08.md` 中「整体修复：scheduler 接守卫 + guard UTC 口径」段落被粘贴两次（第一处写「全量 pytest 见下文回写 / app 待重启」，第二处为最终值「874 passed / 8 failed / app 已重启」）。内容一致、仅冗余，可留待日志整理时去重。
+2. **scheduler 拦截幂等重臂**：被拦条目保持 queued 且不动 `scheduled_at`，每次调度 tick 重新过守卫、重新拦截（harness 三轮运行均命中），不烧重试、不误发——符合「只拦不排程」语义。
 
 **已落地：**
 1. **R2** guard `_today_local` → SQL `date('now')`（UTC，与 publish_log 同时钟）
@@ -130,6 +135,7 @@
 
 | 时间 | 说明 |
 |---|---|
+| 2026-08-06 | 整体修复单验收通过：R2/R1 逐条翻码 + harness 13/13 + 铁律全绿；备注改进日志重复条目（非阻塞）、scheduler 拦截幂等重臂；小红书链路守卫覆盖与日期口径闭环 |
 | 2026-08-06 | 整体修复单已执行：R2 `d864c6b`（UTC date('now')）→ R1 `c7296cd`（scheduler 接守卫）；定向 21 passed |
 | 2026-08-06 | 整体修复单已开（批次 2 两发现最小收尾）：R1 `check_scheduled_publish` 接 diff 守卫（只拦不排程、语义对齐 app.py）+ R2 guard `_today_local()` 统一 UTC `date('now')`；零 schema、两处独立提交/回滚；待执行（批次 0-3 已全部验收） |
 | 2026-08-06 | 对抗优化设计落地时立索引；代码未执行 |
