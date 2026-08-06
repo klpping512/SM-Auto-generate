@@ -433,6 +433,20 @@ def init_db():
                 FOREIGN KEY (created_by) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS hook_curation_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_id INTEGER NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                prompt_version TEXT NOT NULL,
+                model TEXT,
+                cache_hit INTEGER DEFAULT 0,
+                error TEXT,
+                raw_content TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_hook_curation_diag_asset
+                ON hook_curation_diagnostics (asset_id, created_at);
+
             CREATE TABLE IF NOT EXISTS brand_evidence (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 claim TEXT NOT NULL,
@@ -2072,6 +2086,56 @@ def finish_hotspot_fetch_run(run_id: str, status: str, result: dict) -> dict | N
             "SELECT * FROM hotspot_fetch_runs WHERE id=?", (run_id,)
         ).fetchone()
     return _decode_hotspot_fetch_run(row)
+
+
+def add_hook_curation_diagnostic(
+    asset_id,
+    attempt_number,
+    prompt_version,
+    *,
+    model=None,
+    cache_hit=False,
+    error=None,
+    raw_content=None,
+):
+    """记录一次策展 JSON 失败现场。绝不抛出：写库失败只记日志，不反噬策展。"""
+    try:
+        raw = (raw_content or "")[:16_000]
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO hook_curation_diagnostics "
+                "(asset_id, attempt_number, prompt_version, model, cache_hit, error, raw_content, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(asset_id),
+                    int(attempt_number),
+                    str(prompt_version),
+                    (model or "")[:64],
+                    1 if cache_hit else 0,
+                    (error or "")[:200],
+                    raw,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+    except Exception:
+        logger.warning("记录 Hook 策展诊断失败 asset=%s", asset_id, exc_info=True)
+
+
+def list_hook_curation_diagnostics(limit=200, asset_id=None):
+    """按时间倒序取诊断行，供定性脚本使用。"""
+    with get_conn() as conn:
+        if asset_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM hook_curation_diagnostics WHERE asset_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (int(asset_id), int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM hook_curation_diagnostics ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def recover_interrupted_hotspot_fetch_runs() -> int:

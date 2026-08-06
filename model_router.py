@@ -290,6 +290,7 @@ async def call_text(
     prompt_version: str,
     max_output_tokens: int | None = None,
     json_mode: bool = False,
+    use_cache: bool = True,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     route = get_route(role)
@@ -300,7 +301,7 @@ async def call_text(
         raise RuntimeError(f"缺少模型密钥环境变量：{route['api_key_env']}")
     cache_key = make_cache_key(role, {"messages": messages, "json_mode": bool(json_mode)}, prompt_version)
     create_budget(job_id)
-    cached = db.get_model_cache(cache_key)
+    cached = db.get_model_cache(cache_key) if use_cache else None
     if cached:
         hit = record_call(
             job_id,

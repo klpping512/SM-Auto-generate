@@ -15,6 +15,7 @@ from typing import Any, Iterable
 import model_router
 import hotspot_hook_selection_sop
 import hotspot_lexicon
+from database import add_hook_curation_diagnostic
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
@@ -360,24 +361,49 @@ def curate_hook_clips(
     job_id = model_router.route_scoped_job_id(
         _curation_job_id(int(asset_id), source_title, source_context, ordered), "planner_text"
     )
-    # reset=True: deterministic job_id across mother re-runs must not inherit
-    # exhausted sticky budget from the previous attempt.
+    # max_calls=2 = 1 次初始策展 + 1 次 JSON 解析失败重试（同一策展尝试内）。
+    # reset=True 保持"每次重跑=1 次完整尝试"语义；不得再往上放。
     model_router.create_budget(
-        job_id, max_calls=1, max_input_tokens=14_000,
+        job_id, max_calls=2, max_input_tokens=14_000,
         max_output_tokens=model_router.required_output_budget("planner_text", 1_000),
         reset=True,
     )
-    result = asyncio.run(model_router.call_text(
-        job_id,
-        "planner_text",
-        [
-            {"role": "system", "content": "严格返回 JSON，不要 Markdown，不得补充镜头外事实。"},
-            {"role": "user", "content": _prompt(source_title, source_context, ordered)},
-        ],
-        prompt_version=PROMPT_VERSION,
-        max_output_tokens=1_000,
-    ))
-    hooks = _parse(result["content"], ordered)
+    messages = [
+        {"role": "system", "content": "严格返回 JSON，不要 Markdown，不得补充镜头外事实。"},
+        {"role": "user", "content": _prompt(source_title, source_context, ordered)},
+    ]
+    route_model = (model_router.get_route("planner_text") or {}).get("model") or ""
+
+    def _call(**overrides):
+        return asyncio.run(model_router.call_text(
+            job_id, "planner_text", messages,
+            prompt_version=PROMPT_VERSION,
+            max_output_tokens=1_000,
+            **overrides,
+        ))
+
+    def _try_parse(result: dict, attempt: int) -> list[dict]:
+        # 现场落库放在异常抛出路径，原始返回不丢
+        try:
+            return _parse(result.get("content") or "", ordered)
+        except ValueError as exc:
+            add_hook_curation_diagnostic(
+                int(asset_id), attempt, PROMPT_VERSION,
+                model=route_model,
+                cache_hit=bool(result.get("cache_hit")),
+                error=str(exc),
+                raw_content=result.get("content") or "",
+            )
+            raise
+
+    result = _call()
+    try:
+        hooks = _try_parse(result, 1)
+    except ValueError:
+        # 一次性重试：必须绕过缓存，避免第一次坏返回原样复现。
+        # 命中缓存时 budget 已记 1 次调用，max_calls=2 恰好容纳这次真调。
+        result = _call(use_cache=False)
+        hooks = _try_parse(result, 2)
     if not hooks:
         return [], {
             "status": "no_qualified_hooks",
