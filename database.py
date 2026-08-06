@@ -125,6 +125,26 @@ def init_db():
                 FOREIGN KEY (reviewer_id) REFERENCES users(id)
             );
 
+            -- 公众号图文长文（阶段0）：结构化正文 + 资料包证据，独立于 queue（queue 语义是"一条待发消息"）
+            CREATE TABLE IF NOT EXISTS articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                topic_brief TEXT NOT NULL DEFAULT '',
+                materials_json TEXT NOT NULL DEFAULT '[]',
+                reference_style TEXT NOT NULL DEFAULT '',
+                generated_content_json TEXT NOT NULL DEFAULT '{}',
+                evidence_footnotes_json TEXT NOT NULL DEFAULT '[]',
+                unresolved_claims_json TEXT NOT NULL DEFAULT '[]',
+                image_selections_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'draft',
+                output_dir TEXT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS publish_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 queue_id INTEGER,
@@ -955,6 +975,7 @@ def init_db():
         _ensure_column(conn, "sample_bundles", "preview_path", "TEXT")
         _seed_defaults(conn)
     record_schema_migration("2026-08-03-delivery-loop", "hook_kind/logistics_scenes + schema_migrations baseline")
+    record_schema_migration("2026-08-06-articles-table", "新增 articles 表：公众号图文长文生产")
     logger.info("数据库初始化完成: %s", DB_PATH)
 
 
@@ -1176,6 +1197,68 @@ def delete_queue_item(item_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM publish_log WHERE queue_id=?", (item_id,))
         conn.execute("DELETE FROM queue WHERE id=?", (item_id,))
+
+
+# ==================== Articles（公众号图文长文，阶段 0） ====================
+
+def get_article(article_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM articles WHERE id=?", (article_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_article_by_slug(slug: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM articles WHERE slug=?", (slug,)).fetchone()
+        return dict(row) if row else None
+
+
+def create_article(slug: str, title: str, topic_brief: str = "", materials_json: str = "[]",
+                   reference_style: str = "", created_by: int | None = None) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO articles (slug, title, topic_brief, materials_json, reference_style, status, created_by) "
+            "VALUES (?,?,?,?,?, 'draft', ?)",
+            (slug, title, topic_brief, materials_json, reference_style, created_by),
+        )
+        return cur.lastrowid
+
+
+def update_article(article_id: int, *, generated_content_json=None, evidence_footnotes_json=None,
+                   unresolved_claims_json=None, image_selections_json=None,
+                   output_dir=None, status=None) -> None:
+    """通用更新：只更新显式传入的字段，其余保持不动。"""
+    fields, params = [], []
+    for column, value in (
+        ("generated_content_json", generated_content_json),
+        ("evidence_footnotes_json", evidence_footnotes_json),
+        ("unresolved_claims_json", unresolved_claims_json),
+        ("image_selections_json", image_selections_json),
+        ("output_dir", output_dir),
+        ("status", status),
+    ):
+        if value is not None:
+            fields.append(f"{column}=?")
+            params.append(value)
+    if not fields:
+        return
+    params.append(article_id)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE articles SET {', '.join(fields)}, updated_at=datetime('now') WHERE id=?",
+            params,
+        )
+
+
+def list_articles(status: str = None) -> list[dict]:
+    with get_conn() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM articles WHERE status=? ORDER BY updated_at DESC", (status,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM articles ORDER BY updated_at DESC").fetchall()
+        return [dict(row) for row in rows]
 
 
 def get_queue_stats(created_by: int = None):
