@@ -4,8 +4,8 @@
 热点事实记录。示例：python3 scripts/reprocess_hotspot_hook_source.py --media-id 97
 
 当 Hook 策展 SOP 新增事实字段时，可使用 ``--all-legacy-ready`` 对所有已分析、
-但仍缺少该字段的历史母片进行受控重策展。候选筛选只看可审计的数据库状态；
-是否产生 Hook 仍完全由项目内置模型和事实审核模型决定。
+但仍缺少该字段的历史母片进行受控重策展；是否产生 Hook 仍完全由项目内置模型
+和事实审核模型决定。
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ import asset_processing
 import database as db
 import hotspot_event_media
 import hotspot_hook_curator
-import hotspot_hook_intake
 
 
 def _normalized_intake_decision(raw: object) -> dict:
@@ -77,7 +76,7 @@ def _needs_requeue_uncurated(media: dict) -> bool:
     return _needs_zero_hook_ready(media)
 
 
-def _reprocess_media(media_id: int, *, skip_analysis: bool, refresh_intake_decision: bool) -> dict:
+def _reprocess_media(media_id: int, *, skip_analysis: bool) -> dict:
     """Run one fully model-governed re-curation and return its audit summary."""
     media = db.get_hotspot_media(media_id)
     if not media or not media.get("asset_id"):
@@ -86,18 +85,6 @@ def _reprocess_media(media_id: int, *, skip_analysis: bool, refresh_intake_decis
     if not asset or asset.get("file_type") != "video":
         raise ValueError("该热点母片不是可重新分析的视频")
     hotspot = db.get_hotspot(int(media["hotspot_id"])) or {}
-
-    if refresh_intake_decision:
-        selected, intake = hotspot_hook_intake.select_for_hook_ingestion(
-            [media], {int(media["hotspot_id"]): hotspot}, maximum=1,
-        )
-        if not selected:
-            raise ValueError(f"内置 Qwen 未再次选择该母片：{json.dumps(intake, ensure_ascii=False)}")
-        db.update_hotspot_media_state(
-            int(media["id"]),
-            intake_decision_json=json.dumps(selected[0].get("intake_decision") or {}, ensure_ascii=False),
-        )
-        media = db.get_hotspot_media(int(media["id"])) or media
 
     db.update_hotspot_media_state(
         int(media["id"]), download_status="downloaded", processing_status="processing",
@@ -172,7 +159,6 @@ def main() -> int:
         help="重策展 JSON 解析失败或上次未筛出可复用 Hook 的母片",
     )
     parser.add_argument("--skip-analysis", action="store_true", help="复用已完成的镜头分析，仅重新进行 Hook 策展")
-    parser.add_argument("--refresh-intake-decision", action="store_true", help="让内置 Qwen 重新确认本母片的获准事件范围")
     parser.add_argument("--max-media", type=int, default=0, help="批量模式最多处理多少条；0 表示全部")
     parser.add_argument("--dry-run", action="store_true", help="仅输出本轮将重策展的母片，不调用模型也不写库")
     args = parser.parse_args()
@@ -213,7 +199,6 @@ def main() -> int:
         try:
             completed.append(_reprocess_media(
                 media_id, skip_analysis=args.skip_analysis,
-                refresh_intake_decision=args.refresh_intake_decision,
             ))
         except Exception as exc:
             failed.append({"media_id": media_id, "error": str(exc)[:500]})

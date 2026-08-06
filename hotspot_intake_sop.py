@@ -1,9 +1,9 @@
-"""Versioned Buffalo RAG SOP for deciding whether a hotspot video merits download.
+"""Buffalo RAG 证据检索：热点 → 已确认 Buffalo 服务事实的引文检索。
 
-This module owns business boundaries and retrieval, while ``hotspot_hook_intake``
-only routes the resulting bounded context to the configured internal model.  That
-separation makes model changes a route/configuration concern rather than a rewrite
-of the hotspot admission policy.
+批 6（体检报告 §8 拍板）：模型 RAG 下载决策链（hotspot_hook_intake 的
+select_for_hook_ingestion）已删除；本模块仅保留证据检索能力，供
+``run_dual_library_preview.py`` / ``audit_existing_dual_preview.py`` 等
+双素材库预览/审计工具使用。
 """
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ import database as db
 import hotspot_lexicon
 
 
-SOP_ID = "buffalo-hotspot-hook-intake"
-SOP_VERSION = "v2"
 MAX_EVIDENCE_PER_CANDIDATE = 3
 MAX_EVIDENCE_CHARS = 360
 
@@ -22,27 +20,6 @@ _PREFERRED_CATEGORIES = {"产品资料", "公司介绍", "成功案例", "品牌
 # Back-compat aliases for any external imports of the previous private constants.
 _STOPWORDS = set(hotspot_lexicon.STOPWORDS)
 _RETRIEVAL_ALIASES = hotspot_lexicon.RETRIEVAL_ALIAS_GROUPS
-
-
-def policy_contract() -> dict:
-    """The stable contract shared by every model provider used for intake."""
-    return {
-        "sop_id": SOP_ID,
-        "sop_version": SOP_VERSION,
-        "goal": "只下载能以已验证 Buffalo 服务资料自然承接、且可能含现场 Hook 的热点母片。",
-        "admission_rules": [
-            "每个接受候选必须引用至少一条提供的 RAG 证据 ID，并声明 direct 或 contextual 承接模式。",
-            "direct：候选本身明确呈现与 RAG 服务边界直接对应的仓储、包裹、装卸、配送等现场动作。",
-            "contextual：候选明确讲述物流运行、运输、货运、跨境、港口、道路、仓配或电商履约中的外部变化；RAG 仅承接 Buffalo 已证实的一个服务动作，热点只能提出问题，绝不证明 Buffalo 解决了该事件。",
-            "热点只可用于说明外部事实或提出物流问题；不得由热点推断 Buffalo 的服务结果。",
-            "没有直接服务关联或具体物流运行关联、只有泛泛联想、只有主播/评论画面时必须拒绝。",
-            "市政环卫、垃圾/污水、治安、政治、娱乐或其他公共事务，除非 RAG 明确覆盖该服务领域，否则两种模式均必须拒绝。",
-        ],
-        "required_output": [
-            "media_id", "admission_mode", "rag_evidence_ids", "service_fit", "expected_hook", "why",
-            "logistics_question", "confidence",
-        ],
-    }
 
 
 def _terms(text: str) -> set[str]:
@@ -111,27 +88,3 @@ def retrieve_service_evidence(hotspot: dict, corpus: Iterable[dict] | None = Non
             "retrieval_score": score,
         })
     return result
-
-
-def enrich_candidates(candidates: Iterable[dict]) -> tuple[list[dict], dict]:
-    """Attach dynamic RAG evidence and fail closed when the knowledge base is empty."""
-    corpus = _knowledge_evidence()
-    enriched: list[dict] = []
-    without_evidence: list[int] = []
-    for raw in candidates:
-        item = dict(raw)
-        evidence = retrieve_service_evidence(item, corpus)
-        item["rag_evidence"] = evidence
-        item["sop_id"] = SOP_ID
-        item["sop_version"] = SOP_VERSION
-        if evidence:
-            enriched.append(item)
-        else:
-            without_evidence.append(int(item["media_id"]))
-    return enriched, {
-        "sop_id": SOP_ID,
-        "sop_version": SOP_VERSION,
-        "knowledge_sources": len(corpus),
-        "eligible_candidates": len(enriched),
-        "rejected_without_rag_evidence": without_evidence,
-    }
