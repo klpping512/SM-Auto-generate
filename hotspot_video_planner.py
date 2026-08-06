@@ -273,6 +273,8 @@ def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
     for item in segments:
         if not _is_owned_video_segment(item):
             continue
+        if item.get("asset_deprecated"):
+            continue
         if not _is_buffalo_usable_source(item):
             continue
         functional_categories = _functional_categories(item)

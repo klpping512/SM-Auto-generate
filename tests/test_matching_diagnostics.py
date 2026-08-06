@@ -218,3 +218,25 @@ def test_diagnostics_endpoint_admin_ok_editor_denied(tmp_db):
     assert body["starving_side"] in {"hotspot", "owned", "none"}
     assert "hotspot_pool" in body
     assert "owned_pool" in body
+
+
+def test_deprecated_assets_are_excluded_from_owned_candidates():
+    # 已砍旧频道的降权素材（deprecated=1）不得进匹配池，但文件保留可回滚
+    brief = _customs_brief()
+    segments = [
+        _seg(1, 1, "customs", description="清关正常素材"),
+        {**_seg(2, 2, "customs", description="SABC 旧频道垃圾素材"), "asset_deprecated": 1},
+    ]
+    candidates = hotspot_video_planner._owned_candidates(segments, brief)
+    assert [item["id"] for item in candidates] == [1]
+
+
+def test_non_deprecated_assets_stay_in_owned_candidates():
+    # deprecated=0 与未标注（现役频道）不受影响
+    brief = _customs_brief()
+    segments = [
+        {**_seg(1, 1, "customs", description="eNCA 现役素材"), "asset_deprecated": 0},
+        _seg(2, 2, "customs", description="未标注降权列的素材"),
+    ]
+    candidates = hotspot_video_planner._owned_candidates(segments, brief)
+    assert [item["id"] for item in candidates] == [1, 2]
