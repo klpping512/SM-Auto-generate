@@ -5,7 +5,6 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import datetime
 
 # 运营可调硬规则（改常量即可，不碰逻辑）
 XHS_ACCOUNT_DAILY_MAX = 2
@@ -23,10 +22,6 @@ def content_fingerprint(title: str, body: str) -> str:
         if not unicodedata.category(ch).startswith("So")
     )
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _today_local() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _attachments_of(item: dict) -> list[dict]:
@@ -56,8 +51,7 @@ def _asset_ids_of(item: dict) -> list[int]:
 
 
 def _list_today_published_xhs(db) -> list[dict]:
-    """今日已成功发布的小红书条目（JOIN queue 拿账号与附件）。"""
-    today = _today_local()
+    """今日（UTC，date('now')）已成功发布的小红书条目。"""
     with db.get_conn() as conn:
         rows = conn.execute(
             """
@@ -67,18 +61,16 @@ def _list_today_published_xhs(db) -> list[dict]:
             JOIN queue q ON q.id = pl.queue_id
             WHERE pl.platform = 'xiaohongshu'
               AND pl.status = 'published'
-              AND date(pl.published_at) = date(?)
-            """,
-            (today,),
+              AND date(pl.published_at) = date('now')
+            """
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 def account_daily_count(db, account_id: int) -> int:
-    """今日该账号已成功发布的小红书条数。"""
+    """今日该账号已成功发布的小红书条数（UTC date('now')）。"""
     if account_id is None:
         return 0
-    today = _today_local()
     with db.get_conn() as conn:
         row = conn.execute(
             """
@@ -88,9 +80,9 @@ def account_daily_count(db, account_id: int) -> int:
             WHERE pl.platform = 'xiaohongshu'
               AND pl.status = 'published'
               AND q.target_account_id = ?
-              AND date(pl.published_at) = date(?)
+              AND date(pl.published_at) = date('now')
             """,
-            (int(account_id), today),
+            (int(account_id),),
         ).fetchone()
     return int(row["cnt"] if row else 0)
 

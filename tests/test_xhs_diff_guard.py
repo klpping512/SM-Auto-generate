@@ -123,3 +123,21 @@ def test_seo_lexicon_seeded(tmp_db):
     hits = tmp_db.match_xhs_seo_lexicon("关于清关的选题", limit=3)
     assert hits
     assert hits[0]["kind"] in {"main", "longtail", "scene"}
+
+
+def test_utc_yesterday_not_counted_in_daily(tmp_db):
+    """R2：昨天 UTC 的 published 不计今日；今日正常计入。"""
+    q_old = tmp_db.add_to_queue(
+        title="昨文", body="b", platform="xiaohongshu",
+        status="published", target_account_id=701, attachments=[],
+    )
+    with tmp_db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO publish_log (queue_id, platform, title, status, published_at) "
+            "VALUES (?,?,?,?, datetime('now','-1 day'))",
+            (q_old, "xiaohongshu", "昨文", "published"),
+        )
+    assert guard.account_daily_count(tmp_db, 701) == 0
+
+    _publish_xhs(tmp_db, account_id=701, title="今文", body="b2", attachments=[])
+    assert guard.account_daily_count(tmp_db, 701) == 1
