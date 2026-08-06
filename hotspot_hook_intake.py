@@ -243,6 +243,7 @@ def select_for_hook_ingestion(
     model_router.create_budget(
         job_id, max_calls=2, max_input_tokens=16_000,
         max_output_tokens=model_router.required_output_budget("planner_text", 1_000),
+        reset=True,   # 同候选集重跑视为新一次决策尝试，重置 budget，避免确定性 job_id 粘死
         # max_calls=2 = 1 次初始选片 + 1 次 JSON 解析失败重试（同一决策尝试内）。
     )
     selections, sel_retried, result = _call_with_json_retry(
@@ -269,6 +270,7 @@ def select_for_hook_ingestion(
     model_router.create_budget(
         audit_job_id, max_calls=2, max_input_tokens=10_000,
         max_output_tokens=model_router.required_output_budget("critic", 500),
+        reset=True,   # 同上：重跑审计视为新尝试
         # max_calls=2 = 1 次初始审计 + 1 次 JSON 解析失败重试。
     )
     approved, audit_retried, audit_result = _call_with_json_retry(

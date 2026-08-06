@@ -402,10 +402,6 @@ def _formal_dual_library_duration_issue(report: dict, script: dict) -> str | Non
     return f"成片时长 {duration:.1f} 秒，不符合 50–90 秒交付标准"
 
 
-def allow_manual_preview_fallback(report: dict, decision: QualityDecision) -> bool:
-    """Compatibility hook: an unavailable semantic review cannot complete a job."""
-    return False
-
 
 def quality_budget_job_id(job_id: str) -> str:
     """Keep a video's visual-review budget separate from its script-planning budget."""
@@ -1210,7 +1206,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 "publish_allowed": False,
                 "technical_preview_passed": True,
                 "semantic_preview_passed": semantic_decision.status is JobStatus.RUNNING,
-                "review_mode": "manual_preview" if manual_fallback else "internal_preview",
+                "review_mode": "internal_preview",
             })
             full_report["publication"] = publication
             await asyncio.to_thread(

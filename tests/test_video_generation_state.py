@@ -165,7 +165,6 @@ def test_semantic_video_quality_accepts_low_risk_editorial_notes_after_hard_gate
 def test_semantic_video_quality_unavailable_never_fakes_a_pass():
     from video_generation import (
         JobStatus,
-        allow_manual_preview_fallback,
         route_video_evaluation_quality,
     )
 
@@ -179,7 +178,6 @@ def test_semantic_video_quality_unavailable_never_fakes_a_pass():
 
     assert decision.status is JobStatus.NEEDS_REVIEW
     assert decision.issues == ["Qwen 视频质检不可用，请人工检查预览"]
-    assert allow_manual_preview_fallback(report, decision) is False
 
 
 def test_formal_content_gate_rejects_repeated_actions_and_generic_checks():
@@ -193,19 +191,6 @@ def test_formal_content_gate_rejects_repeated_actions_and_generic_checks():
     assert "旁白存在重复模板句，不能生成同质化成片" in issues
     assert "“请核对”类泛化提醒重复出现，缺少具体物流建议" in issues
     assert "自有镜头存在重复可见动作，不能用相似叉车/拖车镜头凑时长" in issues
-
-
-def test_completed_semantic_failure_cannot_use_manual_preview_fallback():
-    from video_generation import allow_manual_preview_fallback, route_video_evaluation_quality
-
-    report = {
-        "evaluation_status": "completed",
-        "overall_score": 62,
-        "passed": False,
-        "issues": [{"severity": "high", "description": "字幕遮挡主体"}],
-    }
-
-    assert allow_manual_preview_fallback(report, route_video_evaluation_quality(report)) is False
 
 
 def test_render_progress_is_mapped_to_the_parent_pipeline():

@@ -75,6 +75,14 @@ async def publish_via_huimei(
     if not huimei_platform:
         return {"success": False, "error": f"Platform '{platform}' not supported by huimei", "platform": platform}
 
+    if not shutil.which(HUIMEI_BIN):
+        return {
+            "success": False,
+            "platform": platform,
+            "error": "huimei CLI 未安装（仅影响微信系/bilibili/微博/快手/头条/知乎/百家号/tiktok；"
+                     "抖音/小红书/facebook/twitter/reddit 走 RPA/API 适配器不受影响）",
+        }
+
     cmd = [HUIMEI_BIN, "publish", "-p", huimei_platform, "-t", title, "-c", content]
     if tags:
         cmd.extend(["--tags", ",".join(tags)])
