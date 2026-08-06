@@ -9,9 +9,13 @@
 |---|------|------|------|
 | 1 | 策展 JSON 失败：原始返回 dump + 一次性重试 | **已执行** | 落库诊断 + max_calls=2 一次性重试（use_cache=False）；保留频道 10 条 requeue 后全出合法 JSON（0 hook）；诊断表暂无现场（未触发解析失败）。文件：`策展JSON失败-原始返回dump+一次性重试-Cursor执行指令.md` |
 
-## 待办（诊断产出，后续拍板）
+## 拍板（2026-08-06）
 
-- ~~重启 app 后 requeue 保留频道 10 条 JSON 失败母片（eNCA 7 + BDTV 2 + CNBC 1，含 909/913/914）~~：已按 media-id 白名单 requeue（未跑全量 `--requeue-uncurated`，避免误触 SABC）；10/10 → `ready` + `no_qualified_hooks`。
-- dump 分类计数（最近 30）：**空表**（total=0）。本轮重跑首调即合法 JSON，未写入诊断行；截断 vs 空返回需等后续偶发失败再定性。SABC 70 + 已下架频道残余不在本轮。
+- **不调 `max_output_tokens=1000`，先观察。** 依据：诊断表空表无截断样本；调大会同步放大 `required_output_budget` 成本；新机制已能接住下次失败。触发：偶发失败 → dump 分类；截断为主再开下一条指令。
+- commits `94fe241` + `9391552`：已推送（push 不动运行态；新码已在 PID 39848）。
+
+## 待办（残余 / 另立）
+
 - 914 下载 300s 超时（BDTV 演播室片，低价值）暂挂。
 - 入库选片路径（hotspot_hook_intake `_parse_selections`/`_parse_audit`）JSON 加固另立项目。
+- 可选：每周 dump 巡检（total>0 时报分类）——未默认开启。
