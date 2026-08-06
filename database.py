@@ -867,6 +867,16 @@ def init_db():
 
             CREATE VIRTUAL TABLE IF NOT EXISTS inspiration_fts
             USING fts5(inspiration_id UNINDEXED, content, tokenize='trigram');
+
+            -- 小红书 SEO 词库（独立于 hotspot_lexicon；禁止复用热点事件词表）
+            CREATE TABLE IF NOT EXISTS xhs_seo_lexicon (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL DEFAULT 'longtail',
+                topic_hint TEXT DEFAULT '',
+                status TEXT DEFAULT 'active',
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         # 迁移旧的全局幂等索引：相同客户端键只能约束同一用户，不能跨租户串任务。
         conn.execute("DROP INDEX IF EXISTS uq_video_generation_active_key")
@@ -890,6 +900,7 @@ def init_db():
         _ensure_column(conn, "queue", "source_refs", "TEXT DEFAULT '[]'")
         _ensure_column(conn, "queue", "verification_status", "TEXT DEFAULT 'not_checked'")
         _ensure_column(conn, "queue", "target_account_id", "INTEGER")
+        _ensure_column(conn, "queue", "seo_meta", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "assets", "source_url", "TEXT")
         _ensure_column(conn, "assets", "license", "TEXT")
         _ensure_column(conn, "assets", "attribution", "TEXT")
@@ -1003,6 +1014,76 @@ def _seed_defaults(conn):
         ]
         conn.executemany("INSERT INTO prompt_templates (name, category, content) VALUES (?,?,?)", default_tpls)
         logger.info("已写入 %d 个默认 Prompt 模板", len(default_tpls))
+
+    _seed_xhs_seo_lexicon(conn)
+
+
+def _seed_xhs_seo_lexicon(conn):
+    """种子 SEO 词库（机制先行；运营四层矩阵到位后校准，禁止复用 hotspot_lexicon）。"""
+    seeds = [
+        ("南非清关", "main", "清关"),
+        ("南非海外仓", "main", "海外仓"),
+        ("南非快递时效", "main", "快递"),
+        ("德班港", "main", "德班"),
+        ("清关费用", "longtail", "清关"),
+        ("南非清关要多久", "longtail", "清关"),
+        ("南非报关流程", "longtail", "报关"),
+        ("海外仓一件代发", "longtail", "海外仓"),
+        ("跨境物流时效", "longtail", "时效"),
+        ("南非尾程配送", "longtail", "配送"),
+        ("开普敦港", "longtail", "开普敦"),
+        ("跨境仓储怎么做", "longtail", "仓储"),
+        ("南非进口关税", "longtail", "关税"),
+        ("物流节点提醒", "scene", "节点"),
+        ("卖家履约攻略", "scene", "履约"),
+    ]
+    before = conn.execute("SELECT COUNT(*) FROM xhs_seo_lexicon").fetchone()[0]
+    conn.executemany(
+        "INSERT OR IGNORE INTO xhs_seo_lexicon (keyword, kind, topic_hint) VALUES (?,?,?)",
+        seeds,
+    )
+    after = conn.execute("SELECT COUNT(*) FROM xhs_seo_lexicon").fetchone()[0]
+    if after > before:
+        logger.info("已写入/补齐小红书 SEO 种子词 %d → %d", before, after)
+
+
+def match_xhs_seo_lexicon(topic: str, limit: int = 3) -> list[dict]:
+    """按 topic 匹配 SEO 词：keyword/topic_hint 子串命中；main 优先。"""
+    blob = (topic or "").strip()
+    if not blob or limit <= 0:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM xhs_seo_lexicon
+            WHERE status='active'
+            ORDER BY CASE kind WHEN 'main' THEN 0 WHEN 'longtail' THEN 1 ELSE 2 END, id
+            """
+        ).fetchall()
+    matched: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        keyword = str(item.get("keyword") or "")
+        hint = str(item.get("topic_hint") or "")
+        if (keyword and keyword in blob) or (hint and hint in blob):
+            matched.append(item)
+        if len(matched) >= limit:
+            break
+    return matched
+
+
+def list_xhs_seo_lexicon(status: str = "active", limit: int = 200) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM xhs_seo_lexicon
+            WHERE (? IS NULL OR status=?)
+            ORDER BY CASE kind WHEN 'main' THEN 0 WHEN 'longtail' THEN 1 ELSE 2 END, id
+            LIMIT ?
+            """,
+            (status, status, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ==================== Users ====================
@@ -1140,12 +1221,19 @@ def get_queue_item_by_id(item_id: int) -> dict | None:
         return _parse_queue_row(row) if row else None
 
 
-def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None, attachments=None, source_refs=None, verification_status="not_checked", target_account_id=None):
+def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None, attachments=None, source_refs=None, verification_status="not_checked", target_account_id=None, seo_meta=None):
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by, attachments, source_refs, verification_status, target_account_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (title, body, platform, json.dumps(hashtags or []), status, scheduled_at, created_by, json.dumps(attachments or [], ensure_ascii=False), json.dumps(source_refs or [], ensure_ascii=False), verification_status, target_account_id),
+        cur = conn.execute(
+            "INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by, attachments, source_refs, verification_status, target_account_id, seo_meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                title, body, platform, json.dumps(hashtags or []), status, scheduled_at, created_by,
+                json.dumps(attachments or [], ensure_ascii=False),
+                json.dumps(source_refs or [], ensure_ascii=False),
+                verification_status, target_account_id,
+                json.dumps(seo_meta or {}, ensure_ascii=False),
+            ),
         )
+        return cur.lastrowid
 
 
 def update_queue_evidence(item_id: int, source_refs: list[dict], verification_status: str):
@@ -1303,6 +1391,14 @@ def _parse_queue_row(row) -> dict:
     d = dict(row)
     d["hashtags"] = json.loads(d.get("hashtags", "[]"))
     d["source_refs"] = json.loads(d.get("source_refs") or "[]")
+    raw_seo = d.get("seo_meta")
+    if isinstance(raw_seo, str):
+        try:
+            d["seo_meta"] = json.loads(raw_seo or "{}")
+        except json.JSONDecodeError:
+            d["seo_meta"] = {}
+    elif raw_seo is None:
+        d["seo_meta"] = {}
     return d
 
 

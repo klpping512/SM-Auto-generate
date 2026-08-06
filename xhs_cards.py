@@ -299,19 +299,43 @@ def _render_page(page: dict, index: int, total: int, output: Path, photo: Path |
     image.save(output, "PNG", optimize=True)
 
 
-def render_carousel(title: str, pages: list[dict] | None, static_dir: Path) -> tuple[list[dict], list[dict]]:
+def render_carousel(
+    title: str,
+    pages: list[dict] | None,
+    static_dir: Path,
+    photo_pool: list[dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """渲染轮播卡。
+
+    photo_pool: 可选 [{'path': 相对static或绝对路径, 'asset_id': int|None}]。
+    为空时走现网 _photo_sources 全量循环（向后兼容）。
+    """
     normalized = normalize_pages(title, pages)
     batch = uuid4().hex
     attachments = []
     photos = _photo_sources(static_dir)
+    pool = [p for p in (photo_pool or []) if isinstance(p, dict) and p.get("path")]
     for index, page in enumerate(normalized):
         relative = Path("uploads") / "image" / f"xhs-{batch}-{index + 1:02d}.png"
-        photo = photos[index % len(photos)] if photos else None
+        asset_id = None
+        if pool:
+            entry = pool[index % len(pool)]
+            raw = Path(str(entry["path"]))
+            photo = raw if raw.is_absolute() else (static_dir / raw)
+            if not photo.is_file():
+                photo = photos[index % len(photos)] if photos else None
+            else:
+                asset_id = entry.get("asset_id")
+        else:
+            photo = photos[index % len(photos)] if photos else None
         _render_page(page, index, len(normalized), static_dir / relative, photo)
-        attachments.append({
+        att = {
             "type": "image", "path": relative.as_posix(),
             "url": f"/static/{relative.as_posix()}",
             "filename": relative.name, "generated": True,
             "template_version": TEMPLATE_VERSION,
-        })
+        }
+        if asset_id is not None:
+            att["asset_id"] = asset_id
+        attachments.append(att)
     return normalized, attachments

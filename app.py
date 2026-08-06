@@ -23,8 +23,10 @@ import chat_intent
 import producible_topics
 import publisher
 import scheduler as sched
-from xhs_cards import pages_from_content, render_carousel
+from xhs_cards import normalize_pages, pages_from_content, render_carousel
 from xhs_quality_gate import check_before_render, check_rendered
+from xhs_photo_match import pick_photos
+import xhs_diff_guard
 import media_assets
 import video_renderer
 import truth_guard
@@ -270,6 +272,13 @@ async def dashboard(user=Depends(get_current_user)):
     }
 
 
+def _render_xhs_carousel(title: str, pages: list | None, topic: str = "", category: str = ""):
+    """分类配图 + 渲染；attachments 携带 asset_id（不足时全量兜底）。"""
+    normalized = normalize_pages(title, pages)
+    pool = pick_photos(db, STATIC_DIR, topic or title, category or "", len(normalized))
+    return render_carousel(title, pages, STATIC_DIR, photo_pool=pool or None)
+
+
 # ==================== API: Topics ====================
 
 @app.get("/api/topics")
@@ -297,7 +306,9 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
         for content in contents:
             if content.platform.value == "xiaohongshu":
-                content.image_pages, content.attachments = render_carousel(content.title, content.image_pages, STATIC_DIR)
+                content.image_pages, content.attachments = _render_xhs_carousel(
+                    content.title, content.image_pages, req.topic, req.category,
+                )
                 render_errors = check_rendered(content.image_pages, content.attachments, STATIC_DIR)
                 if render_errors:
                     logger.error("小红书渲染完整性告警(fallback): %s", render_errors)
@@ -314,7 +325,9 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     )
     for content in contents:
         if content.platform.value == "xiaohongshu":
-            content.image_pages, content.attachments = render_carousel(content.title, content.image_pages, STATIC_DIR)
+            content.image_pages, content.attachments = _render_xhs_carousel(
+                content.title, content.image_pages, req.topic, req.category,
+            )
             render_errors = check_rendered(content.image_pages, content.attachments, STATIC_DIR)
             if render_errors:
                 logger.error("小红书渲染完整性告警: %s", render_errors)
@@ -507,8 +520,8 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
     for platform in req.platforms:
         platform_attachments = req.attachments
         if platform.value == "xiaohongshu" and not any(a.get("type") == "image" for a in platform_attachments):
-            _, platform_attachments = render_carousel(
-                req.title, pages_from_content(req.title, req.body), STATIC_DIR,
+            _, platform_attachments = _render_xhs_carousel(
+                req.title, pages_from_content(req.title, req.body), req.title, "",
             )
         if platform.value == "douyin" and not any(a.get("type") == "video" for a in platform_attachments):
             raise HTTPException(400, "抖音内容必须先生成或上传 MP4 视频")
@@ -525,6 +538,7 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
                 attachments=platform_attachments,
                 source_refs=req.source_refs, verification_status=verification["status"],
                 target_account_id=target_id,
+                seo_meta=req.seo_meta if platform.value == "xiaohongshu" else None,
             )
             added += 1
     db.add_audit_log(user["id"], user["username"], "add_to_queue", target=req.title, detail=f"{added} account routes")
@@ -622,7 +636,9 @@ async def render_xhs_assets(body: dict, user=Depends(get_current_user)):
                 "render_warnings": [],
             }
 
-    normalized, attachments = render_carousel(title, pages, STATIC_DIR)
+    topic = str(body.get("topic") or title).strip()
+    category = str(body.get("category") or "").strip()
+    normalized, attachments = _render_xhs_carousel(title, pages, topic, category)
     render_warnings = check_rendered(normalized, attachments, STATIC_DIR)
     if render_warnings:
         logger.error("小红书 /api/xhs/render 渲染完整性告警: %s", render_warnings)
@@ -637,11 +653,23 @@ async def render_xhs_assets(body: dict, user=Depends(get_current_user)):
 def _repair_xhs_queue_media(item: dict, attachments: list[dict]) -> list[dict]:
     if item["platform"] != "xiaohongshu" or any(a.get("type") == "image" for a in attachments):
         return attachments
-    _, generated = render_carousel(
-        item["title"], pages_from_content(item["title"], item["body"]), STATIC_DIR,
+    _, generated = _render_xhs_carousel(
+        item["title"], pages_from_content(item["title"], item["body"]), item["title"], "",
     )
     db.update_queue_attachments(item["id"], generated)
     return generated
+
+
+def _enforce_xhs_diff_guard(item: dict, account: dict | None) -> None:
+    """差异化守卫：拦截返回 409，不消耗重试、不改 status。"""
+    if item.get("platform") != "xiaohongshu":
+        return
+    account_id = account["id"] if account else item.get("target_account_id")
+    ok, reason = xhs_diff_guard.check(item, db, account_id)
+    if not ok:
+        db.update_queue_status(item["id"], item.get("status") or "queued", reason)
+        raise HTTPException(409, reason)
+
 
 @app.post("/api/publish/{item_id}")
 async def publish_item(item_id: int, user=Depends(get_current_user)):
@@ -652,9 +680,11 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
 
     attachments = _json.loads(item.get('attachments') or '[]')
     attachments = _repair_xhs_queue_media(item, attachments)
+    item = {**item, "attachments": attachments}
     images = [a['path'] for a in attachments if a.get('type') == 'image']
     video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
     account = _account_for_user(item["target_account_id"], user) if item.get("target_account_id") else None
+    _enforce_xhs_diff_guard(item, account)
     result = await publisher.dispatch(
         platform=item["platform"], title=item["title"],
         content=item["body"], tags=item.get("hashtags", []),
@@ -709,9 +739,15 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
 
         attachments = _json.loads(item.get('attachments') or '[]')
         attachments = _repair_xhs_queue_media(item, attachments)
+        item = {**item, "attachments": attachments}
         images = [a['path'] for a in attachments if a.get('type') == 'image']
         video = next((a['path'] for a in attachments if a.get('type') == 'video'), None)
         account = _account_for_user(item["target_account_id"], user) if item.get("target_account_id") else None
+        try:
+            _enforce_xhs_diff_guard(item, account)
+        except HTTPException as exc:
+            results.append({"item_id": item_id, "success": False, "error": exc.detail})
+            continue
         result = await publisher.dispatch(
             platform=item["platform"], title=item["title"],
             content=item["body"], tags=item.get("hashtags", []),
@@ -4704,8 +4740,8 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
 
     for item in outputs:
         if item["platform"] == "xiaohongshu" and item.get("title") != "生成失败":
-            item["image_pages"], item["attachments"] = render_carousel(
-                item["title"], item.get("image_pages"), STATIC_DIR,
+            item["image_pages"], item["attachments"] = _render_xhs_carousel(
+                item["title"], item.get("image_pages"), item.get("title") or "", "",
             )
     readiness = ((hotspot_retrieval or {}).get("video") or {}).get("delivery_readiness") or {}
     # Only treat as insufficient when Hook matched but adaptive planning still

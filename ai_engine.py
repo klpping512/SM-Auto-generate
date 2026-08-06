@@ -249,6 +249,18 @@ async def generate_content(
     return results
 
 
+def _fallback_seo_meta(hits: list[dict]) -> dict:
+    if not hits:
+        return {}
+    main = next((h["keyword"] for h in hits if h.get("kind") == "main"), hits[0]["keyword"])
+    longtail = [h["keyword"] for h in hits if h.get("kind") == "longtail" and h["keyword"] != main][:2]
+    return {
+        "main": main,
+        "longtail": longtail,
+        "positions": ["title", "body", "hashtag"],
+    }
+
+
 async def _generate_xhs_with_gate(
     *,
     topic: str,
@@ -261,6 +273,16 @@ async def _generate_xhs_with_gate(
 ) -> GeneratedContent:
     """小红书生成：模型调用 → 解析 → 渲染前门禁；errors 有界重试，耗尽并入 quality_warnings。"""
     import xhs_quality_gate as xhs_gate
+    import database as db
+
+    seo_hits = db.match_xhs_seo_lexicon(f"{topic} {category}", limit=3)
+    seo_block = ""
+    if seo_hits:
+        words = "、".join(h["keyword"] for h in seo_hits)
+        seo_block = f"""
+【SEO 埋词】请自然埋入以下词（勿堆砌）：{words}
+并在 JSON 中返回 seo_meta：{{"main":"主词","longtail":["长尾1","长尾2"],"positions":["title","body","hashtag"]}}
+"""
 
     asset_instruction = f"""
 除文案外，必须生成 {xhs_gate.XHS_PAGES_MIN}-{xhs_gate.XHS_PAGES_MAX} 页可直接制作成小红书轮播图的 image_pages。
@@ -269,6 +291,7 @@ async def _generate_xhs_with_gate(
 【三层标题】笔记标题（title）≤{xhs_gate.XHS_TITLE_MAX} 字、可含主词；封面钩子（第 1 页 headline）{xhs_gate.XHS_COVER_HOOK_MIN}-{xhs_gate.XHS_COVER_HOOK_MAX} 字、冲击力优先；内页 headline ≤{xhs_gate.XHS_HEADLINE_MAX} 字。
 points 为 1-4 条短句、每条不超过 {xhs_gate.XHS_POINTS_MAX} 字。最后一页给出实用建议或互动引导。
 禁止广告法绝对化用语（如「国家级」「保证」「100%」等）。涉及时效/费用/政策用条件式，并提醒以官方最新口径为准。
+{seo_block}
 """
     user_prompt = f"""请为以下物流主题生成xiaohongshu平台的内容：
 
@@ -286,6 +309,7 @@ points 为 1-4 条短句、每条不超过 {xhs_gate.XHS_POINTS_MAX} 字。最�
   "title": "标题",
   "body": "正文内容",
   "hashtags": ["标签1", "标签2", "标签3"],
+  "seo_meta": {{"main": "主词", "longtail": ["长尾1"], "positions": ["title", "body", "hashtag"]}},
   "image_pages": [{{"type": "cover", "headline": "封面钩子", "subheadline": "封面副标题", "points": []}}]
 }}
 """
@@ -321,6 +345,10 @@ points 为 1-4 条短句、每条不超过 {xhs_gate.XHS_POINTS_MAX} 字。最�
             f"{user_prompt}\n\n【门禁打回】请修正以下问题后重新生成：\n{feedback}"
         )
 
+    seo_meta = parsed.get("seo_meta") if isinstance(parsed.get("seo_meta"), dict) else {}
+    if not seo_meta.get("main"):
+        seo_meta = _fallback_seo_meta(seo_hits)
+
     return GeneratedContent(
         platform=Platform.XIAOHONGSHU,
         title=parsed.get("title") or topic,
@@ -328,6 +356,7 @@ points 为 1-4 条短句、每条不超过 {xhs_gate.XHS_POINTS_MAX} 字。最�
         hashtags=parsed.get("hashtags") or [],
         image_pages=parsed.get("image_pages") if isinstance(parsed.get("image_pages"), list) else [],
         quality_warnings=quality_warnings,
+        seo_meta=seo_meta,
     )
 
 
