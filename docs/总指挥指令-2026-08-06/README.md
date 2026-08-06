@@ -4,7 +4,9 @@
 > 第一动作：**重启 app**（08-04 13:03 旧进程未重启 → 08-05 修复生产未生效），重启后验三件事（5 台频道、duration 不覆盖、单条策展 JSON 可解析）。
 > **收束存档**：[全套链路收束盘点](链路收束盘点-2026-08-06.md)——08-04/05/06 三批改动全链核验，链路设计已闭环。
 > **批 4（清债务）**：[批4-清债务-Cursor执行指令.md](批4-清债务-Cursor执行指令.md)——#12 死路由 / #13 死文件 / #14 脚本归档 / #15 Qwen文案 / #16 依赖 / #17 optimized_generation 删除。前置批 1-3 已验收。
-> **批 5（立项）**：[批5-kill渲染进程改造-Cursor执行指令.md](批5-kill渲染进程改造-Cursor执行指令.md)——#18 cleanup 超时真杀进程+标canceled / #19 回归测试。批 2 #10 遗留立项。
+> **批 5（立项）**：[批5-kill渲染进程改造-Cursor执行指令.md](批5-kill渲染进程改造-Cursor执行指令.md)——#18 cleanup 超时真杀进程+标canceled / #19 回归测试。批 2 #10 遗留立项。**已验收。**
+> **批 6（立项）**：[批6-RAG选片链去留-Cursor执行指令.md](批6-RAG选片链去留-Cursor执行指令.md)——体检报告 §8 拍板执行：删除模型 RAG 下载决策链（`select_for_hook_ingestion`+诊断设施+14 用例），保留证据检索 `retrieve_service_evidence` 与重策展工具。#20-#27。
+> **批 7（立项）**：[批7-商务团队一键生产-对比自动降级科普-Cursor执行指令.md](批7-商务团队一键生产-对比自动降级科普-Cursor执行指令.md)——目标用户=商务团队（不懂技术）。对比题材无真实资料时自动降级科普视角直接生产视频（打字→出视频），替代「对比框架证据不足，暂不可创建视频项目」死胡同；不拆门禁。#28-#32。
 
 ## 指令列表
 
@@ -17,7 +19,9 @@
 | 5 | 公众号图文发布 — 方案设计 + 阶段0可执行指令 | **v3·6项决策全拍板，阶段0已落地（113ce73）** | 新内容单元（图文长文，独立选题，非短视频复用）；参考同行范文拆解出模板规律。**v2 修订**：对抗审查发现 `evidence_harness.py` 无独立抓取能力，独立信源采集+RAG证据库在产能1–2篇/周时ROI为负（呼应08-04"把力气使错层"）——改为人工投喂资料包+3态状态机。**v3**：§5.5 固定物料视觉稿由总指挥起草+拼占位图（另行交付）；§5.6 账号分散、各商务团队各自运营，阶段0不受影响，阶段1复用现有 `accounts` 表多账号设计即可。阶段0可执行指令已产出（`articles`表+人工投喂CLI+生成模块+人工选图CLI+渲染CLI+发布标记CLI，含事实锚定硬约束的正则兜底扫描），**2026-08-06 已由 opencode 落地（commit `113ce73`+`5480f1a`，总指挥独立复核通过）**。文件：`公众号图文发布-方案设计.md`、`公众号图文发布-阶段0-可执行指令.md`。 |
 | 6 | 平台路由与公众号工作台 — 前端改造 | **已产出，待 opencode 落地** | 把平台选择器升级为**生产路由**：侧边栏全局「生产平台」上下文（localStorage）+ 新前端 `articles.html` 公众号图文工作台（清单/新建/生成/选图/渲染/发布）+ 后端 `/api/articles/*` 端点与 `/article-assets` 挂载 + CLI 函数抽取（行为不变）+ chat/video-project 生产护栏。默认平台 douyin 零回归。文件：`平台路由与公众号工作台-前端改造-可执行指令.md`。 |
 | 7 | 批 4 清债务（删除/归档/文案/依赖） | **已执行（待验收）** | #12 删 /api/douyin/render 三死路由+独占 helper+3 个依赖测试（`9475327`+`a1ea0ac`；曾被并行会话以“误删”恢复过一次，已重删并注明）；#13 死文件（.bak/138M 日志/debug 截图，`4c6ef13`）；#14 脚本归档 18 个→scripts/archive/（`0b5a794`）；#15 Qwen 文案中性化（`1c6df36`）；#16 依赖修正（`8895eb1`）；#17 optimized_generation 整链删除（`7e1c378`，前端展示块随 `b4c9851` 入库）。全量 854 passed / 8 存量基线失败；重启后 /api/douyin/render 404。kill 渲染进程另立项。文件：`批4-清债务-Cursor执行指令.md`。 |
-| 8 | 批 5 kill 渲染进程改造（批 2 #10 遗留立项） | **已执行（待验收）** | #18 cleanup_stale_jobs running 超时分支改为 cancel_render 真杀进程组 + 标 canceled（原标 failed 时 is_canceled 不认，渲染线程照跑并在完成后覆盖成 succeeded，清理实际无效；pending 分支保持 failed）；#19 新增回归用例 test_cleanup_stale_jobs_kills_running_render（真 sleep 进程被杀+状态断言+注册表清理）。定向 26 passed；全量 875 passed / 8 存量基线失败；运行时验证：6 分钟前 running 记录在 60s 周期内被清成 canceled/超时清理/渲染超过 300 秒自动终止。commit `c7ee720`。边界：app 重启前的孤儿进程不在 _ACTIVE_PROCESSES，需系统级清理，不在本批。文件：`批5-kill渲染进程改造-Cursor执行指令.md`。 |
+| 8 | 批 5 kill 渲染进程改造（批 2 #10 遗留立项） | **已验收** | #18 cleanup_stale_jobs running 超时分支改为 cancel_render 真杀进程组 + 标 canceled（原标 failed 时 is_canceled 不认，渲染线程照跑并在完成后覆盖成 succeeded，清理实际无效；pending 分支保持 failed）；#19 新增回归用例 test_cleanup_stale_jobs_kills_running_render（真 sleep 进程被杀+状态断言+注册表清理）。定向 26 passed；全量 875 passed / 8 存量基线失败；运行时验证：6 分钟前 running 记录在 60s 周期内被清成 canceled/超时清理/渲染超过 300 秒自动终止。commit `c7ee720`。总指挥代码层核验：c7ee720 恰改 2 文件（video_renderer.py +19/-5、测试 +47），与指令 #18/#19 逐条一致。边界：app 重启前的孤儿进程不在 _ACTIVE_PROCESSES，需系统级清理，不在本批。文件：`批5-kill渲染进程改造-Cursor执行指令.md`。 |
+| 9 | 批 6 RAG 选片链去留（体检报告 §8 立项） | **已执行，待独立验收** | 拍板：**去**——删除模型 RAG 下载决策链。证据：主链路 397:3 直下绕过、证据源近空（brand_evidence confirmed=1 / kb_documents=0）、诊断表空行从未触发、收益未证。执行：`e871ca3`（#20-22 删 hotspot_hook_intake.py+dry_run/dump 脚本+hook_intake_diagnostics 表/2 函数）；`5977b79`（#23 精简 intake_sop 保留 retrieve_service_evidence / #24 摘 reprocess 死 flag 保重策展主体）；`8f9f837`（#25 删 14 条 intake 用例保留 11 条策展 / #26 补 2 条活函数单测 / #27 文档注释收敛）。定向 17 passed；全量 863 passed / 8 存量基线失败（875−14+2 账目吻合）；运行时：空表已 DROP、重启后核心文件零引用、证据检索空 corpus 返 []、reprocess --help 无死 flag。文件：`批6-RAG选片链去留-Cursor执行指令.md`。 |
+| 10 | 批 7 商务团队一键生产（对比自动降级科普） | **已产出，待执行** | 目标用户=商务团队（不懂技术）。对比题材无真实资料时自动降级科普视角直接生产视频，替代「对比框架证据不足，暂不可创建视频项目」死胡同；不拆门禁。`comparison_to_evergreen_topic` 确定性改写（零 COMPARISON_MARKERS 防死循环，已验证）+ app.py 降级走正常生产链 + enforce 加固 + 前端降级提示条 + 测试更新。#28-#32。文件：`批7-商务团队一键生产-对比自动降级科普-Cursor执行指令.md`。 |
 
 ## 拍板（2026-08-06）
 
