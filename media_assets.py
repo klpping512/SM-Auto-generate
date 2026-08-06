@@ -208,7 +208,8 @@ def public_asset(asset: dict) -> dict:
     if item["library_origin"] == "hotspot":
         item["source_label"] = "热点素材"
     elif str(item.get("source") or "").casefold() == "za_stock_license":
-        item["source_label"] = "免版权素材"
+        # 批13 清洗：deprecated 的免版权素材在展示层标注已下线，不再显示为可用。
+        item["source_label"] = "免版权素材（已下线）" if int(item.get("deprecated") or 0) == 1 else "免版权素材"
     else:
         item["source_label"] = "Buffalo 原有素材"
     return item

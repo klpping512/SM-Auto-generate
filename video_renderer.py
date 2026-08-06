@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -1556,6 +1557,13 @@ def render_job(
         if report["status"] != "passed":
             raise RuntimeError("视频质量门禁未通过：" + "、".join(key for key, ok in report["checks"].items() if not ok))
         report["clip_refs"] = used_clip_refs
+        # 批13 D3 复用治理：渲染成功后记录本次实际用到的素材（含 za_stock），
+        # 供 _owned_candidates 的使用惩罚/冷却降权，避免老素材霸榜。
+        used_asset_ids = sorted({
+            int(item.get("asset_id")) for item in rendered_scene_sources if item.get("asset_id")
+        })
+        if used_asset_ids:
+            db.bump_asset_usage(used_asset_ids, datetime.now(timezone.utc).isoformat())
         db.update_render_job(job_id, status="succeeded", stage="质量检查通过", progress=100,
                              output_path=output_rel.as_posix(), clips=clips, quality_report=report, error=None)
 

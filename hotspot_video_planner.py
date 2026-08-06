@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
 from video_composition_policy import source_usage_report
 from video_duration_budget import rebalance_scenes_to_budget
@@ -267,6 +268,35 @@ def _brand_visible(item: dict) -> bool:
     )
 
 
+def _parse_utc(value) -> datetime | None:
+    """容错解析素材 last_used_at：带 Z、带 +08:00 偏移、或 naive（按 UTC，P0 约定）。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _usage_freshness_penalty(last_used_at) -> float:
+    """冷却：距上次使用越近惩罚越大。0=从未/很久没用。"""
+    used = _parse_utc(last_used_at)
+    if used is None:
+        return 0.0
+    hours = (datetime.now(timezone.utc) - used).total_seconds() / 3600
+    if hours < 24:
+        return 2.0
+    if hours < 72:
+        return 1.0
+    if hours < 168:
+        return 0.5
+    return 0.0
+
+
 def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
     eligible_categories = _eligible_owned_categories(brief)
     videos = []
@@ -282,7 +312,7 @@ def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
             continue
         videos.append(item)
 
-    def rank(item: dict) -> tuple[float, float, float, int]:
+    def rank(item: dict) -> tuple:
         # 保持功能分类作为准入门槛；在同类 Buffalo 自有视频里，优先使用可见
         # 品牌标识，其次与当前物流节点重合的多维标签，避免港口运输主题误选泛仓库镜头。
         visible_brands = {
@@ -291,10 +321,14 @@ def _owned_candidates(segments: Iterable[dict], brief: dict) -> list[dict]:
             if str(tag.get("dimension") or "") == "brand"
         }
         branded = 1.0 if "buffalo" in visible_brands else 0.0
+        usage = int(item.get("asset_usage_count") or 0)
+        fresh_penalty = _usage_freshness_penalty(item.get("asset_last_used_at"))
         return (
             branded,
             _owned_node_tag_relevance(item, brief),
             float(item.get("quality_score") or 0),
+            -min(usage, 5),
+            -fresh_penalty,
             -int(item.get("id") or 0),
         )
 

@@ -989,6 +989,7 @@ def init_db():
         _ensure_column(conn, "video_render_jobs", "clips", "TEXT DEFAULT '[]'")
         _ensure_column(conn, "video_render_jobs", "quality_report", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "assets", "deprecated", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "assets", "usage_count", "INTEGER DEFAULT 0")
         _ensure_column(conn, "video_generation_jobs", "output_pinned_at", "TEXT")
         _ensure_column(conn, "video_generation_jobs", "output_purged_at", "TEXT")
         # P3-A 人在环重生成血缘：resume 新建 job 指向前序 job，质检护栏据此回灌 history
@@ -3744,6 +3745,22 @@ def get_unfinished_render_jobs() -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def bump_asset_usage(asset_ids: list[int], used_at: str) -> None:
+    """渲染成功后累计素材使用计数并刷新 last_used_at（批13 D3 复用治理）。
+
+    对一切来源一视同仁（含 za_stock）；used_at 存 UTC ISO8601，与 P0 修复后的
+    库内时间约定一致，避免再踩本地时区误判。
+    """
+    ids = sorted({int(asset_id) for asset_id in (asset_ids or []) if asset_id})
+    if not ids:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            "UPDATE assets SET usage_count = COALESCE(usage_count,0)+1, last_used_at = ? WHERE id = ?",
+            [(used_at, asset_id) for asset_id in ids],
+        )
+
+
 # ==================== Quality-gated Video Generation ====================
 
 _ACTIVE_VIDEO_JOB_STATUSES = ("pending", "running", "needs_review", "cancel_requested")
@@ -4403,6 +4420,7 @@ def list_asset_segments(asset_id: int | None = None, status: str = "active", lim
                         a.rights_status AS asset_rights_status,a.source_url AS asset_source_url,
                         a.attribution AS asset_attribution,a.license AS asset_license,
                         a.deprecated AS asset_deprecated,
+                        a.usage_count AS asset_usage_count,a.last_used_at AS asset_last_used_at,
                         a.event_at,a.created_at AS asset_created_at
                  FROM asset_segments s JOIN assets a ON a.id=s.asset_id WHERE 1=1"""
         params: list = []

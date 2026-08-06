@@ -492,3 +492,35 @@ def test_renderer_drops_opaque_vehicle_codes_before_cutting_a_chinese_action_cla
     )
 
     assert shortened == "拖车驶入装车区。"
+
+
+def _scene_filter(monkeypatch, tmp_path, dims):
+    # 批13 C：按源方向构造 _scene_command 的 filter_complex 字符串
+    import video_renderer
+    monkeypatch.setattr(video_renderer, "_probe_dimensions", lambda ffprobe, source: dims)
+    monkeypatch.setattr(video_renderer, "_has_audio", lambda ffprobe, source: False)
+    wav = tmp_path / "voice.wav"
+    wav.write_bytes(b"x")
+    command = video_renderer._scene_command(
+        "ffmpeg", "ffprobe", tmp_path / "src.mp4", True, wav, [], 5.0,
+        tmp_path / "segment.mp4", tmp_path, 0, output_size=(1080, 1920),
+    )
+    return command[command.index("-filter_complex") + 1]
+
+
+def test_scene_command_landscape_source_uses_blur_background(monkeypatch, tmp_path):
+    # 批13 C：横屏源 → 模糊背景 + 完整画面，不再居中裁切
+    fc = _scene_filter(monkeypatch, tmp_path, (1920, 1080))
+    assert "split=2" in fc
+    assert "boxblur" in fc
+    assert "overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2" in fc
+    assert "force_original_aspect_ratio=decrease" in fc
+
+
+def test_scene_command_portrait_source_keeps_full_bleed(monkeypatch, tmp_path):
+    # 批13 C：竖屏源维持满版 increase+crop，无模糊背景
+    fc = _scene_filter(monkeypatch, tmp_path, (1080, 1920))
+    assert "boxblur" not in fc
+    assert "split=2" not in fc
+    assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
+    assert "crop=1080:1920:exact=1" in fc

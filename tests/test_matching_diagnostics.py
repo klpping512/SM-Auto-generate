@@ -240,3 +240,92 @@ def test_non_deprecated_assets_stay_in_owned_candidates():
     ]
     candidates = hotspot_video_planner._owned_candidates(segments, brief)
     assert [item["id"] for item in candidates] == [1, 2]
+
+
+def test_diagnose_excludes_deprecated_assets():
+    # 批13 清洗：deprecated 素材不得出现在诊断输出（与 _owned_candidates 同闸门）
+    import json
+    brief = _customs_brief()
+    segments = [
+        _seg(1, 1, "customs", description="清关正常素材"),
+        {**_seg(2, 2, "customs", description="已下线垃圾素材"), "asset_deprecated": 1},
+    ]
+    diag = hotspot_video_planner.diagnose_owned_matching(segments, brief)
+    blob = json.dumps(diag, ensure_ascii=False, default=str)
+    assert '"asset_id": 2,' not in blob and '"asset_id": 2}' not in blob
+
+
+def _owned_seg(segment_id, asset_id, category, *, source="upload", usage=0, last_used=None, quality=0.8, description=""):
+    item = _seg(segment_id, asset_id, category, source=source, quality=quality, description=description or f"{category} scene")
+    item["asset_usage_count"] = usage
+    if last_used:
+        item["asset_last_used_at"] = last_used
+    return item
+
+
+def test_owned_candidates_penalize_high_usage_assets():
+    # 批13 D4：同质量下，使用次数多的素材排名下降（封顶 5）
+    brief = _customs_brief()
+    segments = [
+        _owned_seg(1, 1, "customs", usage=10, description="老素材用很多次"),
+        _owned_seg(2, 2, "customs", usage=0, description="新素材没用过"),
+    ]
+    candidates = hotspot_video_planner._owned_candidates(segments, brief)
+    assert [item["asset_id"] for item in candidates] == [2, 1]
+
+
+def test_owned_candidates_cooldown_penalizes_recently_used():
+    # 批13 D4：24h 内刚用过的素材再罚一档，排在同样用过但已久远的之后
+    from datetime import datetime, timezone
+    brief = _customs_brief()
+    recent = datetime.now(timezone.utc).isoformat()
+    segments = [
+        _owned_seg(1, 1, "customs", usage=1, last_used=recent, description="刚刚用过"),
+        _owned_seg(2, 2, "customs", usage=1, description="用过一次但很久前"),
+    ]
+    candidates = hotspot_video_planner._owned_candidates(segments, brief)
+    assert [item["asset_id"] for item in candidates] == [2, 1]
+
+
+def _plan_owned_seg(segment_id, asset_id, category, source, description):
+    return {"id": segment_id, "asset_id": asset_id, "asset_file_type": "video",
+            "asset_source": source, "primary_category": category,
+            "asset_name": description, "description": description,
+            "start_ms": 0, "end_ms": 8000, "quality_score": 0.8, "tags": []}
+
+
+def test_zastock_supplement_fills_customs_gap_capped_at_two():
+    # 批13 B：清关 topic、buffalo 无 customs → za_stock 补缺口，硬上限 2
+    from hotspot_video_planner import plan_followup_scenes
+    brief = {"topic_brief_id": 1, "logistics_topic": "跨境清关", "logistics_nodes": ["清关"]}
+    owned = []
+    idx = 1
+    for cat, name in [("warehouse", "仓储作业A"), ("delivery", "配送作业A"), ("warehouse", "仓储作业B"),
+                      ("delivery", "配送作业B"), ("warehouse", "仓储作业C"), ("delivery", "配送作业C")]:
+        owned.append(_plan_owned_seg(idx, idx, cat, "upload", name)); idx += 1
+    za_ids = set()
+    for j in range(3):
+        aid = 900 + j; za_ids.add(aid)
+        owned.append(_plan_owned_seg(100 + j, aid, "customs", "za_stock_license", f"清关现场{j}"))
+    scenes = plan_followup_scenes(brief, [], owned)
+    za_scenes = [s for s in scenes if s.get("asset_id") in za_ids]
+    assert 1 <= len(za_scenes) <= 2
+
+
+def test_zastock_does_not_displace_buffalo_when_coverage_sufficient():
+    # 批13 B：buffalo 已覆盖清关类目 → za_stock 不挤占
+    from hotspot_video_planner import plan_followup_scenes
+    brief = {"topic_brief_id": 1, "logistics_topic": "跨境清关", "logistics_nodes": ["清关"]}
+    owned = []
+    idx = 1
+    for cat, name in [("warehouse", "仓储作业A"), ("delivery", "配送作业A"), ("customs", "自有清关现场A"),
+                      ("warehouse", "仓储作业B"), ("delivery", "配送作业B"), ("customs", "自有清关现场B"),
+                      ("warehouse", "仓储作业C"), ("delivery", "配送作业C")]:
+        owned.append(_plan_owned_seg(idx, idx, cat, "upload", name)); idx += 1
+    za_ids = set()
+    for j in range(3):
+        aid = 900 + j; za_ids.add(aid)
+        owned.append(_plan_owned_seg(100 + j, aid, "customs", "za_stock_license", f"清关现场{j}"))
+    scenes = plan_followup_scenes(brief, [], owned)
+    za_scenes = [s for s in scenes if s.get("asset_id") in za_ids]
+    assert len(za_scenes) == 0
