@@ -4,7 +4,7 @@ import pytest
 
 
 def test_cli_defaults_keep_automatic_regeneration_off(tmp_path):
-    from scripts.run_video_quality_mvp import build_parser, build_request
+    from scripts.archive.run_video_quality_mvp import build_parser, build_request
 
     video = tmp_path / "sample.mp4"
     video.write_bytes(b"video")
@@ -17,7 +17,7 @@ def test_cli_defaults_keep_automatic_regeneration_off(tmp_path):
 
 
 def test_cli_loads_storyboard_json(tmp_path):
-    from scripts.run_video_quality_mvp import build_parser, build_request
+    from scripts.archive.run_video_quality_mvp import build_parser, build_request
 
     storyboard = tmp_path / "storyboard.json"
     storyboard.write_text(
@@ -36,7 +36,7 @@ def test_cli_loads_storyboard_json(tmp_path):
 
 
 def test_cli_requires_video_source_in_args_or_input_json():
-    from scripts.run_video_quality_mvp import build_parser, build_request
+    from scripts.archive.run_video_quality_mvp import build_parser, build_request
 
     args = build_parser().parse_args([])
     with pytest.raises(ValueError, match="video_source"):
@@ -44,7 +44,7 @@ def test_cli_requires_video_source_in_args_or_input_json():
 
 
 def test_cli_accepts_complete_mvp_input_json(tmp_path):
-    from scripts.run_video_quality_mvp import build_parser, build_request
+    from scripts.archive.run_video_quality_mvp import build_parser, build_request
 
     payload = tmp_path / "input.json"
     payload.write_text(json.dumps({

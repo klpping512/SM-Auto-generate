@@ -3,6 +3,7 @@
 > 前置诊断：见 memory `hotspot-server-stale-json-residual`。
 > 第一动作：**重启 app**（08-04 13:03 旧进程未重启 → 08-05 修复生产未生效），重启后验三件事（5 台频道、duration 不覆盖、单条策展 JSON 可解析）。
 > **收束存档**：[全套链路收束盘点](链路收束盘点-2026-08-06.md)——08-04/05/06 三批改动全链核验，链路设计已闭环。
+> **批 4（清债务）**：[批4-清债务-Cursor执行指令.md](批4-清债务-Cursor执行指令.md)——#12 死路由 / #13 死文件 / #14 脚本归档 / #15 Qwen文案 / #16 依赖 / #17 optimized_generation 删除。前置批 1-3 已验收。
 
 ## 指令列表
 
@@ -12,6 +13,8 @@
 | 2 | za-stock 受控开闸 + 文案门禁兜底 + cap→20000 | **已执行+验收过** | `za_stock_license` 受控进池 + 口播强制安全模板 + cap 20000；清关验收 category_match↑、za customs 可用资产 24。**总指挥独立复核**（复跑真实 `diagnose_owned_matching`）：category_match=351 / after_dedup=155、category_inventory={facility:53,brand:3} 无 customs、verdict=healthy；新测 4 条，全量 811 passed。commit `46ea006`。文件：`za-stock-受控开闸-Cursor执行指令.md` |
 | 3 | za-stock 素材库展示层修复 | **已执行+验收过** | source_label 三元（免版权素材）+ assets.html 拆两节（ownedAssets/materialSections 独立守卫 + 空态兜底）+ 蓝色 za-stock pill tag + 新测试；总指挥复核打回后补齐空态回归与规格测试，复验通过。文件：`za-stock-素材库展示层修复-Cursor执行指令.md`。 |
 | 4 | 入库选片 JSON 加固 | **已执行（待验收）** | selection/audit 两段：parse 升级 `_extract_json`（剥 think/平衡 JSON，行级校验未动）+ 一次性重试（use_cache=False）+ `hook_intake_diagnostics` 落库（job_id+stage）+ dump 定性脚本；budget 单点 max_calls=2。全量 817 passed（8 存量 UI 失败不变）；dry_run 真跑 retries 全 0。文件：`入库选片JSON加固-Cursor执行指令.md`。 |
+| 5 | 公众号图文发布 — 方案设计 + 阶段0可执行指令 | **v3·6项决策全拍板，阶段0已落地（113ce73）** | 新内容单元（图文长文，独立选题，非短视频复用）；参考同行范文拆解出模板规律。**v2 修订**：对抗审查发现 `evidence_harness.py` 无独立抓取能力，独立信源采集+RAG证据库在产能1–2篇/周时ROI为负（呼应08-04"把力气使错层"）——改为人工投喂资料包+3态状态机。**v3**：§5.5 固定物料视觉稿由总指挥起草+拼占位图（另行交付）；§5.6 账号分散、各商务团队各自运营，阶段0不受影响，阶段1复用现有 `accounts` 表多账号设计即可。阶段0可执行指令已产出（`articles`表+人工投喂CLI+生成模块+人工选图CLI+渲染CLI+发布标记CLI，含事实锚定硬约束的正则兜底扫描），**2026-08-06 已由 opencode 落地（commit `113ce73`+`5480f1a`，总指挥独立复核通过）**。文件：`公众号图文发布-方案设计.md`、`公众号图文发布-阶段0-可执行指令.md`。 |
+| 6 | 平台路由与公众号工作台 — 前端改造 | **已产出，待 opencode 落地** | 把平台选择器升级为**生产路由**：侧边栏全局「生产平台」上下文（localStorage）+ 新前端 `articles.html` 公众号图文工作台（清单/新建/生成/选图/渲染/发布）+ 后端 `/api/articles/*` 端点与 `/article-assets` 挂载 + CLI 函数抽取（行为不变）+ chat/video-project 生产护栏。默认平台 douyin 零回归。文件：`平台路由与公众号工作台-前端改造-可执行指令.md`。 |
 
 ## 拍板（2026-08-06）
 
