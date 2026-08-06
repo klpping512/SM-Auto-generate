@@ -418,7 +418,7 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
         except VideoPreprocessingError as exc:
             raise HTTPException(422, str(exc)) from exc
         except EvaluationResponseError as exc:
-            raise HTTPException(502, f"Qwen 质检结果不可用：{exc}") from exc
+            raise HTTPException(502, f"质检结果不可用：{exc}") from exc
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
         db.add_audit_log(

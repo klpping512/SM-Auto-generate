@@ -331,6 +331,9 @@ def diagnose_owned_matching(segments: Iterable[dict], brief: dict) -> dict:
         if not _is_owned_video_segment(item):
             continue
         passed_video.append(item)
+        # 与 _owned_candidates 同闸门：deprecated 素材不得出现在诊断里（批13 清洗）。
+        if item.get("asset_deprecated"):
+            continue
         if not _is_buffalo_usable_source(item):
             continue
         passed_source.append(item)
@@ -656,7 +659,7 @@ def plan_followup_scenes(
     *,
     allow_adaptation: bool = False,
 ) -> list[dict]:
-    # A Qwen + critic approved set has already passed factual relevance review.
+    # A MiMo + critic approved set has already passed factual relevance review.
     # Preserve that decision rather than applying a second keyword-only filter
     # that can accidentally drop one of two complementary shots from the same
     # verified event (for example, "traffic congestion" then "trucks queued").
@@ -717,7 +720,25 @@ def plan_followup_scenes(
             continue
         used_actions.add(action)
         distinct_owned.append(item)
-    owned = distinct_owned[:owned_limit]
+    # ---- za_stock 补充层：硬上限 2，仅在有缺口时进片（批13）----
+    # 必须在全量 distinct_owned 上分层，而非已按 owned_limit 切片的子集：
+    # za_stock 被 rank 的 -int(id) 垫底，先切片会把它们全切掉，补充层就成空操作。
+    ZA_STOCK_SOURCE = "za_stock_license"
+    ZA_STOCK_MAX_SCENES = 2
+    buffalo = [item for item in distinct_owned if item.get("asset_source") != ZA_STOCK_SOURCE]
+    zastock = [item for item in distinct_owned if item.get("asset_source") == ZA_STOCK_SOURCE]
+    # 缺口 = brief 需要但 buffalo 未覆盖的功能类目
+    eligible = _eligible_owned_categories(brief)
+    covered: set[str] = set()
+    for item in buffalo:
+        covered |= _functional_categories(item)
+    gap = (eligible - covered) if eligible is not None else set()
+    # 1) 优先补缺口类目；2) buffalo 总量不足 owned_limit 时补位
+    picks = [it for it in zastock if _functional_categories(it) & gap][:ZA_STOCK_MAX_SCENES]
+    if len(picks) < ZA_STOCK_MAX_SCENES and len(buffalo) < owned_limit:
+        picks += [it for it in zastock if it not in picks][:ZA_STOCK_MAX_SCENES - len(picks)]
+    # buffalo 保底 + za_stock 追加后重新交织，避免 za_stock 堆在片尾
+    owned = _diversify_owned_candidates(buffalo[:owned_limit - len(picks)] + picks)
     # Ideal formal plans avoid automatic image inserts. Adaptive chat plans may
     # re-enable up to three stills as rhythm bridges when owned footage is thin.
     if allow_adaptation and len(owned) < 4:

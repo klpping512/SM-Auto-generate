@@ -314,7 +314,7 @@ def route_video_evaluation_quality(
     }
     # A real-source video can retain small editorial notes such as handheld
     # motion or a transition preference. If every technical gate has passed,
-    # Qwen found no high/medium defect, and its score is at least 75, do not
+    # the evaluator found no high/medium defect, and its score is at least 75, do not
     # make the C-end user manually approve a 50–90s delivery just because the
     # model marked those minor notes as a failed regeneration. The raw report
     # remains attached for audit; this is a product policy decision, not a
@@ -348,7 +348,7 @@ def route_video_evaluation_quality(
     ]
     if not descriptions:
         descriptions = [
-            "Qwen 视频质检不可用，请人工检查预览"
+            "视频质检服务暂不可用，请人工检查预览"
             if evaluation_status != "completed"
             else f"成片总分低于 {threshold:g} 分，请按质检报告修正"
         ]
@@ -465,7 +465,7 @@ async def run_claimed_job(
                 raise RuntimeError(f"阶段处理器未配置：{current.value}")
             result = await handler(latest)
             if isinstance(result, QualityDecision):
-                # 阶段处理器可能已经写入完整报告（例如 Qwen 质检产物）。
+                # 阶段处理器可能已经写入完整报告（例如质检产物）。
                 # 必须重新读取数据库后再合并 gate，否则旧的 latest 会把
                 # video_evaluation、证据索引和错误原因覆盖掉。
                 latest_after_stage = await asyncio.to_thread(
@@ -1185,7 +1185,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                         "evaluation_status": "unavailable",
                         "overall_score": 0,
                         "passed": False,
-                        "summary": "Qwen 视频质检未完成",
+                        "summary": "视频质检未完成（服务暂不可用）",
                         "issues": [],
                         "error": str(exc)[:500],
                     }

@@ -32,9 +32,9 @@ def main() -> int:
     parser.add_argument("--topic", required=True)
     parser.add_argument("--nodes", default="末端", help="逗号分隔的物流节点，例如：末端,配送")
     parser.add_argument("--output-name", default="dual-library-acceptance.mp4")
-    parser.add_argument("--tts-provider", choices=("qwen", "local_macos"), default="qwen")
-    parser.add_argument("--narration-model", choices=("qwen", "rule"), default="qwen",
-                        help="默认强制内部 Qwen 按锁定证据改写旁白；rule 仅用于离线调试")
+    parser.add_argument("--tts-provider", choices=("mimo", "local_macos"), default="mimo")
+    parser.add_argument("--narration-model", choices=("model", "rule"), default="model",
+                        help="默认强制内部模型按锁定证据改写旁白；rule 仅用于离线调试")
     parser.add_argument("--exclude-owned-asset-ids", default="",
                         help="逗号分隔的 Buffalo 资产 ID；批量验收时排除已用于其他成片的品牌素材")
     args = parser.parse_args()
@@ -86,7 +86,7 @@ def main() -> int:
             f"证据不足：热点={hotspot_count}/{required_hotspots}，Buffalo={owned_count}/4；不生成填充视频"
         )
     narration = {"mode": "rule"}
-    if args.narration_model == "qwen":
+    if args.narration_model == "model":
         rag_evidence = hotspot_intake_sop.retrieve_service_evidence({
             "title": args.topic, "summary": brief.get("hotspot_title") or "",
         })
@@ -95,8 +95,8 @@ def main() -> int:
         )
         for scene, generated_scene in zip(scenes, generated["scenes"]):
             scene.update(generated_scene)
-        brief["qwen_title"] = generated["title"]
-        brief["qwen_angle"] = generated["angle"]
+        brief["narration_title"] = generated["title"]
+        brief["narration_angle"] = generated["angle"]
     scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
     job_id = f"acceptance-{uuid4().hex}"
     # 预览与正式成片都固定移动端 9:16；横版新闻源由渲染器满版居中裁切，

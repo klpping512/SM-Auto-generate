@@ -1,4 +1,4 @@
-"""Run the internal Qwen fact audit against an already-rendered dual-library preview.
+"""Run the internal fact audit against an already-rendered dual-library preview.
 
 It does not download, render, publish, or alter a video.  This is used when a
 newer content guard is introduced and existing internal QA renders need to be
@@ -23,7 +23,7 @@ import hotspot_preview_narration
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="使用内部 Qwen 复核既有双素材库成片文案")
+    parser = argparse.ArgumentParser(description="使用内部模型复核既有双素材库成片文案")
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--event-id", required=True, type=int)
     parser.add_argument("--topic", required=True)

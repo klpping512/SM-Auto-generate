@@ -1,4 +1,4 @@
-"""重新分析一条已下载热点母片，并用当前 Qwen Hook 规则重新入库。
+"""重新分析一条已下载热点母片，并用当前 Hook 策展规则重新入库。
 
 用于提示词、预算或镜头分析版本升级后的受控回归测试；不抓取新信源，也不改变
 热点事实记录。示例：python3 scripts/reprocess_hotspot_hook_source.py --media-id 97
@@ -100,7 +100,7 @@ def _reprocess_media(media_id: int, *, skip_analysis: bool) -> dict:
         intake_decision = _normalized_intake_decision(media.get("intake_decision_json"))
         expected_hook = str(intake_decision.get("expected_hook") or "").strip()
         source_context = "\n".join(value for value in (
-            f"本轮 Qwen 已获准的画面范围：{expected_hook}" if expected_hook else "",
+            f"本轮已获准的画面范围：{expected_hook}" if expected_hook else "",
             f"本轮物流切入问题：{str(intake_decision.get('logistics_question') or '').strip()}" if expected_hook else "",
             str(media.get("intake_title") or "").strip() if not expected_hook else "",
             str(media.get("intake_summary") or "").strip() if not expected_hook else "",
@@ -144,7 +144,7 @@ def _reprocess_media(media_id: int, *, skip_analysis: bool) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="重新分析已下载热点母片并重建 Qwen Hook")
+    parser = argparse.ArgumentParser(description="重新分析已下载热点母片并重建 Hook")
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--media-id", type=int, help="单条已下载热点媒体 ID")
     selection.add_argument("--all-legacy-ready", action="store_true", help="重策展所有缺少事件身份的历史已确认 Hook 母片")

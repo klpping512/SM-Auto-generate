@@ -22,7 +22,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--media-ids", default="",
-    help="仅本次受控验收：逗号分隔的已授权热点媒体 ID；仍必须通过 Qwen 选择与事实审计",
+    help="仅本次受控验收：逗号分隔的已授权热点媒体 ID；仍必须通过模型选择与事实审计",
 )
 args = parser.parse_args()
 if args.channel_video_limit is not None:
@@ -31,7 +31,7 @@ os.environ.setdefault("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "1")
 # `HOTSPOT_HOOK_SYNC_ENABLED` is the current scheduler gate and takes
 # precedence over the legacy prewarm flag when both are present in .env.
 # Set both here so this explicit operator command cannot silently fetch feeds
-# and then skip Qwen selection/download.
+# and then skip hook selection/download.
 os.environ["HOTSPOT_HOOK_SYNC_ENABLED"] = "1"
 os.environ["HOTSPOT_PREWARM_ENABLED"] = "1"
 

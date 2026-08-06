@@ -1,6 +1,6 @@
 """Synthesize one sample line with MiMo v2.5-tts so you can listen before
 
-video_renderer.py's render pipeline is switched over from Qwen TTS. Does not
+using it in the render pipeline of video_renderer.py. Does not
 touch any job/render code; only calls video_renderer.synthesize_mimo_tts and
 writes a local wav file.
 

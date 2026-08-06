@@ -177,7 +177,7 @@ def test_semantic_video_quality_unavailable_never_fakes_a_pass():
     decision = route_video_evaluation_quality(report)
 
     assert decision.status is JobStatus.NEEDS_REVIEW
-    assert decision.issues == ["Qwen 视频质检不可用，请人工检查预览"]
+    assert decision.issues == ["视频质检服务暂不可用，请人工检查预览"]
 
 
 def test_formal_content_gate_rejects_repeated_actions_and_generic_checks():

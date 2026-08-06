@@ -352,7 +352,7 @@ def curate_hook_clips(
     segments: Iterable[dict],
     source_context: str = "",
 ) -> tuple[list[dict], dict]:
-    """由内置 Qwen 从母片已分析镜头中作 Hook 决策；无模型或无有效片段时不入库。"""
+    """由内置策展模型从母片已分析镜头中作 Hook 决策；无模型或无有效片段时不入库。"""
     ordered = sorted((dict(item) for item in segments), key=lambda item: int(item.get("segment_index") or 0))
     if not ordered:
         return [], {"status": "no_segments", "reason": "母片没有可供策展的已分析镜头"}

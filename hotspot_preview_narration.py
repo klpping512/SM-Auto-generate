@@ -1,4 +1,4 @@
-"""Qwen-authored narration for an already evidence-locked dual-library preview.
+"""Model-authored narration for an already evidence-locked dual-library preview.
 
 The model may improve narrative and on-screen copy only.  It cannot replace the
 reviewed hotspot event, assign a new asset, or turn a Buffalo action into proof
@@ -46,16 +46,16 @@ def parse_narration(content: str, scene_count: int | list[dict]) -> dict:
     try:
         payload = json.loads(_strip_fence(content))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("Qwen 旁白规划未返回合法 JSON") from exc
+        raise ValueError("旁白规划未返回合法 JSON") from exc
     rows = payload.get("scenes") if isinstance(payload, dict) else None
     locked_scenes = scene_count if isinstance(scene_count, list) else None
     expected_count = len(locked_scenes) if locked_scenes is not None else int(scene_count)
     if not isinstance(rows, list) or len(rows) != expected_count:
-        raise ValueError(f"Qwen 旁白规划必须返回 {expected_count} 个锁定分镜")
+        raise ValueError(f"旁白规划必须返回 {expected_count} 个锁定分镜")
     scenes = []
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
-            raise ValueError(f"Qwen 第 {index} 个旁白分镜无效")
+            raise ValueError(f"第 {index} 个旁白分镜无效")
         voiceover = str(row.get("voiceover") or "").strip()
         text_overlay = str(row.get("text_overlay") or "").strip()
         locked_scene = locked_scenes[index - 1] if locked_scenes else {}
@@ -73,7 +73,7 @@ def parse_narration(content: str, scene_count: int | list[dict]) -> dict:
         ):
             voiceover = text_overlay
         if not min_chars <= len(voiceover) <= max_chars:
-            raise ValueError(f"Qwen 第 {index} 个旁白超出 {max_chars} 字的镜头时长预算")
+            raise ValueError(f"第 {index} 个旁白超出 {max_chars} 字的镜头时长预算")
         # 这是格式补齐，不改变模型的内容决策：部分兼容模型会返回正确旁白却
         # 遗漏字幕字段。直接摘取该旁白能保证音画字幕一致，也避免无谓重试。
         if not text_overlay:
@@ -82,7 +82,7 @@ def parse_narration(content: str, scene_count: int | list[dict]) -> dict:
     title = str(payload.get("title") or "").strip()[:100]
     angle = str(payload.get("angle") or "").strip()[:180]
     if not title or not angle:
-        raise ValueError("Qwen 旁白规划缺少标题或角度")
+        raise ValueError("旁白规划缺少标题或角度")
     return {"title": title, "angle": angle, "scenes": scenes}
 
 
@@ -91,9 +91,9 @@ def parse_critique(content: str) -> tuple[bool, list[str]]:
     try:
         payload = json.loads(_strip_fence(content))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("Qwen Critic 未返回合法 JSON") from exc
+        raise ValueError("Critic 未返回合法 JSON") from exc
     if not isinstance(payload, dict):
-        raise ValueError("Qwen Critic 返回格式无效")
+        raise ValueError("Critic 返回格式无效")
     issues = [str(item).strip()[:240] for item in (payload.get("issues") or []) if str(item).strip()]
     return bool(payload.get("approved")) and not issues, issues
 
@@ -234,7 +234,7 @@ def _review_messages(messages: list[dict], proposal: dict) -> list[dict]:
 
 def _call_critic(messages: list[dict], proposal: dict, *, phase: str) -> tuple[bool, list[str], dict]:
     if not model_router.key_is_available("critic"):
-        raise RuntimeError("内部 Qwen Critic 未配置，拒绝跳过事实审计")
+        raise RuntimeError("内部 Critic 未配置，拒绝跳过事实审计")
     review_messages = _review_messages(messages, proposal)
     job_id = model_router.route_scoped_job_id(
         f"dual-library-preview-narration-critic-{phase}-{uuid4().hex[:16]}", "critic"
@@ -264,8 +264,8 @@ def _call_critic(messages: list[dict], proposal: dict, *, phase: str) -> tuple[b
 def deterministic_evidence_issues(proposal: dict, related_events: list[dict]) -> list[str]:
     """Reject causal leaps that a Critic could otherwise overlook.
 
-    This is only a factual constraint: the internal Qwen planner still creates
-    all wording and Qwen Critic still reviews it. It blocks turning an oil-price
+    This is only a factual constraint: the internal planner still creates
+    all wording and the Critic still reviews it. It blocks turning an oil-price
     or road-incident hook into an unsupported local commercial outcome.
     """
     facts = " ".join(
@@ -429,7 +429,7 @@ def generate_narration(
 ) -> tuple[dict, dict]:
     """Ask the configured internal planner to author only the locked storyboard copy."""
     if not model_router.key_is_available("planner_text"):
-        raise RuntimeError("内部 Qwen 内容规划模型未配置，拒绝使用规则模板旁白")
+        raise RuntimeError("内部内容规划模型未配置，拒绝使用规则模板旁白")
     messages = build_messages(topic, brief, scenes, related_events, rag_evidence)
     first_result, first_meta = _call_planner(messages, phase="initial")
     planner_meta: dict = {"initial": first_meta}
@@ -458,7 +458,7 @@ def generate_narration(
             latest_result, retry_meta = _call_planner(repair_messages, phase=phase)
             planner_meta[phase] = retry_meta
     if proposal is None:
-        raise ValueError("Qwen 旁白未返回可用分镜")
+        raise ValueError("旁白未返回可用分镜")
     approved, issues, critic_meta = _call_critic(messages, proposal, phase="initial")
     issues = [*issues, *deterministic_evidence_issues(proposal, related_events)]
     approved = approved and not issues
@@ -483,7 +483,7 @@ def generate_narration(
     revised_issues = [*revised_issues, *deterministic_evidence_issues(revised, related_events)]
     approved = approved and not revised_issues
     if not approved:
-        raise ValueError("Qwen 旁白未通过事实审计：" + "；".join(revised_issues[:3]))
+        raise ValueError("旁白未通过事实审计：" + "；".join(revised_issues[:3]))
     guard_records = apply_overclaim_guard(
         revised["scenes"], scenes, brief.get("logistics_nodes") or [],
     )

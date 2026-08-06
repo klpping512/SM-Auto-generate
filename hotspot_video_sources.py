@@ -225,7 +225,7 @@ def read_youtube_video_metadata(
     *,
     runner: Callable = subprocess.run,
 ) -> dict:
-    """Return source-provided title/description/tags for pre-download Qwen intake."""
+    """Return source-provided title/description/tags for pre-download intake."""
     completed = runner(
         _metadata_command(video_url),
         capture_output=True,
