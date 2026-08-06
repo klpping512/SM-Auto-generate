@@ -388,7 +388,7 @@ def _estimate_multimodal_tokens(messages: list[dict]) -> int:
                 text_chars += len(str(item.get("text") or ""))
             elif item.get("type") == "image_url":
                 image_count += 1
-    # Qwen-VL 的图片 token 会在响应里返回；请求前按保守上限预留，且不把 Base64
+    # MiMo 视觉模型（mimo-v2.5）的图片 token 会在响应里返回；请求前按保守上限预留，且不把 Base64
     # 字节当作文本 token 计算。
     # bytes as text tokens.
     return max(1, text_chars // 4 + image_count * 400)

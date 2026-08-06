@@ -515,7 +515,7 @@ def _visual_tag_dimensions(payload: dict) -> dict[str, list[str]]:
 
 
 def _visual_analysis(job_id: str, image_path: Path, segment: dict) -> dict:
-    """用 Qwen-VL 标注一个片段；异常降级但必须留下可审计原因。"""
+    """用视觉标注模型（mimo-v2.5）标注一个片段；异常降级但必须留下可审计原因。"""
     if not model_router.key_is_available("vision_tagger"):
         return {"_error": "vision_tagger 未配置或未启用"}
     if not image_path.is_file():
@@ -571,7 +571,7 @@ def _visual_analysis(job_id: str, image_path: Path, segment: dict) -> dict:
 
 
 def _parse_visual_json(content: str) -> dict:
-    """兼容 Qwen-VL 偶发包裹在 Markdown 代码块中的 JSON。"""
+    """兼容视觉模型偶发包裹在 Markdown 代码块中的 JSON。"""
     cleaned = str(content or "").strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)

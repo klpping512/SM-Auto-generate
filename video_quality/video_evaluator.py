@@ -1,4 +1,4 @@
-"""Evidence-grounded two-stage Qwen-VL video evaluation."""
+"""Evidence-grounded two-stage video evaluation."""
 from __future__ import annotations
 
 import base64
@@ -147,7 +147,7 @@ def _static_overlap_seconds(start: float, end: float, windows: list[dict]) -> fl
 
 
 def _technical_static_candidates(technical_report: dict | None) -> list[dict]:
-    """Return only machine-detected temporal candidates supplied to Qwen."""
+    """Return only machine-detected temporal candidates supplied to the evaluation model."""
     if not isinstance(technical_report, dict):
         return []
     candidates = []
@@ -400,25 +400,25 @@ def parse_json_content(content: str) -> dict:
         stripped = re.sub(r"\s*```$", "", stripped)
     start, end = stripped.find("{"), stripped.rfind("}")
     if start < 0 or end < start:
-        raise EvaluationResponseError("Qwen 没有返回 JSON 对象")
+        raise EvaluationResponseError("评估模型没有返回 JSON 对象")
     candidate = stripped[start:end + 1]
     try:
         value = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        # Qwen-VL 偶尔会在最后一个内部对象正常闭合后漏掉最外层 `}`。
+        # 评估模型偶尔会在最后一个内部对象正常闭合后漏掉最外层 `}`。
         # 只补齐可由括号栈严格推导的容器闭合符；绝不猜测字段、字符串或值，
         # 后续的 Pydantic 和证据校验仍会拒绝任何语义不完整的结论。
         repaired = _close_unclosed_json_containers(candidate)
         if repaired is None:
-            raise EvaluationResponseError(f"Qwen JSON 无法解析：{exc.msg}") from exc
+            raise EvaluationResponseError(f"评估模型 JSON 无法解析：{exc.msg}") from exc
         try:
             value = json.loads(repaired)
         except json.JSONDecodeError as repaired_exc:
             raise EvaluationResponseError(
-                f"Qwen JSON 无法解析：{repaired_exc.msg}"
+                f"评估模型 JSON 无法解析：{repaired_exc.msg}"
             ) from repaired_exc
     if not isinstance(value, dict):
-        raise EvaluationResponseError("Qwen 返回值不是 JSON 对象")
+        raise EvaluationResponseError("评估模型返回值不是 JSON 对象")
     return value
 
 
@@ -463,7 +463,7 @@ def _validate_evidence(
     }
     errors: list[str] = []
     for issue in report.issues:
-        # Qwen-VL can preserve the supplied FRAME_0007 index while re-estimating
+        # The evaluation model can preserve the supplied FRAME_0007 index while re-estimating
         # its timestamp from the visual.  The index still identifies the exact
         # submitted image, so canonicalize only that stable prefix; never accept
         # an unknown frame number or a loose timestamp-only match.
@@ -475,7 +475,7 @@ def _validate_evidence(
             errors.append(f"问题证据帧不在提交索引中：{issue.evidence_frame or '空'}")
         frame_timestamp = _frame_timestamp(issue.evidence_frame)
         if frame_timestamp is not None and not issue.start_second - 0.6 <= frame_timestamp <= issue.end_second + 0.6:
-            # Qwen-VL may preserve a real FRAME number but reuse an estimated
+            # The evaluation model may preserve a real FRAME number but reuse an estimated
             # scene timestamp. The frame is the authoritative visual evidence,
             # so retain the issue while anchoring its narrow review window there.
             padding = 0.5
@@ -548,7 +548,7 @@ def _normalize_final_recoverable_output(
     storyboard=None,
     technical_report: dict | None = None,
 ) -> bool:
-    """Repair only deterministic policy conflicts left after Qwen's retry.
+    """Repair only deterministic policy conflicts left after the evaluation model's retry.
 
     The model occasionally repeats a freeze finding inside an explicitly static
     endcard window, or suggests a product-banned text card.  These are policy
@@ -745,4 +745,4 @@ async def evaluate_video(
                     for key in ("overall_score", "passed", "summary", "technical_issues", "issues", "regeneration")
                     if key in payload
                 }
-    raise EvaluationResponseError(str(last_error or "Qwen 质检结果校验失败"))
+    raise EvaluationResponseError(str(last_error or "评估模型质检结果校验失败"))
