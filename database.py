@@ -469,21 +469,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_hook_curation_diag_asset
                 ON hook_curation_diagnostics (asset_id, created_at);
 
-            CREATE TABLE IF NOT EXISTS hook_intake_diagnostics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                stage TEXT NOT NULL,
-                job_id TEXT NOT NULL,
-                attempt_number INTEGER NOT NULL,
-                prompt_version TEXT NOT NULL,
-                model TEXT,
-                cache_hit INTEGER DEFAULT 0,
-                error TEXT,
-                raw_content TEXT,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_hook_intake_diag_run
-                ON hook_intake_diagnostics (stage, job_id, created_at);
-
             CREATE TABLE IF NOT EXISTS brand_evidence (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 claim TEXT NOT NULL,
@@ -2644,58 +2629,6 @@ def list_hook_curation_diagnostics(limit=200, asset_id=None):
                 "SELECT * FROM hook_curation_diagnostics ORDER BY created_at DESC LIMIT ?",
                 (int(limit),),
             ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def add_hook_intake_diagnostic(
-    stage,
-    job_id,
-    attempt_number,
-    prompt_version,
-    *,
-    model=None,
-    cache_hit=False,
-    error=None,
-    raw_content=None,
-):
-    """记录一次入库选片 JSON 失败现场。绝不抛出：写库失败只记日志，不反噬决策。"""
-    try:
-        raw = (raw_content or "")[:16_000]
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO hook_intake_diagnostics "
-                "(stage, job_id, attempt_number, prompt_version, model, cache_hit, error, raw_content, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(stage),
-                    str(job_id),
-                    int(attempt_number),
-                    str(prompt_version),
-                    (model or "")[:64],
-                    1 if cache_hit else 0,
-                    (error or "")[:200],
-                    raw,
-                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ),
-            )
-    except Exception:
-        logger.warning("记录 Hook 入库诊断失败 stage=%s job=%s", stage, job_id, exc_info=True)
-
-
-def list_hook_intake_diagnostics(limit=200, stage=None, job_id=None):
-    """按时间倒序取入库选片诊断行，供定性脚本使用。"""
-    sql = "SELECT * FROM hook_intake_diagnostics"
-    params: list = []
-    if stage:
-        sql += " WHERE stage=?"
-        params.append(str(stage))
-    if job_id:
-        sql += (" AND " if stage else " WHERE ") + "job_id=?"
-        params.append(str(job_id))
-    sql += " ORDER BY created_at DESC LIMIT ?"
-    params.append(int(limit))
-    with get_conn() as conn:
-        rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
 
 
