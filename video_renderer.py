@@ -45,6 +45,10 @@ TTS_BREATHING_ROOM_SECONDS = 0.35
 # 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
 # 必须失败，而不是把听感明显失真的旁白强塞进现场画面。
 MAX_NATURAL_TTS_SPEEDUP = 1.25
+# 素材严重不足快速失败阈值：真实画面连旁白时长的一半都盖不住时，单次收缩+
+# 重合成只会产出一句残缺旁白，并白烧一次外部 TTS（约 90 秒/次、还会重试）——
+# 直接失败。轻度溢出（比例高于该值）仍走原有“最多加速 25% + 一次文本收缩”逻辑。
+MIN_FOOTAGE_TO_NARRATION_RATIO = 0.5
 # A completed sentence may breathe briefly, but multi-second silent tails make
 # otherwise-grounded real footage look stalled and lower the audio QA result.
 MAX_TRAILING_NARRATION_GAP_SECONDS = 0.75
@@ -1393,6 +1397,17 @@ def render_job(
 
             if is_video:
                 available_seconds = max(0.0, _probe_media(ffprobe, source)["duration"] - source_start)
+                # 防御加固：确有溢出且真实素材严重不足（连一半旁白都盖不住）时快速失败，
+                # 不再进入“缩短旁白→外部 TTS 重合成（~90s/次、会重试）”的慢路径硬凑残缺旁白。
+                if (
+                    available_seconds + 0.12 < duration
+                    and (available_seconds - TTS_BREATHING_ROOM_SECONDS)
+                    < speech_duration * MIN_FOOTAGE_TO_NARRATION_RATIO
+                ):
+                    raise ValueError(
+                        f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，远不足以覆盖 "
+                        f"{speech_duration:.1f} 秒旁白；请更换足够长的真实素材 Beat，禁止循环或以残缺旁白硬凑"
+                    )
                 # One local text contraction is allowed after Qwen TTS has
                 # been measured.  It protects real 3–7 second beats from a
                 # punctuation-heavy voiceover without looping their footage.
