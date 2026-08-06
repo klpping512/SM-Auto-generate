@@ -204,5 +204,11 @@ def public_asset(asset: dict) -> dict:
     item["thumbnail_url"] = "/static/" + item["thumbnail"] if item.get("thumbnail") else None
     item["mime"] = mimetypes.guess_type(item["filepath"])[0]
     item["library_origin"] = "hotspot" if item.get("hotspot_id") else "owned"
-    item["source_label"] = "热点素材" if item["library_origin"] == "hotspot" else "Buffalo 原有素材"
+    # 源标签三选一：热点素材 / 免版权素材 (za-stock) / Buffalo 原有素材
+    if item["library_origin"] == "hotspot":
+        item["source_label"] = "热点素材"
+    elif str(item.get("source") or "").casefold() == "za_stock_license":
+        item["source_label"] = "免版权素材"
+    else:
+        item["source_label"] = "Buffalo 原有素材"
     return item

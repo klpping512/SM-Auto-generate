@@ -43,6 +43,32 @@ def test_owned_asset_is_labeled_as_buffalo_source(tmp_db):
     assert public["source_label"] == "Buffalo 原有素材"
 
 
+def test_licensed_stock_asset_is_labeled_as_stock_source(tmp_db):
+    """验收 #3 指令要求：za-stock 免版权素材显示「免版权素材」源标签。
+    
+    指令原文：a.source==="za_stock_license" → source_label="免版权素材"
+    """
+    import media_assets
+
+    asset_id = tmp_db.create_asset({
+        "name": "za_customs_pexels_11801939",
+        "filepath": "assets/library/video/stock.mp4",
+        "file_type": "video",
+        "category": "customs",
+        "primary_category": "customs",
+        "duration": 10,
+        "size": 10,
+        "source": "za_stock_license",
+        "status": "active",
+        "sha256": "z" * 64,
+    })
+
+    public = media_assets.public_asset(tmp_db.get_asset(asset_id))
+
+    assert public["library_origin"] == "owned"
+    assert public["source_label"] == "免版权素材"
+
+
 def test_build_event_clips_groups_short_shots_and_names_bilingually():
     from hotspot_event_clips import build_event_clips
 
