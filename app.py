@@ -1863,6 +1863,7 @@ def _marketing_hook_candidates(
     *,
     hook_kind: str | None = None,
     require_scene_overlap: bool = False,
+    allow_broad_match: bool = False,
 ) -> tuple[list[dict], str, list[dict], dict]:
     """RAG retrieval for marketing hooks, not a claim that every headline proves Buffalo."""
     topic_text = " ".join(str(brief.get(key) or "") for key in ("raw_input", "subject", "angle", "goal"))
@@ -1903,7 +1904,21 @@ def _marketing_hook_candidates(
             continue
         events_by_hotspot.setdefault(int(event.get("hotspot_id") or 0), []).append(event)
     candidates = []
-    for hotspot in db.list_hotspots(limit=100):
+    hotspot_rows = db.list_hotspots(limit=100)
+    if hook_kind == "generic_logistics":
+        # Generic evergreen parents carry a 1970 sentinel retrieved_at and sink
+        # below the newest-100 window, so their qualified clips would never be
+        # scored.  Any parent that owns a clip already passing the renderable
+        # gate above is appended explicitly — no gate is loosened, and the
+        # timely_event path (hook_kind != generic_logistics) stays unchanged.
+        listed_ids = {int(item["id"]) for item in hotspot_rows}
+        for hotspot_id in sorted(events_by_hotspot):
+            if int(hotspot_id) in listed_ids:
+                continue
+            row = db.get_hotspot(int(hotspot_id))
+            if row:
+                hotspot_rows.append(row)
+    for hotspot in hotspot_rows:
         event_clips = events_by_hotspot.get(int(hotspot["id"]), [])
         if not event_clips:
             continue
@@ -1966,7 +1981,7 @@ def _marketing_hook_candidates(
         # Broad-only topics (南非/物流 with no logistics category profile) must
         # not hit random accident Hooks. Topics that already resolved to a
         # category (cost_risk, warehouse, …) may still use intent_bridge below.
-        if not topic_profile and not specific_terms:
+        if not allow_broad_match and not topic_profile and not specific_terms:
             funnel["scene_mismatch"] += 1
             continue
         intent_bridge = 0
@@ -1983,7 +1998,7 @@ def _marketing_hook_candidates(
         # "kind", which used to let unrelated events into every topic's
         # candidate set. It still contributes a small tie-break score below
         # once a candidate already qualifies on a real signal.
-        if not direct and not profile_overlap and not intent_bridge:
+        if not allow_broad_match and not direct and not profile_overlap and not intent_bridge:
             funnel["relevance_low"] += 1
             continue
         event_fit = 1 if kind_in_topics else 0
@@ -4529,6 +4544,7 @@ async def _retrieve_confirmed_chat_hooks(
         limit=8,
         hook_kind=hook_kind,
         require_scene_overlap=use_generic,
+        allow_broad_match=use_generic,
     )
     # Evergreen topics often lack scene keywords; still try generic logistics
     # openers so one-click production can auto-lock a real Hook.
@@ -4538,6 +4554,7 @@ async def _retrieve_confirmed_chat_hooks(
             limit=8,
             hook_kind="generic_logistics",
             require_scene_overlap=False,
+            allow_broad_match=True,
         )
         funnel = {**(funnel or {}), "generic_relaxed": True}
     # 同一聊天 session 内不应连续把同一段 Hook 当开场：对近期已用过的候选
