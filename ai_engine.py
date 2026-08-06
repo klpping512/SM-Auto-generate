@@ -171,11 +171,21 @@ async def generate_content(
         )
         asset_instruction = ""
         if platform == Platform.XIAOHONGSHU:
-            asset_instruction = """
-除文案外，必须生成 5-7 页可直接制作成小红书轮播图的 image_pages。视觉内容应适合 BUFFALO 金棕品牌风格：封面标题有冲击力，内页每条要点应包含具体信息，避免空泛口号。
-第 1 页 type=cover，其余 type=content；每页 headline 不超过 18 字，
-points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建议或互动引导。
-"""
+            try:
+                results.append(await _generate_xhs_with_gate(
+                    topic=topic,
+                    category=category,
+                    tone_desc=tone_desc,
+                    length=length,
+                    extra=extra,
+                    kb_block=kb_block,
+                    prompt_config=prompt_config,
+                ))
+                logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
+            except Exception as e:
+                logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%s", platform.value, topic, e)
+                results.append(_fallback_content(platform, topic, category))
+            continue
         elif platform == Platform.DOUYIN:
             category_hint = _get_category_priority_hint(topic, category, assets or [])
             asset_instruction = """
@@ -226,7 +236,7 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
                 title=parsed.get("title", topic),
                 body=parsed.get("body", content_text),
                 hashtags=parsed.get("hashtags", []),
-                image_pages=parsed.get("image_pages", []) if platform == Platform.XIAOHONGSHU else [],
+                image_pages=[],
                 duration_target=DOUYIN_TARGET_SECONDS if platform == Platform.DOUYIN else None,
                 scenes=_normalize_douyin_scenes(parsed.get("scenes"), topic, {a["id"] for a in (assets or [])}) if platform == Platform.DOUYIN else [],
                 music_suggestion=parsed.get("music_suggestion", "") if platform == Platform.DOUYIN else "",
@@ -237,6 +247,88 @@ points 为 1-3 条短句、每条不超过 28 字。最后一页给出实用建�
             results.append(_fallback_content(platform, topic, category))
 
     return results
+
+
+async def _generate_xhs_with_gate(
+    *,
+    topic: str,
+    category: str,
+    tone_desc: str,
+    length: str,
+    extra: str,
+    kb_block: str,
+    prompt_config: dict,
+) -> GeneratedContent:
+    """小红书生成：模型调用 → 解析 → 渲染前门禁；errors 有界重试，耗尽并入 quality_warnings。"""
+    import xhs_quality_gate as xhs_gate
+
+    asset_instruction = f"""
+除文案外，必须生成 {xhs_gate.XHS_PAGES_MIN}-{xhs_gate.XHS_PAGES_MAX} 页可直接制作成小红书轮播图的 image_pages。
+视觉内容应适合 BUFFALO 金棕品牌风格：封面标题有冲击力，内页每条要点应包含具体信息，避免空泛口号。
+第 1 页 type=cover，其余 type=content。
+【三层标题】笔记标题（title）≤{xhs_gate.XHS_TITLE_MAX} 字、可含主词；封面钩子（第 1 页 headline）{xhs_gate.XHS_COVER_HOOK_MIN}-{xhs_gate.XHS_COVER_HOOK_MAX} 字、冲击力优先；内页 headline ≤{xhs_gate.XHS_HEADLINE_MAX} 字。
+points 为 1-4 条短句、每条不超过 {xhs_gate.XHS_POINTS_MAX} 字。最后一页给出实用建议或互动引导。
+禁止广告法绝对化用语（如「国家级」「保证」「100%」等）。涉及时效/费用/政策用条件式，并提醒以官方最新口径为准。
+"""
+    user_prompt = f"""请为以下物流主题生成xiaohongshu平台的内容：
+
+主题：{topic}
+分类：{category}
+语气：{tone_desc}
+长度：{length}
+{extra}{kb_block}
+{prompt_config['format']}
+
+{asset_instruction}
+
+【最终要求】请严格按照以下JSON格式返回，不要有任何其他文字：
+{{
+  "title": "标题",
+  "body": "正文内容",
+  "hashtags": ["标签1", "标签2", "标签3"],
+  "image_pages": [{{"type": "cover", "headline": "封面钩子", "subheadline": "封面副标题", "points": []}}]
+}}
+"""
+
+    quality_warnings: list[str] = []
+    parsed: dict = {}
+    for attempt in range(xhs_gate.XHS_GATE_MAX_CALLS):
+        content_text = await _complete_json_messages(
+            [
+                {"role": "system", "content": prompt_config["system"]},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=prompt_config["max_len"],
+            prompt_version="ai-generate-content-mimo-v1",
+        )
+        parsed = _parse_json_response(content_text)
+        title = parsed.get("title") or topic
+        body = parsed.get("body") or content_text
+        pages = parsed.get("image_pages") if isinstance(parsed.get("image_pages"), list) else []
+        gate = xhs_gate.check_before_render(title, body, pages)
+        quality_warnings = list(gate.warnings)
+        if not gate.errors:
+            break
+        logger.warning(
+            "小红书门禁打回 attempt=%s/%s errors=%s",
+            attempt + 1, xhs_gate.XHS_GATE_MAX_CALLS, gate.errors,
+        )
+        if attempt + 1 >= xhs_gate.XHS_GATE_MAX_CALLS:
+            quality_warnings.extend(gate.errors)
+            break
+        feedback = "\n".join(f"- {item}" for item in gate.errors)
+        user_prompt = (
+            f"{user_prompt}\n\n【门禁打回】请修正以下问题后重新生成：\n{feedback}"
+        )
+
+    return GeneratedContent(
+        platform=Platform.XIAOHONGSHU,
+        title=parsed.get("title") or topic,
+        body=parsed.get("body") or "",
+        hashtags=parsed.get("hashtags") or [],
+        image_pages=parsed.get("image_pages") if isinstance(parsed.get("image_pages"), list) else [],
+        quality_warnings=quality_warnings,
+    )
 
 
 def _parse_json_response(text: str) -> dict:
@@ -808,6 +900,18 @@ async def _chat_one_platform(
         "reddit": "默认使用自然、专业的英文；只有用户明确要求中文时才使用中文。",
     }
     config = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["facebook"])
+    xhs_pages_hint = ""
+    if platform == "xiaohongshu":
+        import xhs_quality_gate as xhs_gate
+        xhs_pages_hint = (
+            f"\n小红书还必须返回 image_pages 数组，共 {xhs_gate.XHS_PAGES_MIN}-{xhs_gate.XHS_PAGES_MAX} 页。"
+            f"每项含 type/headline/subheadline/points。"
+            f"【三层标题】title≤{xhs_gate.XHS_TITLE_MAX} 字；"
+            f"封面钩子（第1页 headline）{xhs_gate.XHS_COVER_HOOK_MIN}-{xhs_gate.XHS_COVER_HOOK_MAX} 字；"
+            f"内页 headline≤{xhs_gate.XHS_HEADLINE_MAX} 字；"
+            f"points 1-4 条、每条≤{xhs_gate.XHS_POINTS_MAX} 字。"
+            "第一页 cover 有冲击力，内页信息具体，最后一页建议或互动，避免空泛口号。"
+        )
     parameter_prompt = (
         f"\n你当前只为【{platform_names.get(platform, platform)}】创作，不要混用其他平台的格式。"
         f"\n本轮偏好：语气={tone_map.get(tone, tone)}；长度={length_map.get(length, length)}。"
@@ -815,7 +919,7 @@ async def _chat_one_platform(
         + f"\n语言要求：{language_rules.get(platform, '根据目标平台选择自然语言。')}"
         + "\n事实要求：不得编造实时状态、比例、天数、价格或其他具体数据；也不得虚构 Buffalo 已启动应急方案、优先安排、实时跟进、自营团队、全程可追踪或不影响交期等服务承诺。用户未提供可靠数据时，用条件式表达并提醒核实最新官方信息。"
         + f"\n平台硬性格式：{config['format']}"
-        + ("\n小红书还必须返回 image_pages 数组，共 5-7 页。每项格式为 {\"type\":\"cover或content\",\"headline\":\"不超过18字\",\"subheadline\":\"可选副标题\",\"points\":[\"2-4条具体短句，每条说明一个真实问题或行动\"]}。第一页是有冲击力的封面，内页信息具体，最后一页是建议或互动引导，避免空泛口号。" if platform == "xiaohongshu" else "")
+        + xhs_pages_hint
         + ("\n抖音的 body 是面向观众的发布文案（不要写【画面】【口播】标记）；分镜必须返回 7-10 个 scenes，总时长 50-65 秒，目标 60 秒。每项含 scene、duration整数秒、visual、voiceover、text_overlay、asset_id。每段旁白必须提供新的具体信息，不能用空泛口号凑时长。**每个场景的 asset_id 必须从素材目录中选择一个真实 ID**，同一视频不能重复引用同一素材，最后1个场景可以是品牌信息卡（asset_id=null）。visual 字段用简短的素材描述关键词（如：海外仓全景、仓库入库操作），不要写电影镜头语言。" if platform == "douyin" else "")
         + (("\n" + douyin_copywriting_sop.prompt_for_chat_douyin()) if platform == "douyin" else "")
         + (("\n" + _get_category_priority_hint(topic or messages[-1]["content"][:40] if messages else "", "douyin", assets or []) + "\n" + _format_asset_catalog(assets or [])) if platform == "douyin" else "")

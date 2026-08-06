@@ -111,6 +111,7 @@ class GeneratedContent(BaseModel):
     selected_asset_ids: list[int] = []
     render_job_id: str | None = None
     rendered_video: dict | None = None
+    quality_warnings: list[str] = []
 
 
 class GenerateResponse(BaseModel):
