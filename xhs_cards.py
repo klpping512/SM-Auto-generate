@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 
 WIDTH, HEIGHT = 1242, 1660
-TEMPLATE_VERSION = "buffalo-reference-v4"
+TEMPLATE_VERSION = "buffalo-reference-v5"
 GOLD = "#B78A4A"
 GOLD_LIGHT = "#D2AA6D"
 GOLD_DARK = "#7C542D"
@@ -285,16 +285,93 @@ def _draw_text_page(page: dict, index: int, total: int) -> Image.Image:
 
 
 def _draw_photo_page(page: dict, index: int, total: int, photo: Path | None) -> Image.Image:
-    return _draw_text_page(page, index, total)
+    """内页：全图打底 + 标注块。标注块位置 bottom if index%2==1 else top（图2下/图3上…）。"""
+    image = _photo_panel(photo, (WIDTH, HEIGHT))
+    position = "bottom" if index % 2 == 1 else "top"
+    band = int(HEIGHT * 0.48)
+
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    # 标注半区：暖棕半透明叠层（保证白字可读，仍透出底图纹理）；对侧极轻暗角
+    board = (145, 82, 42)
+    if position == "bottom":
+        y0, y1 = HEIGHT - band, HEIGHT
+        for i, y in enumerate(range(y0, y1)):
+            ratio = i / max(1, band - 1)
+            # 靠内容区更实，靠边缘更透
+            alpha = int(160 + 75 * min(1.0, ratio * 1.4))
+            odraw.line((0, y, WIDTH, y), fill=(*board, alpha))
+        odraw.ellipse((-200, y0 - 80, WIDTH + 200, y0 + 160), fill=(139, 87, 45, 230))
+        for y in range(0, 120):
+            odraw.line((0, y, WIDTH, y), fill=(0, 0, 0, int(28 * (1 - y / 120))))
+    else:
+        y0, y1 = 0, band
+        for i, y in enumerate(range(y0, y1)):
+            ratio = 1 - (i / max(1, band - 1))
+            alpha = int(160 + 75 * min(1.0, ratio * 1.4))
+            odraw.line((0, y, WIDTH, y), fill=(*board, alpha))
+        odraw.ellipse((-200, y1 - 160, WIDTH + 200, y1 + 80), fill=(139, 87, 45, 230))
+        for y in range(HEIGHT - 120, HEIGHT):
+            t = (y - (HEIGHT - 120)) / 120
+            odraw.line((0, y, WIDTH, y), fill=(0, 0, 0, int(28 * t)))
+
+    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    _brand(image, draw, page, index + 1, total, dark=True)
+
+    content_top = (y0 + 130) if position == "top" else (y0 + 50)
+    headline_font = _font(54, True)
+    headline_lines = _wrapped(draw, page.get("headline") or "物流提示", headline_font, 1080)[:2]
+    y = content_top
+    for line in headline_lines:
+        draw.text(
+            (72, y), line, font=headline_font, fill=WHITE,
+            stroke_width=3, stroke_fill="#704425",
+        )
+        y += 68
+    y += 28
+
+    points = [p for p in (page.get("points") or []) if str(p).strip()][:4]
+    point_font = _font(42, True)
+    for number, point in enumerate(points, 1):
+        badge = f"{number:02d}"
+        draw.ellipse((72, y - 4, 140, y + 64), fill="#C58A3E")
+        bw = draw.textbbox((0, 0), badge, font=_font(36, True))[2]
+        draw.text((72 + (68 - bw) / 2, y + 8), badge, font=_font(36, True), fill=WHITE)
+        lines = _wrapped(draw, point, point_font, 980)[:2]
+        text_y = y
+        for line in lines:
+            draw.text(
+                (168, text_y), line, font=point_font, fill=WHITE,
+                stroke_width=2, stroke_fill="#704425",
+            )
+            text_y += 52
+        y = max(y + 88, text_y + 18)
+
+    slogan = "跨境物流，认准 BUFFALO"
+    slogan_font = _font(28, True)
+    slogan_h = 48
+    if position == "bottom":
+        # 块高允许：圆点上方留白才画
+        if y + slogan_h < 1580:
+            sw = draw.textbbox((0, 0), slogan, font=slogan_font)[2]
+            draw.text(((WIDTH - sw) / 2, min(y + 12, 1540)), slogan, font=slogan_font, fill=WHITE)
+    else:
+        if y + slogan_h < y1 - 20:
+            sw = draw.textbbox((0, 0), slogan, font=slogan_font)[2]
+            draw.text(((WIDTH - sw) / 2, y + 8), slogan, font=slogan_font, fill=WHITE)
+
+    _dots(draw, index + 1, total)
+    return image
 
 
 def _render_page(page: dict, index: int, total: int, output: Path, photo: Path | None = None):
     if index == 0:
         image = _draw_cover(page, total, photo)
-    elif index % 2:
-        image = _draw_text_page(page, index, total)
-    else:
+    elif photo is not None:
         image = _draw_photo_page(page, index, total, photo)
+    else:
+        image = _draw_text_page(page, index, total)
     output.parent.mkdir(parents=True, exist_ok=True)
     image.save(output, "PNG", optimize=True)
 
