@@ -276,7 +276,7 @@ def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
     # 防止退回“只标状态”（标 failed 时 is_canceled 不认，渲染线程照跑并覆盖成 succeeded）。
     import threading
     import time
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     import video_renderer
 
@@ -294,7 +294,9 @@ def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
         time.sleep(0.1)
     process = next(iter(video_renderer._ACTIVE_PROCESSES["job-stale"]))
 
-    created = (datetime.now() - timedelta(minutes=7)).isoformat(timespec="seconds")
+    # created_at 与 DB datetime('now') 一致：UTC 无时区串。旧用例用本地 datetime.now()
+    # 恰好与旧 bug 的本地时区解释互相抵消，导致测试绿但生产误杀；改用 UTC 串才真实。
+    created = (datetime.now(timezone.utc) - timedelta(minutes=7)).strftime("%Y-%m-%d %H:%M:%S")
     monkeypatch.setattr(video_renderer.db, "get_unfinished_render_jobs", lambda: [
         {"id": "job-stale", "status": "running", "created_at": created},
     ])
@@ -316,6 +318,32 @@ def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
     # run_cancelable_process 的 finally 已把进程从注册表清掉
     worker.join(timeout=5)
     assert not video_renderer._ACTIVE_PROCESSES.get("job-stale")
+
+
+def test_cleanup_stale_jobs_does_not_kill_fresh_running_job_utc_created_at(monkeypatch):
+    # P0 回归守卫：created_at 是 DB datetime('now') 的 UTC 无时区串。修复前 naive 值被
+    # .timestamp() 按进程本地时区（如 +08:00）解释，age 恒多 8 小时 → 刚创建的 running
+    # 任务在首个 60s 清理周期即被误判超时杀掉。修复后按 UTC 归一，新任务 age≈0 不得被清。
+    from datetime import datetime, timezone
+
+    import video_renderer
+
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")  # 刚创建，UTC 无时区串
+    monkeypatch.setattr(video_renderer.db, "get_unfinished_render_jobs", lambda: [
+        {"id": "job-fresh", "status": "running", "created_at": created},
+    ])
+    updates = []
+    canceled = []
+    monkeypatch.setattr(
+        video_renderer.db, "update_render_job",
+        lambda job_id, **kwargs: updates.append((job_id, kwargs)),
+    )
+    monkeypatch.setattr(video_renderer, "cancel_render", lambda job_id: canceled.append(job_id))
+
+    video_renderer.cleanup_stale_jobs()
+
+    assert canceled == []  # 未误杀
+    assert updates == []   # 未改状态
 
 
 def test_normalize_script_preserves_event_clip_range():

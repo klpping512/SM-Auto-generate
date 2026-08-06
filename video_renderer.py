@@ -1170,8 +1170,14 @@ def cleanup_stale_jobs():
         if not created:
             continue
         try:
-            from datetime import datetime
-            job_time = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+            from datetime import datetime, timezone
+            parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            # created_at 存的是 UTC 无时区串（datetime('now')）。naive 值直接
+            # .timestamp() 会按进程本地时区解释，+08:00 机器上 age 恒多 8 小时，
+            # 导致 running 任务在首个清理周期即被误判超时杀掉——一律按 UTC 归一。
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            job_time = parsed.timestamp()
         except (ValueError, TypeError):
             continue
         age = now - job_time
