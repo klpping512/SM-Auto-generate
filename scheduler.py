@@ -16,6 +16,7 @@ import database as db
 import publisher
 import ratelimit
 import truth_guard
+import xhs_diff_guard
 import hotspot_fetcher
 import hotspot_video_sources
 import media_retention
@@ -549,6 +550,16 @@ async def check_scheduled_publish():
         account = db.get_account(item["target_account_id"]) if item.get("target_account_id") else None
         if account and account.get("owner_id") != item.get("created_by"):
             account = None
+
+        # 批次 2 覆盖缺口修复：定时发布不绕过差异化守卫（只拦不排程）
+        if platform == "xiaohongshu":
+            guard_account_id = account["id"] if account else item.get("target_account_id")
+            guard_ok, guard_reason = xhs_diff_guard.check(item, db, guard_account_id)
+            if not guard_ok:
+                db.update_queue_status(item_id, item.get("status") or "queued", guard_reason)
+                logger.warning("差异化守卫拦截定时发布: id=%d, %s", item_id, guard_reason)
+                continue
+
         result = await publisher.dispatch(
             platform=platform,
             title=item["title"],

@@ -141,3 +141,70 @@ def test_utc_yesterday_not_counted_in_daily(tmp_db):
 
     _publish_xhs(tmp_db, account_id=701, title="今文", body="b2", attachments=[])
     assert guard.account_daily_count(tmp_db, 701) == 1
+
+
+async def test_scheduler_blocks_third_xhs_without_dispatch(tmp_db, monkeypatch):
+    """R1：同账号今日已发 2 篇 → 第 3 篇定时不进 dispatch，status 保持 queued。"""
+    import scheduler as sched
+    import publisher
+    import ratelimit
+
+    _publish_xhs(tmp_db, account_id=801, title="S1", body="b1", attachments=[])
+    _publish_xhs(tmp_db, account_id=801, title="S2", body="b2", attachments=[])
+    qid = tmp_db.add_to_queue(
+        title="S3", body="b3", platform="xiaohongshu",
+        status="queued", scheduled_at="2020-01-01 00:00",
+        target_account_id=801,
+        attachments=[{"type": "image", "path": "x.png", "asset_id": 1}],
+    )
+
+    called = {"n": 0}
+
+    async def boom(**kwargs):
+        called["n"] += 1
+        raise AssertionError("守卫命中时不应 dispatch")
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(publisher, "dispatch", boom)
+    monkeypatch.setattr(sched, "send_success_notify", _noop)
+    monkeypatch.setattr(sched.truth_guard, "publish_error", lambda item: None)
+    monkeypatch.setattr(ratelimit, "can_publish_now", lambda p: (True, "ok"))
+
+    await sched.check_scheduled_publish()
+    assert called["n"] == 0
+    row = tmp_db.get_queue_item_by_id(qid)
+    assert row["status"] == "queued"
+    assert "单号今日已达上限" in (row.get("error_msg") or "")
+
+
+async def test_scheduler_non_xhs_skips_diff_guard(tmp_db, monkeypatch):
+    """R1：非小红书定时条目不受 diff 守卫影响。"""
+    import scheduler as sched
+    import publisher
+    import ratelimit
+
+    qid = tmp_db.add_to_queue(
+        title="抖音定时", body="b", platform="douyin",
+        status="queued", scheduled_at="2020-01-01 00:00",
+        target_account_id=901,
+        attachments=[{"type": "video", "path": "v.mp4"}],
+    )
+    called = {"n": 0}
+
+    async def fake_dispatch(**kwargs):
+        called["n"] += 1
+        return {"success": True, "platform": "douyin"}
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(publisher, "dispatch", fake_dispatch)
+    monkeypatch.setattr(sched, "send_success_notify", _noop)
+    monkeypatch.setattr(sched.truth_guard, "publish_error", lambda item: None)
+    monkeypatch.setattr(ratelimit, "can_publish_now", lambda p: (True, "ok"))
+
+    await sched.check_scheduled_publish()
+    assert called["n"] == 1
+    assert tmp_db.get_queue_item_by_id(qid)["status"] == "published"
