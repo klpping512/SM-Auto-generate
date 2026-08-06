@@ -267,7 +267,6 @@ async def test_content_generation_uses_mimo_chat_json_api(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_platforms_return_distinct_platform_native_outputs(monkeypatch):
     monkeypatch.delenv("MIMO_API_KEY", raising=False)
-    monkeypatch.setattr(ai_engine, "DASHSCOPE_API_KEY", "")
     monkeypatch.setattr(ai_engine, "chat_model_available", lambda: False)
 
     outputs = await ai_engine.chat_platforms(

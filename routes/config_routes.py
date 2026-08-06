@@ -6,35 +6,12 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
-import ai_engine
 import database as db
 import scheduler as sched
 from auth import require_role
 from models import UserRole
 
 router = APIRouter()
-
-
-@router.post("/api/config/apikey")
-async def set_api_key_endpoint(body: dict, user=Depends(require_role(UserRole.ADMIN))):
-    key = body.get("key", "")
-    if key:
-        ai_engine.set_api_key(key)
-        db.add_audit_log(user["id"], user["username"], "set_api_key")
-        os.environ["DASHSCOPE_API_KEY"] = key
-        return {"status": "ok", "message": "百炼 API key 已加载"}
-    raise HTTPException(400, "Missing key")
-
-
-@router.post("/api/config/dashscope-key")
-async def set_dashscope_key(body: dict, user=Depends(require_role(UserRole.ADMIN))):
-    key = str(body.get("key") or "").strip()
-    if not key:
-        raise HTTPException(400, "Missing key")
-    os.environ["DASHSCOPE_API_KEY"] = key
-    ai_engine.set_api_key(key)
-    db.add_audit_log(user["id"], user["username"], "set_dashscope_key")
-    return {"status": "ok", "persistence": "runtime_only", "message": "仅本次运行生效（环境变量）"}
 
 
 @router.post("/api/config/mimo-key")

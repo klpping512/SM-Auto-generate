@@ -1,4 +1,4 @@
-"""Qwen TTS and deterministic FFmpeg vertical-video rendering."""
+"""TTS and deterministic FFmpeg vertical-video rendering."""
 from __future__ import annotations
 
 import base64
@@ -28,8 +28,6 @@ from video_composition_policy import (
 )
 from video_duration_budget import rebalance_scenes_to_budget, platform_budget_ms
 
-QWEN_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-VOICES = {"Cherry"}
 MIMO_TTS_VOICE = "mimo_default"
 # 正式成片编码档位（仅非-fast 路径生效；preview/fast 路径仍走 ultrafast+crf28 保持快）
 # 原则：中间过渡片近视觉无损，只让"交付段"做真正压缩，减少三段重编码的代际损失。
@@ -41,7 +39,7 @@ FORMAL_MAX_SCENES = 10
 FORMAL_MIN_DURATION_MS = 50_000
 FORMAL_MAX_DURATION_MS = 90_000
 TTS_BREATHING_ROOM_SECONDS = 0.35
-# Qwen 同一音色会随停顿和专有名词改变实际语速。真实短 Hook 不能循环，
+# TTS 的实际语速会随停顿和专有名词改变。真实短 Hook 不能循环，
 # 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
 # 必须失败，而不是把听感明显失真的旁白强塞进现场画面。
 MAX_NATURAL_TTS_SPEEDUP = 1.25
@@ -62,17 +60,10 @@ TTS_RETRY_DELAY_SECONDS = 1.0
 PORTRAIT_FRAME_POLICY = "full_bleed_center_crop"
 
 
-def normalize_tts_voice(voice: str | None) -> str:
-    """将历史项目的已下线 Qwen 音色安全迁移到当前默认音色。"""
-    candidate = str(voice or "").strip()
-    return candidate if candidate in VOICES else sorted(VOICES)[0]
-
-
-def tts_voice_options(*, mimo_available: bool | None = None, qwen_available: bool | None = None) -> list[dict]:
-    """Return selectable TTS voices for Qwen and MiMo with availability flags."""
+def tts_voice_options(*, mimo_available: bool | None = None) -> list[dict]:
+    """Return selectable TTS voices (MiMo single track) with availability flags."""
     mimo_ok = bool(os.environ.get("MIMO_API_KEY")) if mimo_available is None else bool(mimo_available)
-    qwen_ok = bool(os.environ.get("DASHSCOPE_API_KEY")) if qwen_available is None else bool(qwen_available)
-    options = [
+    return [
         {
             "provider": "mimo",
             "id": MIMO_TTS_VOICE,
@@ -82,18 +73,6 @@ def tts_voice_options(*, mimo_available: bool | None = None, qwen_available: boo
             "preview_supported": True,
         },
     ]
-    options.extend(
-        {
-            "provider": "qwen",
-            "id": voice,
-            "label": f"Qwen {voice}",
-            "available": qwen_ok,
-            "disabled_reason": "" if qwen_ok else "未配置 DASHSCOPE_API_KEY",
-            "preview_supported": True,
-        }
-        for voice in sorted(VOICES)
-    )
-    return options
 
 
 def synthesize_tts_preview(
@@ -114,10 +93,7 @@ def synthesize_tts_preview(
     root.mkdir(parents=True, exist_ok=True)
     stamp = uuid.uuid4().hex[:12]
     output = root / f"preview-{provider}-{stamp}.wav"
-    if provider == "mimo":
-        synthesize_mimo_tts(cleaned, resolved_voice, output)
-    else:
-        synthesize_qwen_tts(cleaned, resolved_voice, output)
+    synthesize_mimo_tts(cleaned, resolved_voice, output)
     rel = f"uploads/tts-previews/{output.name}"
     return {
         "audio_path": rel,
@@ -125,7 +101,6 @@ def synthesize_tts_preview(
         "tts_provider": provider,
         "voice": resolved_voice,
         "text": cleaned,
-        "fallback_used": False,
     }
 
 
@@ -135,24 +110,20 @@ def resolve_tts_selection(
     *,
     strict: bool = False,
 ) -> tuple[str, str]:
-    """Resolve provider/voice pair. Formal production uses strict=True."""
+    """Resolve provider/voice pair. Qwen is retired; legacy 'qwen'/'Cherry'
+    normalize to MiMo so historical projects can still re-render."""
     normalized_provider = (provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
+    if normalized_provider in {"qwen", "dashscope"}:
+        normalized_provider, voice = "mimo", ""
     candidate = str(voice or "").strip()
-    if normalized_provider == "qwen":
-        if candidate in VOICES:
-            return "qwen", candidate
-        if strict:
-            raise ValueError("请选择有效的 Qwen TTS 音色")
-        return "qwen", sorted(VOICES)[0]
     if normalized_provider == "mimo":
         allowed = {MIMO_TTS_VOICE, "mimo_default", ""}
         if candidate and candidate not in allowed:
-            if strict:
-                raise ValueError("请选择有效的 MiMo TTS 音色")
+            # 历史遗留音色（如 Cherry）统一回落默认，不抛错
             return "mimo", MIMO_TTS_VOICE
         return "mimo", candidate or MIMO_TTS_VOICE
     if strict:
-        raise ValueError("请选择有效的 TTS 服务商（mimo 或 qwen）")
+        raise ValueError(f"未知 TTS 服务商：{normalized_provider}")
     return "mimo", MIMO_TTS_VOICE
 
 
@@ -442,45 +413,7 @@ def normalize_script(
             "normalization": {"auto_repaired": bool(repairs), "actions": repairs}}
 
 
-def synthesize_qwen_tts(text: str, voice: str, output: Path, api_key: str | None = None):
-    key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
-    if not key:
-        raise RuntimeError("未配置 DASHSCOPE_API_KEY")
-    voice = normalize_tts_voice(voice)
-    if voice not in VOICES:
-        raise ValueError("不支持的 Qwen TTS 音色")
-    payload = {
-        "model": "qwen3-tts-flash",
-        "input": {"text": text, "voice": voice, "language_type": "Chinese"},
-    }
-    last_error: Exception | None = None
-    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
-        try:
-            with httpx.Client(timeout=90, trust_env=False) as client:
-                response = client.post(
-                    QWEN_TTS_URL,
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json=payload,
-                )
-                response.raise_for_status()
-                audio_url = response.json()["output"]["audio"]["url"]
-            with httpx.Client(timeout=90, trust_env=False) as client:
-                audio = client.get(audio_url)
-                audio.raise_for_status()
-            output.write_bytes(audio.content)
-            return
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            last_error = exc
-            if attempt < TTS_MAX_ATTEMPTS:
-                # This function runs inside the render worker thread, so the
-                # small backoff cannot block the API event loop. Retrying the
-                # whole request also refreshes an expired one-shot audio URL.
-                time.sleep(TTS_RETRY_DELAY_SECONDS * attempt)
-    raise RuntimeError(f"Qwen TTS 请求或音频下载失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
-
-
 MIMO_TTS_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-# Qwen TTS 只接受文本，语气全靠标点，播报永远是同一个平铺直叙的节奏。
 # MiMo v2.5-tts 允许在 user 消息里用自然语言描述语气/语速，这条默认风格
 # 只是让旁白读起来像真人口语播报，不是台词内容，不会进入成片文本。
 MIMO_TTS_DEFAULT_STYLE = "播报语气自然亲切、像真人口语跟卖家说话，语速适中偏快，不要机械平铺直叙。"
@@ -558,26 +491,25 @@ def synthesize_scene_voiceover(
     voice: str = "",
     style_instruction: str | None = None,
 ) -> dict:
-    """Route one scene voiceover with MiMo-first + recoverable Qwen fallback.
+    """Route one scene voiceover through MiMo TTS (single track).
 
-    Returns metadata describing the provider actually used. Non-recoverable
-    MiMo failures (auth/balance/params) do not silently fall back.
+    Returns metadata describing the provider actually used. MiMo failures
+    bubble up directly; there is no silent fallback.
     """
     import hashlib
 
     provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
-    fallback_enabled = os.environ.get("TTS_FALLBACK_ENABLED", "0") != "0"
-    fallback_provider = (os.environ.get("TTS_FALLBACK_PROVIDER", "qwen") or "qwen").strip().lower()
+    if provider not in {"mimo", "local_macos"}:
+        # 历史项目可能存了已下线的 TTS 服务商，统一归一到 MiMo 单轨。
+        provider = "mimo"
     mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
     mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
     style = style_instruction or MIMO_TTS_DEFAULT_STYLE
     meta = {
         "provider": provider,
-        "model": mimo_model if provider == "mimo" else "qwen3-tts-flash",
-        "voice": mimo_voice if provider == "mimo" else normalize_tts_voice(voice or "Cherry"),
-        "style": style if provider == "mimo" else "",
-        "fallback_used": False,
-        "fallback_reason": None,
+        "model": mimo_model,
+        "voice": mimo_voice,
+        "style": style,
         "attempts": 0,
         "elapsed_ms": 0,
         "cache_hit": False,
@@ -604,21 +536,6 @@ def synthesize_scene_voiceover(
         except OSError:
             pass
 
-    def _is_recoverable(exc: Exception) -> bool:
-        text_err = str(exc).casefold()
-        if isinstance(exc, httpx.TimeoutException):
-            return True
-        if isinstance(exc, httpx.HTTPStatusError):
-            code = int(exc.response.status_code)
-            if code in {401, 403, 400, 402, 422}:
-                return False
-            return code >= 500 or code == 429
-        recoverable_markers = ("timeout", "timed out", "429", "rate limit", "5xx", "503", "502", "504", "decode", "audio")
-        fatal_markers = ("未配置", "api key", "鉴权", "unauthorized", "forbidden", "balance", "余额", "invalid", "参数")
-        if any(marker in text_err for marker in fatal_markers):
-            return False
-        return any(marker in text_err for marker in recoverable_markers)
-
     if provider == "local_macos":
         synthesize_local_macos(text, output)
         meta.update({"provider": "local_macos", "model": "macos_say", "attempts": 1})
@@ -629,35 +546,8 @@ def synthesize_scene_voiceover(
         meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         return meta
 
-    primary_error: Exception | None = None
-    try:
-        meta["attempts"] += 1
-        if provider == "mimo":
-            synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
-        else:
-            synthesize_qwen_tts(text, meta["voice"], output)
-        _store_cache()
-        meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        return meta
-    except Exception as exc:
-        primary_error = exc
-        if provider != "mimo" or not fallback_enabled or fallback_provider != "qwen" or not _is_recoverable(exc):
-            raise
-
-    # Recoverable MiMo failure → temporary Qwen fallback.
-    meta["fallback_used"] = True
-    meta["fallback_reason"] = str(primary_error)[:240]
-    meta["provider"] = "qwen"
-    meta["model"] = "qwen3-tts-flash"
-    meta["voice"] = normalize_tts_voice(voice or "Cherry")
-    meta["style"] = ""
     meta["attempts"] += 1
-    synthesize_qwen_tts(text, meta["voice"], output)
-    # Cache under the fallback identity so retries of the same text+provider reuse it.
-    cache_key = hashlib.sha256(
-        f"{text}|qwen|{meta['model']}|{meta['voice']}|".encode("utf-8")
-    ).hexdigest()
-    cache_path = cache_root / f"{cache_key}{output.suffix or '.wav'}"
+    synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
     _store_cache()
     meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return meta
@@ -818,14 +708,23 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
         command += ["-loop", "1", "-i", str(overlay)]
     audio_index = len(overlays) + 1
     command += ["-i", str(wav), "-t", str(duration)]
-    # 所有镜头统一为满版竖屏。之前的“模糊背景 + 完整横画面”会让横向热点
-    # 在竖屏素材之间看起来像一张横向插卡；这里强制放大并居中裁切，确保任意
-    # 横竖源在每次转场后都保持同一个 9:16 视觉比例。素材策展负责在入库阶段
-    # 选择主体清楚的 Hook，渲染层不再以横向前景破坏成片节奏。
-    filters = [
-        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={width}:{height}:exact=1,setsar=1[portrait]",
-    ]
+    # 所有镜头统一为 9:16 竖屏。批13 拍板：横屏源不再居中裁切（会丢约 68% 横向
+    # 信息），改为“模糊背景 + 完整画面”；竖屏/方形源维持满版（increase+crop 正好铺满）。
+    src_w, src_h = _probe_dimensions(ffprobe, source)
+    landscape_source = bool(src_w and src_h and src_w > src_h)
+    if landscape_source:
+        filters = [
+            "[0:v]split=2[bg_src][fg_src]",
+            f"[bg_src]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={width}:{height}:exact=1,boxblur=luma_radius=25:luma_power=3[bg]",
+            f"[fg_src]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[fg]",
+            "[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2,setsar=1[portrait]",
+        ]
+    else:
+        filters = [
+            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={width}:{height}:exact=1,setsar=1[portrait]",
+        ]
     if animate_image and not is_video:
         # 自有上下文图片是短暂的真实证据，不应在 9:16 画面中显得像一张突然插入的卡片。
         # 仅做 3.5% 的居中推进；品牌 CTA 则保持稳定，便于识别并避免过度装饰。
@@ -906,6 +805,16 @@ def _probe_media(ffprobe: str, path: Path) -> dict:
         "video_codec": video.get("codec_name"), "audio_codec": audio.get("codec_name"),
         "has_audio": bool(audio),
     }
+
+
+def _probe_dimensions(ffprobe: str, path: Path) -> tuple[int | None, int | None]:
+    """Return coded (width, height) of the first video stream, or (None, None) on failure."""
+    try:
+        info = _probe_media(ffprobe, path)
+    except Exception:
+        return None, None
+    width, height = int(info.get("width") or 0), int(info.get("height") or 0)
+    return (width or None), (height or None)
 
 
 def _transition_concat_command(
@@ -1051,7 +960,7 @@ def compact_voiceover_to_fit_real_video(
 ) -> str | None:
     """Shorten only an overflowing narration tail before re-synthesizing it.
 
-    This is a last renderer-side guard for real clips. Qwen may read the same
+    This is a last renderer-side guard for real clips. TTS may read the same
     number of characters at quite different speeds because of punctuation and
     brand names. We preserve the opening factual clause, prefer an existing
     phrase boundary, and never stretch or repeat the video to hide the result.
@@ -1096,7 +1005,7 @@ def scene_render_duration(
 ) -> float:
     """Fit a single narration pass without leaving a long, silent visual tail.
 
-    Normal scenes may shorten below their planning allocation when Qwen TTS is
+    Normal scenes may shorten below their planning allocation when TTS is
     naturally concise. Formal dual-library videos preserve their planned beat
     duration, just like brand endcards, so a promised 50–90 second delivery is
     not silently compressed into a much shorter video. Neither branch ever
@@ -1408,7 +1317,7 @@ def render_job(
                         f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，远不足以覆盖 "
                         f"{speech_duration:.1f} 秒旁白；请更换足够长的真实素材 Beat，禁止循环或以残缺旁白硬凑"
                     )
-                # One local text contraction is allowed after Qwen TTS has
+                # One local text contraction is allowed after TTS has
                 # been measured.  It protects real 3–7 second beats from a
                 # punctuation-heavy voiceover without looping their footage.
                 for text_attempt in range(2):
@@ -1589,7 +1498,6 @@ def render_job(
         report["tts"] = {
             "requested_provider": tts_provider,
             "scenes": tts_reports,
-            "fallback_used": any(item.get("fallback_used") for item in tts_reports),
             "cache_hits": sum(1 for item in tts_reports if item.get("cache_hit")),
         }
         report["audio_tempo_adjustments"] = audio_tempo_adjustments

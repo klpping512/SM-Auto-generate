@@ -62,8 +62,6 @@
 .manual-review-checks label{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.45}
 .manual-review-status{padding:10px;border-radius:5px;background:#f0f9f3;color:#25613a;font-size:12px;line-height:1.55;margin-top:10px}
 .manual-review-status.rejected{background:#fef2f2;color:#991b1b}
-.fallback-gate{padding:12px;border:1px solid #f0c36d;border-radius:8px;background:#fffbeb;margin-top:12px;font-size:13px}
-.fallback-gate label{display:flex;gap:8px;align-items:flex-start;min-height:44px}
 .project-list{display:grid;gap:10px}
 .project-list a{display:block;padding:14px 16px;border:1px solid var(--border-line);border-radius:8px;background:#fff;text-decoration:none;color:inherit;min-height:44px}
 .project-list a:hover{border-color:var(--primary)}
@@ -129,7 +127,6 @@ let projectPollFailures=0;
 let matchSession=null;
 let matchSegments=new Map();
 let activeReplaceScene=-1;
-let fallbackConfirmed=false;
 let qualityFixes=false;
 const MANUAL_PREVIEW_CHECKS=[
   ['hook_authentic','开头 Hook 有吸引力，且画面与热点事件相符'],
@@ -545,17 +542,8 @@ function renderManualPreviewReview(manualReview){
   return `<section class="manual-review"><h3>人工验收</h3><p>请完整观看预览后逐项确认；确认只会记录内部验收，不会发布。</p><div class="manual-review-checks">${MANUAL_PREVIEW_CHECKS.map(([key,label])=>`<label><input type="checkbox" data-manual-review="${key}"> <span>${label}</span></label>`).join('')}</div><label class="project-subtitle" for="manualReviewNote">验收备注（可选）</label><textarea class="input" id="manualReviewNote" placeholder="例如：第二段图片转场自然"></textarea><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" style="min-height:44px" onclick="submitManualPreviewReview('accept')">确认人工验收（不发布）</button><button class="btn btn-secondary btn-sm" style="min-height:44px" onclick="submitManualPreviewReview('reject')">记录为未通过</button></div></section>`;
 }
 
-function ttsFallbackUsed(){
-  const report=job?.quality_report||{};
-  const finalQuality=report.final_quality||report.preview_quality||report;
-  return Boolean(finalQuality.tts?.fallback_used||report.tts?.fallback_used);
-}
-
 function gatedDownload(url,label){
   if(!url)return '';
-  if(ttsFallbackUsed()&&!fallbackConfirmed){
-    return `<button type="button" class="btn btn-primary btn-sm" style="margin-top:10px;min-height:44px" disabled title="请先确认 MiMo → Qwen 回退">${escapeHtml(label)}</button>`;
-  }
   return `<a class="btn btn-primary btn-sm" style="margin-top:10px;min-height:44px" href="${escapeHtml(url)}" download>${escapeHtml(label)}</a>`;
 }
 
@@ -576,13 +564,11 @@ function renderReview(){
   const outputLabel=internalPreview?'内部测试预览':(publishAllowed?'高清成片':'高清内部验收成片');
   const outputDownload=internalPreview?'下载内部预览':(publishAllowed?'下载 MP4':'下载内部验收成片');
   const output=job?.output_url?`<h3 style="margin-top:14px">${outputLabel}</h3><video src="${escapeHtml(job.output_url)}" controls></video>${gatedDownload(job.output_url,outputDownload)}${renderQuality(internalPreview?job.quality_report?.preview_quality:job.quality_report?.final_quality)}`:'';
-  const fallbackGate=ttsFallbackUsed()?`<div class="fallback-gate"><strong>TTS 回退：MiMo → Qwen</strong><p style="margin:6px 0 10px;font-size:12px;color:var(--text-muted)">发生了允许的自动回退。请试听后确认，方可继续下载或生成高清成片。</p><label><input type="checkbox" id="fallbackConfirm" ${fallbackConfirmed?'checked':''} onchange="fallbackConfirmed=this.checked;renderAll()"> 我已确认 MiMo → Qwen 听感可接受</label></div>`:'';
   document.getElementById('canvas').innerHTML=`
     <div class="wb-card media-box">
       <h2>生成验收</h2>
       <div class="stage-line"><strong>${escapeHtml(stage)}</strong><span>${escapeHtml(status)} · ${progress}%</span></div>
       <div class="project-progress"><i style="width:${progress}%"></i></div>
-      ${fallbackGate}
       ${preview+output||'<div class="empty-note">通过质量检查后会显示预览和成片</div>'}
       ${formatRenderProvenance(job?.quality_report,scenes())}
       ${renderManualPreviewReview(manualReview)}
@@ -609,7 +595,6 @@ function primaryActionConfig(){
   if(!job)return {label:'开始生成',run:startGeneration};
   if(['pending','running','cancel_requested'].includes(status))return {label:status==='cancel_requested'?'正在取消…':'取消生成',run:cancelFromProject,secondary:true,disabled:status==='cancel_requested'};
   if(status==='needs_review'&&manualReview?.status==='accepted'){
-    if(ttsFallbackUsed()&&!fallbackConfirmed)return {label:'请先确认 MiMo → Qwen',run:()=>showToast('请先确认 TTS 回退','error'),disabled:true};
     return {label:'生成高清成片（不发布）',run:finalizeManualReview};
   }
   if(status==='needs_review'&&job?.quality_report?.publication?.review_mode==='manual_preview')return {label:'结束任务',run:cancelFromProject,secondary:true};
@@ -704,7 +689,6 @@ async function retryGeneration(){
 async function cancelFromProject(){await cancelVideoGeneration(job.id);await loadJob();}
 async function regenerateFromManualReview(){await saveRevision();await startGeneration();}
 async function finalizeManualReview(){
-  if(ttsFallbackUsed()&&!fallbackConfirmed){showToast('请先确认 MiMo → Qwen 回退','error');return;}
   try{const response=await apiFetch(`/api/video-generation/jobs/${job.id}/manual-finalize`,{method:'POST'});const result=await response.json();job=result.job;renderAll();startPolling();refreshVideoTaskBadge();showToast('已进入高清成片渲染，不会发布');}catch(error){showToast(error.message,'error');}
 }
 async function submitManualPreviewReview(action){

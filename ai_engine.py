@@ -84,28 +84,15 @@ def _format_asset_catalog(assets: list[dict]) -> str:
             lines.append(f"[{cat}/{cat_names.get(cat, cat)}] " + " | ".join(groups[cat]))
     return "\n".join(lines)
 
-# Chat / content generation defaults to MiMo via model_router (chat_text).
-# DASHSCOPE_API_KEY is retained only as a legacy alias for older tests/callers.
-DASHSCOPE_API_KEY = ""
-QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-QWEN_MODEL = "qwen-plus"
-
-
-def set_api_key(key: str):
-    """Legacy setter kept for bootstrap compatibility; chat now prefers MIMO_API_KEY."""
-    global DASHSCOPE_API_KEY
-    DASHSCOPE_API_KEY = key
-
-
 def chat_model_available() -> bool:
-    """True when MiMo chat_text (or legacy DashScope key) can serve copy generation."""
+    """True when MiMo chat_text can serve copy generation."""
     try:
         import model_router
         if model_router.key_is_available("chat_text"):
             return True
     except Exception:
         pass
-    return bool(DASHSCOPE_API_KEY or os.environ.get("MIMO_API_KEY"))
+    return bool(os.environ.get("MIMO_API_KEY"))
 
 
 async def _complete_json_messages(

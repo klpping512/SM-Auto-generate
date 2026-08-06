@@ -201,7 +201,6 @@ def test_tts_preview_does_not_create_video_jobs(tmp_db, monkeypatch, tmp_path):
             "tts_provider": tts_provider or "mimo",
             "voice": voice or "mimo_default",
             "text": text,
-            "fallback_used": False,
         }
 
     monkeypatch.setattr(video_renderer, "synthesize_tts_preview", _fake_preview)

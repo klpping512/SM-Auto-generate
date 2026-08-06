@@ -109,8 +109,8 @@ def test_video_project_workbench_has_five_stages_and_manual_review():
     assert "生成高清成片（不发布）" in page
     assert "MANUAL_PREVIEW_CHECKS" in page
     assert "isManualReviewEligible" in page
-    assert "MiMo → Qwen" in page
-    assert "fallbackConfirm" in page
+    assert "MiMo → Qwen" not in page
+    assert "fallbackConfirm" not in page
     assert "voicePickerMarkup" in page
     assert "formatRenderProvenance" in page
     assert "热点 Hook" in page
@@ -171,7 +171,7 @@ def test_common_helpers_expose_voice_options_and_provenance():
     assert "previewSelectedVoice" in common
     assert "/api/media/tts-preview" in common
     assert "MiMo 默认" in common
-    assert "Qwen Cherry" in common
-    assert "fallback_used" in common
+    assert "Qwen Cherry" not in common
+    assert "fallback_used" not in common
     assert "FORMAL_MIN_SCENES = 7" in common
     assert "FORMAL_MAX_SCENES = 10" in common

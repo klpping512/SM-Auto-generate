@@ -207,7 +207,6 @@ const FORMAL_MAX_DURATION_MS = 90_000;
 function defaultVoiceOptions() {
     return [
         {provider: 'mimo', id: 'mimo_default', label: 'MiMo 默认', available: true, preview_supported: true},
-        {provider: 'qwen', id: 'Cherry', label: 'Qwen Cherry', available: true, preview_supported: true},
     ];
 }
 
@@ -220,7 +219,7 @@ function parseVoiceSelection(value) {
     if (!raw) return {tts_provider: 'mimo', voice: 'mimo_default'};
     const splitAt = raw.indexOf(':');
     if (splitAt <= 0) {
-        if (raw === 'Cherry') return {tts_provider: 'qwen', voice: 'Cherry'};
+        // 历史遗留音色（如 Cherry）照原样交给后端归一到 MiMo 默认。
         return {tts_provider: 'mimo', voice: raw || 'mimo_default'};
     }
     return {tts_provider: raw.slice(0, splitAt), voice: raw.slice(splitAt + 1)};
@@ -229,16 +228,12 @@ function parseVoiceSelection(value) {
 function providerGroupLabel(provider) {
     const key = String(provider || '').toLowerCase();
     if (key === 'mimo') return 'MiMo';
-    if (key === 'qwen') return 'Qwen';
     return key.toUpperCase() || '其他';
 }
 
 function voiceSelectMarkup(options, selectedValue, selectId, selectAttrs) {
     const opts = (Array.isArray(options) && options.length) ? options : defaultVoiceOptions();
-    const ordered = [...opts].sort((a, b) => {
-        const rank = (p) => (String(p).toLowerCase() === 'mimo' ? 0 : 1);
-        return rank(a.provider) - rank(b.provider);
-    });
+    const ordered = [...opts];
     const selected = String(selectedValue || voiceOptionValue(ordered[0]));
     const attrs = selectAttrs || '';
     const groups = new Map();
@@ -247,8 +242,7 @@ function voiceSelectMarkup(options, selectedValue, selectId, selectAttrs) {
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(option);
     });
-    // MiMo first
-    const groupOrder = [...groups.keys()].sort((a, b) => (a === 'mimo' ? -1 : b === 'mimo' ? 1 : a.localeCompare(b)));
+    const groupOrder = [...groups.keys()];
     const optionsHtml = groupOrder.map((key) => {
         const items = groups.get(key).map((option) => {
             const value = voiceOptionValue(option);
@@ -411,10 +405,7 @@ function formatRenderProvenance(qualityReport, fallbackScenes) {
     const adaptText = adaptation.adapted
         ? `<br/>自适应降级：${escapeHtml(adaptation.message || (adaptation.strategies || []).join('、') || '按现有库存成片')}`
         : '';
-    const fallbackWarn = tts.fallback_used
-        ? '<div class="render-review-summary tts-fallback-warn">TTS 已发生回退：MiMo → Qwen。请在验收页确认听感后再继续。</div>'
-        : '';
-    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}${adaptText}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}${tts.fallback_used ? ' · 回退已使用' : ''}</div>${fallbackWarn}`;
+    return `<div class="render-review-summary" style="margin-top:6px;">素材来源：${escapeHtml(sourceText)}${adaptText}<br/>TTS：${escapeHtml(providerText)} · 音色 ${escapeHtml(voiceText)}</div>`;
 }
 
 // ==================== Video project nav badge (no floating panel) ====================

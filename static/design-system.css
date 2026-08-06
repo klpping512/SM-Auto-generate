@@ -907,8 +907,3 @@ textarea.input {
     font-size: 12px;
     color: var(--text-muted);
 }
-
-.tts-fallback-warn {
-    color: #a16207;
-    margin-top: 6px;
-}

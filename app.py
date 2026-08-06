@@ -30,6 +30,7 @@ import wechat_article_generator
 from scripts.create_article_draft import validate_package
 from scripts.select_article_images import search_candidates, apply_selections
 from scripts.render_article_package import render_package
+from scripts.render_article_long_image import render_long_image
 from xhs_cards import normalize_pages, pages_from_content, render_carousel
 from xhs_quality_gate import check_before_render, check_rendered
 from xhs_photo_match import pick_photos
@@ -146,18 +147,13 @@ async def lifespan(app: FastAPI):
     seeded_sources = hotspot_fetcher.seed_default_sources(admin_user["id"] if admin_user else None)
     if seeded_sources:
         logger.info("已补齐 %s 个南非官方热点信源", seeded_sources)
-    # Prefer MiMo for chat/planning; DashScope is optional legacy only.
+    # TTS 单轨：旁白合成仅走 MiMo。
     os.environ.setdefault("TTS_PROVIDER", "mimo")
-    os.environ.setdefault("TTS_FALLBACK_ENABLED", "0")
     mimo_key = os.environ.get("MIMO_API_KEY", "")
     if mimo_key:
         logger.info("MiMo API key 已加载（chat/planner/vision/tts）")
     else:
         logger.warning("未配置 MIMO_API_KEY：聊天与规划将不可用")
-    key = os.environ.get("DASHSCOPE_API_KEY", "")
-    if key:
-        ai_engine.set_api_key(key)
-        logger.info("百炼 API key 已加载（仅作可选遗留能力）")
     # 清理卡住的渲染任务（启动时自动清理超时任务）
     video_renderer.cleanup_stale_jobs()
     recovered_asset_jobs = db.recover_interrupted_asset_processing_jobs()
@@ -681,8 +677,31 @@ async def save_article_images(article_id: int, body: dict, user=Depends(get_curr
 @app.post("/api/articles/{article_id}/render")
 async def render_article(article_id: int, body: dict = None, user=Depends(get_current_user)):
     _article_for_user(article_id, user)
-    force = bool((body or {}).get("force"))
-    result = render_package(article_id, force=force)
+    body = body or {}
+    force = bool(body.get("force"))
+    fmt = str(body.get("format") or "md").strip().lower()
+    try:
+        width = int(body.get("width") or 750)
+    except (TypeError, ValueError):
+        return {"status": "error", "error": "width 必须是整数"}
+    if fmt not in ("md", "longimg", "both"):
+        return {"status": "error", "error": f"未知渲染格式 {fmt}（可选 md/longimg/both）"}
+    if not (600 <= width <= 1200):
+        return {"status": "error", "error": f"长图宽度需在 600–1200 之间，当前 {width}"}
+    if fmt == "md":
+        result = render_package(article_id, force=force)
+    elif fmt == "longimg":
+        result = render_long_image(article_id, width=width, force=force)
+    else:  # both
+        md_result = render_package(article_id, force=force)
+        if md_result["status"] != "ok":
+            result = md_result
+        else:
+            li_result = render_long_image(article_id, width=width, force=force)
+            if li_result["status"] != "ok":
+                result = li_result
+            else:
+                result = {**md_result, **li_result, "formats": ["md", "longimg"]}
     db.add_audit_log(user["id"], user["username"], "render_article", target=str(article_id),
                      detail=result.get("status"))
     return result
@@ -1670,7 +1689,7 @@ def _scene_voiceover_max_chars(scene: dict) -> int | None:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)
     except (TypeError, ValueError):
         return None
-    # Qwen 的实际语速会因专有名词与停顿显著波动。正式规划先按约 3.6
+    # TTS 的实际语速会因专有名词与停顿显著波动。正式规划先按约 3.6
     # 字/秒约束，渲染器仍会用实测音频作最后一次本地收紧，不能把短 Hook
     # 交给一次很长的旁白再寄望于循环或明显加速。
     return max(8, int(duration_seconds * 3.6)) if duration_seconds else None
@@ -1684,7 +1703,7 @@ def _scene_voiceover_min_chars(scene: dict) -> int | None:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)
     except (TypeError, ValueError):
         return None
-    # Qwen TTS is normally much faster than the minimum pacing requirement.
+    # TTS is normally much faster than the minimum pacing requirement.
     # Five Chinese characters can cover the shortest three-second beat with a
     # natural pause.  Requiring a sixth character repeatedly made the repair
     # model append stock phrases such as "请核对订单信息".
@@ -3593,7 +3612,7 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
             intake_decision = _normalized_hotspot_intake_decision(item.get("intake_decision_json"))
             expected_hook = str(intake_decision.get("expected_hook") or "").strip()
             source_context = "\n".join(value for value in (
-                f"本轮 Qwen 已获准的画面范围：{expected_hook}" if expected_hook else "",
+                f"本轮已获准的画面范围：{expected_hook}" if expected_hook else "",
                 f"本轮物流切入问题：{str(intake_decision.get('logistics_question') or '').strip()}" if expected_hook else "",
                 f"Buffalo RAG 仅支持的可见服务边界：{str(intake_decision.get('service_fit') or '').strip()}" if expected_hook else "",
                 str(item.get("intake_title") or "").strip() if not expected_hook else "",
@@ -4336,12 +4355,8 @@ async def delete_media_asset(asset_id: int, user=Depends(require_role(UserRole.A
 @app.get("/api/media/capabilities")
 async def media_capabilities(user=Depends(get_current_user)):
     result = media_assets.capabilities()
-    result["dashscope_key"] = bool(os.environ.get("DASHSCOPE_API_KEY"))
     result["mimo_api_key"] = bool(os.environ.get("MIMO_API_KEY"))
     result["tts_provider"] = os.environ.get("TTS_PROVIDER", "mimo")
-    result["tts_fallback_provider"] = os.environ.get("TTS_FALLBACK_PROVIDER", "qwen")
-    # Qwen quota is exhausted in production; do not advertise fallback by default.
-    result["tts_fallback_enabled"] = os.environ.get("TTS_FALLBACK_ENABLED", "0") != "0"
     result["mimo_tts_model"] = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
     result["mimo_tts_voice"] = os.environ.get("MIMO_TTS_VOICE", video_renderer.MIMO_TTS_VOICE)
     result["chat_model"] = (model_router.get_route("chat_text") or {}).get("model") or "mimo-v2.5"
@@ -4349,11 +4364,10 @@ async def media_capabilities(user=Depends(get_current_user)):
     result["vision_model"] = (model_router.get_route("vision_tagger") or {}).get("model") or "mimo-v2.5"
     # Ready for formal video: FFmpeg + MiMo TTS key.
     media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
-    tts_ok = bool(result["mimo_api_key"] or (result["tts_fallback_enabled"] and result["dashscope_key"]))
+    tts_ok = bool(result["mimo_api_key"])
     result["ready"] = media_ok and tts_ok
     result["voice_options"] = video_renderer.tts_voice_options(
         mimo_available=result["mimo_api_key"],
-        qwen_available=bool(result["tts_fallback_enabled"] and result["dashscope_key"]),
     )
     result["voices"] = [item["id"] for item in result["voice_options"]]
     result["tts_preview_supported"] = True
