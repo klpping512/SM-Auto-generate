@@ -229,6 +229,15 @@ function renderDetail() {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-header">③ 渲染素材包</div>
             <div class="card-body">
+                <div style="margin-bottom:10px;font-size:13px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+                    <span>格式：</span>
+                    <label style="display:inline-flex;gap:4px;align-items:center;"><input type="radio" name="renderFormat" value="md"> 长图文 Markdown</label>
+                    <label style="display:inline-flex;gap:4px;align-items:center;"><input type="radio" name="renderFormat" value="longimg"> 长图 PNG</label>
+                    <label style="display:inline-flex;gap:4px;align-items:center;"><input type="radio" name="renderFormat" value="both" checked> 两种都出</label>
+                    <span style="display:inline-flex;gap:4px;align-items:center;">宽度
+                        <input class="input" id="renderWidth" type="number" value="750" min="600" max="1200" style="width:88px;padding:2px 6px;font-size:12px;"/>
+                    </span>
+                </div>
                 <button class="btn btn-primary btn-sm" onclick="renderArticle(${current.id})">渲染素材包</button>
                 <div id="renderResult" style="margin-top:10px;"></div>
             </div>
@@ -364,10 +373,13 @@ async function renderArticle(articleId) {
     btn.textContent = '渲染中…';
     resultBox.innerHTML = '';
     const doRender = async (force) => {
+        const formatEl = document.querySelector('input[name="renderFormat"]:checked');
+        const format = formatEl ? formatEl.value : 'both';
+        const width = Number((document.getElementById('renderWidth') || {}).value || 750);
         const resp = await apiFetch(`/api/articles/${articleId}/render`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ force }),
+            body: JSON.stringify({ force, format, width }),
         });
         return resp.json();
     };
@@ -398,6 +410,9 @@ async function renderArticle(articleId) {
                 <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/article.md" target="_blank">打开 article.md</a>
                 <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/meta.json" target="_blank">打开 meta.json</a>
                 <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/cover.jpg" target="_blank">查看封面</a>
+                ${result.long_image_file
+                    ? `<a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/${result.long_image_file}" target="_blank">打开长图</a>`
+                    : ''}
             </div>`;
         await openDetail(articleId);
     } catch (error) {

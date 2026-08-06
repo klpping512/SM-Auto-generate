@@ -58,8 +58,14 @@ def _make_client(tmp_path, monkeypatch):
     # render/选图产出目录改到临时目录，避免污染真实 data/articles/
     import scripts.render_article_package as render_mod
     import scripts.select_article_images as select_mod
+    import scripts.render_article_long_image as longimg_mod
     monkeypatch.setattr(render_mod, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(select_mod, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(select_mod, "STATIC_DIR", tmp_path / "static")
+    monkeypatch.setattr(longimg_mod, "PROJECT_ROOT", tmp_path)
+    # 长图字体 mock 成默认字体，避免依赖机器字体路径（跨平台稳定）
+    from PIL import ImageFont
+    monkeypatch.setattr(longimg_mod, "get_font", lambda size, bold=False: ImageFont.load_default())
     # /article-assets 静态挂载改指临时目录（新版 StaticFiles 用 init 时算出的 all_directories）
     for route in app_module.app.routes:
         if getattr(route, "name", "") == "article-assets":
@@ -260,3 +266,81 @@ def test_article_not_found_404(api_ctx):
     client, headers = api_ctx["client"], api_ctx["headers"]
     resp = client.get("/api/articles/999999", headers=headers)
     assert resp.status_code == 404
+
+
+# ==================== 长图渲染（format/width） ====================
+
+def _prepare_rendered_article(api_ctx, tmp_path):
+    """建文章 + 生成内容 + 封面选择，返回 article_id（长图渲染前置条件齐备）。"""
+    fake_dir = tmp_path / "static" / "test-assets"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    (fake_dir / "img-1.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO assets (name, filepath, file_type, category, size, sha256, source, status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("测试图", "test-assets/img-1.jpg", "image", "warehouse", 10,
+             "sha256-longimg-api-1", "local_directory", "active"),
+        )
+        asset_id = cur.lastrowid
+
+    article_id = api_ctx["make"]()
+    db.update_article(article_id, generated_content_json=json.dumps(FAKE_GENERATED, ensure_ascii=False))
+    client, headers = api_ctx["client"], api_ctx["headers"]
+    resp = client.post(f"/api/articles/{article_id}/images", headers=headers,
+                       json={"selections": {"cover": {"asset_id": asset_id}, "section-01": None}})
+    assert resp.status_code == 200 and resp.json()["errors"] == []
+    return article_id
+
+
+def test_render_longimg_api_ok(api_ctx, tmp_path):
+    article_id = _prepare_rendered_article(api_ctx, tmp_path)
+    client, headers = api_ctx["client"], api_ctx["headers"]
+
+    resp = client.post(f"/api/articles/{article_id}/render", headers=headers,
+                       json={"format": "longimg", "width": 750, "force": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok", body
+    assert body["long_image_file"] == "long-image-750.png"
+    assert "12 周" in body["unresolved"]
+
+    r = client.get("/article-assets/api-test-article/long-image-750.png")
+    assert r.status_code == 200
+    assert r.content[:4] == b"\x89PNG"
+
+
+def test_render_both_formats(api_ctx, tmp_path):
+    article_id = _prepare_rendered_article(api_ctx, tmp_path)
+    client, headers = api_ctx["client"], api_ctx["headers"]
+
+    resp = client.post(f"/api/articles/{article_id}/render", headers=headers,
+                       json={"format": "both", "width": 750, "force": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok", body
+    assert body["formats"] == ["md", "longimg"]
+    assert (tmp_path / "data" / "articles" / "api-test-article" / "article.md").is_file()
+    assert (tmp_path / "data" / "articles" / "api-test-article" / "long-image-750.png").is_file()
+
+
+def test_render_unknown_format(api_ctx, tmp_path):
+    article_id = _prepare_rendered_article(api_ctx, tmp_path)
+    client, headers = api_ctx["client"], api_ctx["headers"]
+
+    resp = client.post(f"/api/articles/{article_id}/render", headers=headers,
+                       json={"format": "html"})
+    body = resp.json()
+    assert body["status"] == "error"
+    assert "未知渲染格式" in body["error"]
+
+
+def test_render_bad_width(api_ctx, tmp_path):
+    article_id = _prepare_rendered_article(api_ctx, tmp_path)
+    client, headers = api_ctx["client"], api_ctx["headers"]
+
+    resp = client.post(f"/api/articles/{article_id}/render", headers=headers,
+                       json={"format": "longimg", "width": 500})
+    body = resp.json()
+    assert body["status"] == "error"
+    assert "600" in body["error"]
