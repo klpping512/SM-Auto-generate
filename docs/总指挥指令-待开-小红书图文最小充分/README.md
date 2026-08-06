@@ -14,7 +14,7 @@
 | 0 | P0 | 发布可观测 + 失败 dump | 0.5–1 天 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，两处备注见下） |
 | 1 | P1 | 渲染前/后门禁 + 标题三层规则 | 1–2 天 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
 | 2 | P2 | SEO 词库 / 分类配图 / 差异化守卫 | ~1 周 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
-| 3 | P3 | 人工台账 + 周复盘导出 | 运营为主 | 已开（2026-08-06） |
+| 3 | P3 | 人工台账 + 周复盘导出 | 运营为主 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
 
 ---
 
@@ -84,7 +84,12 @@
 
 ## 第 3 批 · 台账与复盘
 
-**状态：✅ 已执行（2026-08-06）。** 执行指令见 [第3批-发布台账与周复盘导出-Cursor执行指令.md](第3批-发布台账与周复盘导出-Cursor执行指令.md)。
+**状态：✅ 已验收（2026-08-06）。** 执行指令见 [第3批-发布台账与周复盘导出-Cursor执行指令.md](第3批-发布台账与周复盘导出-Cursor执行指令.md)。
+
+**验收备注（2026-08-06）：** 改动 A-E 逐条翻码核对 + harness 25/25 断言通过；铁律/红线全绿（台账不读入门禁、无新增诊断表、scheduler 只加预建、批次 2 两发现仍排除）。一处范围串入备注见下。
+
+1. **范围串入（非阻塞）**：`/api/xhs/ledger*` 五个端点 + `_build_xhs_ledger_csv` + `_xhs_ledger_owner_filter` 落在 `b4c9851`（公众号工作台提交）里，不在批次 3 提交 `a9c3dbc` 内。功能与行为正确，仅提交归属不符；根因是共享工作区并行会话（公众号线）把 xhs 台账 API 一并带进其提交。同批次 0 的 assets.deprecated 一类——记录在案，推送/回滚按「功能」而非「提交」追溯。
+2. **手动发布路径确认非第四触点**：`_run_manual_publish` 只把会话置 `ready`/`closed`，不落 `publish_log` 的 `published`，台账无需预建。
 
 **已落地：**
 1. 单表 `xhs_ledger` + 录入/列表/候选/导出 API
@@ -92,6 +97,23 @@
 3. `static/ledger.html` + 导航「发布台账」；周复盘 CSV 五区块 utf-8-sig
 
 **明确不做：** 自动 RPA 扒数；台账读入门禁；顺手修批次 2 scheduler/时区。
+
+---
+
+## 整体修复单 · 批次 2 两发现（最小收尾）
+
+**状态：✅ 已执行（2026-08-06）。** 执行指令见 [整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md](整体修复单-批次2发现scheduler接守卫与guard时区-Cursor执行指令.md)。
+
+**已落地：**
+1. **R2** guard `_today_local` → SQL `date('now')`（UTC，与 publish_log 同时钟）
+2. **R1** `check_scheduled_publish` 接 diff 守卫，只拦不排程、语义对齐 app.py
+
+批次 0-3 全部验收完毕后开的最小收尾，只修批次 2 验收记录的两处覆盖/口径问题，不含任何新功能：
+
+1. **R1 scheduler 接 diff 守卫（覆盖缺口）**：`check_scheduled_publish`（定时发布）发布小红书时接入 `xhs_diff_guard.check`，拦截语义与 app.py `_enforce_xhs_diff_guard` 完全对齐——只拦不排程、不消耗重试、`error_msg` 写人话原因。
+2. **R2 guard 统一 UTC 口径**：`xhs_diff_guard._today_local()`（本地 `datetime.now()`，UTC+8）替换为 SQL `date('now')`，与 `count_published_today` / `publish_log.published_at`（UTC `datetime('now')`）同一时钟对齐，消除本地 00:00–08:00 窗口单号日发超限漏洞。
+
+**建议执行顺序**：R2 先行（口径统一）、R1 随后（守卫语义不变），两处独立提交、独立回滚。铁律：零 schema 改动、不改守卫语义、不碰 ratelimit/台账/asset_taxonomy。
 
 ---
 
@@ -108,6 +130,8 @@
 
 | 时间 | 说明 |
 |---|---|
+| 2026-08-06 | 整体修复单已执行：R2 `d864c6b`（UTC date('now')）→ R1 `c7296cd`（scheduler 接守卫）；定向 21 passed |
+| 2026-08-06 | 整体修复单已开（批次 2 两发现最小收尾）：R1 `check_scheduled_publish` 接 diff 守卫（只拦不排程、语义对齐 app.py）+ R2 guard `_today_local()` 统一 UTC `date('now')`；零 schema、两处独立提交/回滚；待执行（批次 0-3 已全部验收） |
 | 2026-08-06 | 对抗优化设计落地时立索引；代码未执行 |
 | 2026-08-06 | 第 0 批已执行：PublishResult.category + attachment_missing + publish_log 扩列；待总指挥验收 |
 | 2026-08-06 | 第 0 批验收通过：六项改动逐条核对 + harness 26/26；备注 assets.deprecated 范围串入、scheduler 合理扩展 |
@@ -116,6 +140,7 @@
 | 2026-08-06 | 第 2 批已执行（B→C→A）：xhs_photo_match + xhs_diff_guard + xhs_seo_lexicon 种子/seo_meta；运营四层矩阵待校准 |
 | 2026-08-06 | 第 2 批验收通过：改动 A-D 逐条翻码 + harness 30/30 + 铁律全绿；备注 scheduler 定时发布未接 diff guard、guard 本地时区 vs published_at UTC 口径不一致（均非阻塞，待小修单） |
 | 2026-08-06 | 第 3 批已执行：xhs_ledger + 三处预建（含 scheduler）+ ledger.html + 周复盘 CSV；批次 2 两发现仍排除 |
+| 2026-08-06 | 第 3 批验收通过：改动 A-E 逐条翻码 + harness 25/25 + 铁律全绿；备注 ledger API 范围串入 b4c9851（公众号提交）、手动发布路径非第四触点 |
 | 2026-08-06 | 第 3 批已开：xhs_ledger 单表 + 人工录入 API + 发布成功三处触点自动预建 + 周复盘 CSV 导出（概览/Top3/Bottom3/封面分布/关键词表现）；台账日期一律 UTC 口径、不读入门禁 |
 | 2026-08-06 | 第 2 批已开（框架）：xhs_photo_match 分类配图 + xhs_diff_guard 差异化守卫（零表结构新增）+ xhs_seo_lexicon 词库；2A 依赖运营词矩阵，建议 B→C→A |
 | 2026-08-06 | 第 1 批已执行：门禁模块 + ai_engine 有界重试 + /api/generate|/api/xhs/render 接线；待总指挥验收 |
