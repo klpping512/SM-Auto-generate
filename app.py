@@ -1391,9 +1391,21 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
         str(evidence.get("what_happened") or ""), str(evidence.get("logistics_question") or ""),
     )).casefold()
     out_of_scope = (
+        # 原有基线
         "市政", "环卫", "垃圾", "污水", "供水", "管道破裂", "公园", "野生动物",
         "治安", "犯罪", "政治", "委员会", "证词", "娱乐",
         "municipal", "refuse", "waste", "sewage", "wildlife", "testimony", "commission",
+        # 2026-08-06 扩词：听证/法庭/选举/体育/社会等 35 条漏网（门禁只挡委员会/证词/政治）
+        "听证", "法庭", "法院", "出庭", "受审", "庭审", "作证",
+        "议员", "部长", "总统", "总理", "选举", "大选", "选情", "政客",
+        "峰会", "部长级", "非盟",
+        "足球", "联赛", "世界杯", "球队", "女足", "决赛", "赛事", "橄榄球", "板球", "网球",
+        "教育", "学校", "学生", "校园",
+        "医疗", "医院", "手术", "艾滋", "hiv", "器官", "捐献", "疫苗",
+        "庆典", "周年", "颁奖", "发布会", "品牌",
+        "监狱", "囚犯", "杀手", "遇害", "谋杀",
+        "难民", "移民",
+        "住宅火灾",
     )
     # A legacy Hook can have a real oil-price frame but still carry an old,
     # unsupported bridge such as “South African transport costs have already

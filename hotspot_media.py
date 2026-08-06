@@ -34,6 +34,22 @@ PREFILTER_TITLE_BLOCKLIST = (
 )
 PREFILTER_MIN_SEC = 8
 PREFILTER_MAX_SEC = 3600
+# 2026-08-06 回纳现场源新增：拦频道内噪音题材（体育/选举/法庭/娱乐圈/演播室谈话）。
+# 铁律：宁放勿杀——绝不拦公路/卡车/边境/抗议/天气/港口等现场实拍词（那是 SA Now/SA Today 的金子）。
+PREFILTER_NOISE_TOPIC_BLOCKLIST = (
+    # 体育赛事
+    "world cup", "afcon", "psl", "matchday", "rugby", "cricket", "netball",
+    "tennis", "tournament", "决赛", "半决赛", "夺冠", "比分",
+    # 选举/政治（现场抗议/游行除外）
+    "election", "votes", "polling", "candidate", "manifesto", "ballot",
+    "大选", "选情", "投票站", "竞选", "计票",
+    # 法庭/听证
+    "trial", "court", "hearing", "magistrate", "testimony", "听证", "庭审", "出庭", "受审",
+    # 娱乐圈/颁奖
+    "celebrity", "awards", "premiere", "red carpet", "红毯", "颁奖",
+    # 演播室/播客（无现场 b-roll）
+    "podcast", "talk show",
+)
 
 
 def prefilter_mother_candidate(item: dict) -> tuple[bool, str]:
@@ -45,6 +61,9 @@ def prefilter_mother_candidate(item: dict) -> tuple[bool, str]:
     for token in PREFILTER_TITLE_BLOCKLIST:
         if token.casefold() in title:
             return False, f"title_blocklist:{token}"
+    for token in PREFILTER_NOISE_TOPIC_BLOCKLIST:
+        if token.casefold() in title:
+            return False, f"noise_topic_blocklist:{token}"
     duration = float(item.get("duration_seconds") or 0)
     if duration > 0 and duration < PREFILTER_MIN_SEC:
         return False, f"too_short:{duration:.1f}s"
