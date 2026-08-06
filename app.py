@@ -629,14 +629,23 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
         db.update_queue_status(item_id, "published")
         db.add_publish_log(item_id, item["platform"], item["title"], "published")
     else:
+        detail = publisher.failure_status_detail(result)
+        shot = publisher.debug_screenshot_from_error(result.get("error"))
+        category = result.get("category")
         retry_count = db.get_retry_count(item_id)
         if retry_count < 3:
             db.increment_retry_count(item_id)
-            db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3): {result.get('error', '')}")
-            db.add_publish_log(item_id, item["platform"], item["title"], "retry", result.get("error"))
+            db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3): {detail}")
+            db.add_publish_log(
+                item_id, item["platform"], item["title"], "retry", result.get("error"),
+                failure_category=category, debug_screenshot=shot,
+            )
         else:
-            db.update_queue_status(item_id, "failed", result.get("error", "Unknown error"))
-            db.add_publish_log(item_id, item["platform"], item["title"], "failed", result.get("error"))
+            db.update_queue_status(item_id, "failed", detail)
+            db.add_publish_log(
+                item_id, item["platform"], item["title"], "failed", result.get("error"),
+                failure_category=category, debug_screenshot=shot,
+            )
 
     db.add_audit_log(user["id"], user["username"], "publish", target=f"{item_id}:{item['platform']}")
     return result
@@ -677,13 +686,23 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
             db.update_queue_status(item_id, "published")
             db.add_publish_log(item_id, item["platform"], item["title"], "published")
         else:
+            detail = publisher.failure_status_detail(result)
+            shot = publisher.debug_screenshot_from_error(result.get("error"))
+            category = result.get("category")
             retry_count = db.get_retry_count(item_id)
             if retry_count < 3:
                 db.increment_retry_count(item_id)
-                db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3)")
+                db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3): {detail}")
+                db.add_publish_log(
+                    item_id, item["platform"], item["title"], "retry", result.get("error"),
+                    failure_category=category, debug_screenshot=shot,
+                )
             else:
-                db.update_queue_status(item_id, "failed", result.get("error"))
-                db.add_publish_log(item_id, item["platform"], item["title"], "failed", result.get("error"))
+                db.update_queue_status(item_id, "failed", detail)
+                db.add_publish_log(
+                    item_id, item["platform"], item["title"], "failed", result.get("error"),
+                    failure_category=category, debug_screenshot=shot,
+                )
 
         results.append({"item_id": item_id, **result})
 
@@ -705,9 +724,26 @@ async def _run_manual_publish(item: dict, session_id: str):
         return
     attachments = _json.loads(item.get("attachments") or "[]")
     attachments = _repair_xhs_queue_media(item, attachments)
-    images = publisher._resolve_uploaded_media([a["path"] for a in attachments if a.get("type") == "image"])
+    images, missing_images = publisher._resolve_uploaded_media(
+        [a["path"] for a in attachments if a.get("type") == "image"]
+    )
+    if missing_images:
+        manual_publish_sessions[session_id].update({
+            "status": "error",
+            "error": f"attachment_missing: 附件缺失: {missing_images}",
+        })
+        return
     video_path = next((a["path"] for a in attachments if a.get("type") == "video"), None)
-    resolved_video = (publisher._resolve_uploaded_media([video_path]) or [None])[0] if video_path else None
+    resolved_video = None
+    if video_path:
+        resolved_videos, missing_videos = publisher._resolve_uploaded_media([video_path])
+        if missing_videos:
+            manual_publish_sessions[session_id].update({
+                "status": "error",
+                "error": f"attachment_missing: 附件缺失: {missing_videos}",
+            })
+            return
+        resolved_video = resolved_videos[0] if resolved_videos else None
     if item["platform"] == "xiaohongshu" and not images:
         manual_publish_sessions[session_id].update({"status": "error", "error": "小红书必须配图"})
         return

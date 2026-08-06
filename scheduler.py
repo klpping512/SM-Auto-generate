@@ -563,15 +563,24 @@ async def check_scheduled_publish():
             logger.info("定时发布成功: id=%d", item_id)
             await send_success_notify(item)
         else:
+            detail = publisher.failure_status_detail(result)
+            shot = publisher.debug_screenshot_from_error(result.get("error"))
+            category = result.get("category")
             retry_count = db.get_retry_count(item_id)
             if retry_count < 3:
                 db.increment_retry_count(item_id)
-                db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3): {result.get('error', '')}")
-                db.add_publish_log(item_id, platform, item["title"], "retry", result.get("error"))
+                db.update_queue_status(item_id, "queued", f"重试中 ({retry_count + 1}/3): {detail}")
+                db.add_publish_log(
+                    item_id, platform, item["title"], "retry", result.get("error"),
+                    failure_category=category, debug_screenshot=shot,
+                )
                 logger.warning("定时发布失败，将重试: id=%d, retry=%d", item_id, retry_count + 1)
             else:
-                db.update_queue_status(item_id, "failed", result.get("error", "Unknown error"))
-                db.add_publish_log(item_id, platform, item["title"], "failed", result.get("error"))
+                db.update_queue_status(item_id, "failed", detail)
+                db.add_publish_log(
+                    item_id, platform, item["title"], "failed", result.get("error"),
+                    failure_category=category, debug_screenshot=shot,
+                )
                 logger.error("定时发布最终失败: id=%d", item_id)
                 # 发送告警
                 _maybe_mark_expired(platform, result.get("error", ""), owner_id=item.get("created_by"))

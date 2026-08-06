@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -10,11 +11,19 @@ import publish_readiness
 
 logger = logging.getLogger(__name__)
 UPLOAD_ROOT = (Path(__file__).parent / "static" / "uploads").resolve()
+_DEBUG_SHOT_RE = re.compile(r"/static/debug/\S+\.png")
 
 
-def _resolve_uploaded_media(paths: list[str] | None) -> list[str]:
-    """把数据库中的静态相对路径转换为发布工具所需的绝对路径。"""
-    resolved = []
+def _resolve_uploaded_media(paths: list[str] | None) -> tuple[list[str], list[str]]:
+    """把数据库中的静态相对路径转换为发布工具所需的绝对路径。
+
+    返回 (resolved, missing)：
+    - resolved：uploads 目录内且磁盘存在的绝对路径
+    - missing：本应在 uploads 内但磁盘找不到的原始路径（显式暴露，避免被误报成「没配图」）
+    uploads 目录外的路径仍忽略（安全语义不变），不计入 missing。
+    """
+    resolved: list[str] = []
+    missing: list[str] = []
     for raw in paths or []:
         candidate = Path(raw)
         if not candidate.is_absolute():
@@ -28,8 +37,24 @@ def _resolve_uploaded_media(paths: list[str] | None) -> list[str]:
         if candidate.is_file():
             resolved.append(str(candidate))
         else:
-            logger.warning("忽略不存在的附件: %s", raw)
-    return resolved
+            logger.warning("附件缺失: %s", raw)
+            missing.append(str(raw))
+    return resolved, missing
+
+
+def debug_screenshot_from_error(error: str | None) -> str | None:
+    """从 adapter error 文案中提取 /static/debug/*.png 现场路径。"""
+    if not error:
+        return None
+    match = _DEBUG_SHOT_RE.search(error)
+    return match.group(0) if match else None
+
+
+def failure_status_detail(result: dict) -> str:
+    """queue status / 日志用：带 category 前缀的可读失败详情。"""
+    error = result.get("error") or ""
+    category = result.get("category")
+    return f"{category}: {error}" if category else error
 
 # huimei binary path: 优先环境变量，其次 PATH 查找，兜底直接用命令名
 HUIMEI_BIN = os.environ.get("HUIMEI_BIN") or shutil.which("huimei") or "huimei"
@@ -161,8 +186,25 @@ async def dispatch(
     adapter = get_adapter(platform)
     if adapter is None:
         return {"success": False, "platform": platform, "error": f"无适配器: '{platform}'"}
-    resolved_images = _resolve_uploaded_media(images)
-    resolved_video = (_resolve_uploaded_media([video]) or [None])[0] if video else None
+    resolved_images, missing_images = _resolve_uploaded_media(images)
+    if images and missing_images:
+        return {
+            "success": False,
+            "platform": platform,
+            "category": "attachment_missing",
+            "error": f"附件缺失: {missing_images}",
+        }
+    resolved_video = None
+    if video:
+        resolved_videos, missing_videos = _resolve_uploaded_media([video])
+        if missing_videos:
+            return {
+                "success": False,
+                "platform": platform,
+                "category": "attachment_missing",
+                "error": f"附件缺失: {missing_videos}",
+            }
+        resolved_video = resolved_videos[0] if resolved_videos else None
     if account is None:
         # 选取凭据完整的账号：优先 active，其次任何有有效凭据的账号。
         # 不因 status=='expired' 直接排除——该状态可能被上次探测误标，真实有效性由发布时判断。

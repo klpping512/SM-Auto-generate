@@ -9,6 +9,9 @@ class PublishResult:
     platform: str
     error: str | None = None
     output: str | None = None
+    # 结构化失败分类：login_expired/no_images/timeout/selector_failed/
+    # page_not_ready/attachment_missing/no_account/unknown；成功或旧适配器为 None
+    category: str | None = None
 
     def to_dict(self) -> dict:
         d = {"success": self.success, "platform": self.platform}
@@ -16,6 +19,8 @@ class PublishResult:
             d["error"] = self.error
         if self.output is not None:
             d["output"] = self.output
+        if self.category is not None:
+            d["category"] = self.category
         return d
 
 

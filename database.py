@@ -132,6 +132,8 @@ def init_db():
                 title TEXT,
                 status TEXT,
                 error_msg TEXT,
+                failure_category TEXT,
+                debug_screenshot TEXT,
                 published_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (queue_id) REFERENCES queue(id)
             );
@@ -859,6 +861,8 @@ def init_db():
         _ensure_column(conn, "queue", "review_note", "TEXT")
         _ensure_column(conn, "queue", "reviewed_at", "TEXT")
         _ensure_column(conn, "queue", "retry_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "publish_log", "failure_category", "TEXT")
+        _ensure_column(conn, "publish_log", "debug_screenshot", "TEXT")
         _ensure_column(conn, "accounts", "credentials", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "accounts", "owner_id", "INTEGER")
         _ensure_column(conn, "model_call_cache", "last_accessed_at", "TEXT")
@@ -942,6 +946,7 @@ def init_db():
         )
         _ensure_column(conn, "video_render_jobs", "clips", "TEXT DEFAULT '[]'")
         _ensure_column(conn, "video_render_jobs", "quality_report", "TEXT DEFAULT '{}'")
+        _ensure_column(conn, "assets", "deprecated", "INTEGER DEFAULT 0")
         _ensure_column(conn, "video_generation_jobs", "output_pinned_at", "TEXT")
         _ensure_column(conn, "video_generation_jobs", "output_purged_at", "TEXT")
         # P3-A 人在环重生成血缘：resume 新建 job 指向前序 job，质检护栏据此回灌 history
@@ -1220,13 +1225,21 @@ def _parse_queue_row(row) -> dict:
 
 # ==================== Publish Log ====================
 
-def add_publish_log(queue_id: int, platform: str, title: str, status: str, error_msg: str = None):
+def add_publish_log(
+    queue_id: int, platform: str, title: str, status: str, error_msg: str = None,
+    failure_category: str | None = None, debug_screenshot: str | None = None,
+):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO publish_log (queue_id, platform, title, status, error_msg) VALUES (?,?,?,?,?)",
-            (queue_id, platform, title, status, error_msg),
+            "INSERT INTO publish_log "
+            "(queue_id, platform, title, status, error_msg, failure_category, debug_screenshot) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (queue_id, platform, title, status, error_msg, failure_category, debug_screenshot),
         )
-    logger.info("发布日志: queue_id=%d, platform=%s, status=%s", queue_id, platform, status)
+    logger.info(
+        "发布日志: queue_id=%d, platform=%s, status=%s, category=%s",
+        queue_id, platform, status, failure_category,
+    )
 
 
 def get_publish_logs(limit: int = 50, created_by: int | None = None):
@@ -3975,6 +3988,7 @@ def list_asset_segments(asset_id: int | None = None, status: str = "active", lim
                         a.category AS asset_category,
                         a.rights_status AS asset_rights_status,a.source_url AS asset_source_url,
                         a.attribution AS asset_attribution,a.license AS asset_license,
+                        a.deprecated AS asset_deprecated,
                         a.event_at,a.created_at AS asset_created_at
                  FROM asset_segments s JOIN assets a ON a.id=s.asset_id WHERE 1=1"""
         params: list = []

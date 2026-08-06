@@ -10,6 +10,15 @@ logger = logging.getLogger(__name__)
 _DEBUG_DIR = Path(__file__).resolve().parents[1] / "static" / "debug"
 
 
+def _exception_category(exc: BaseException) -> str:
+    """超时类异常归 timeout，其余 unknown（不改 RPA 流程，仅分类）。"""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if "timeout" in name or "timeout" in text:
+        return "timeout"
+    return "unknown"
+
+
 class XiaohongshuAdapter(RpaAdapter):
     name = "xiaohongshu"
     CREDENTIAL_KIND = "cookie"
@@ -30,16 +39,22 @@ class XiaohongshuAdapter(RpaAdapter):
         tags=None, images=None, video=None, account=None,
     ) -> PublishResult:
         if not account:
-            return PublishResult(success=False, platform=self.name, error="缺少账号（无 cookie 可用）")
+            return PublishResult(
+                success=False, platform=self.name, category="no_account",
+                error="缺少账号（无 cookie 可用）",
+            )
         if not images:
-            return PublishResult(success=False, platform=self.name,
-                                 error="小红书必须配图，images 不能为空")
+            return PublishResult(
+                success=False, platform=self.name, category="no_images",
+                error="小红书必须配图，images 不能为空",
+            )
         # 在启动发布浏览器前先验证登录态，避免把 Cookie 或浏览器安装问题
         # 直接暴露为底层 Playwright 异常。
         if not await self.check_login(account):
             return PublishResult(
                 success=False,
                 platform=self.name,
+                category="login_expired",
                 error="cookie/登录失效或浏览器未就绪，请到「账号管理」重新扫码登录小红书后再发布",
             )
 
@@ -58,19 +73,25 @@ class XiaohongshuAdapter(RpaAdapter):
                     # 登录态判断以发布页为准（去掉脆弱的独立 check_login 预检）：
                     # cookie 失效时小红书会把发布页重定向到登录页。
                     if "login" in (page.url or "").lower():
-                        return PublishResult(success=False, platform=self.name,
-                                             error="cookie/登录失效，请到「账号管理」重新扫码登录小红书")
+                        return PublishResult(
+                            success=False, platform=self.name, category="login_expired",
+                            error="cookie/登录失效，请到「账号管理」重新扫码登录小红书",
+                        )
                     # 上传输入框是发布页就绪的可靠标志；文件 input 是隐藏元素，
                     # 必须用 state="attached"（存在即可），不能等 visible，否则永远超时。
                     try:
                         await page.wait_for_selector(self.UPLOAD_INPUT, state="attached", timeout=20000)
                     except Exception:
                         if "login" in (page.url or "").lower():
-                            return PublishResult(success=False, platform=self.name,
-                                                 error="cookie/登录失效，请重新扫码登录小红书")
+                            return PublishResult(
+                                success=False, platform=self.name, category="login_expired",
+                                error="cookie/登录失效，请重新扫码登录小红书",
+                            )
                         shot = await self._save_debug_shot(page, "xhs-no-upload")
-                        return PublishResult(success=False, platform=self.name,
-                                             error=f"发布页未就绪（未找到上传入口）。已截图: {shot}")
+                        return PublishResult(
+                            success=False, platform=self.name, category="page_not_ready",
+                            error=f"发布页未就绪（未找到上传入口）。已截图: {shot}",
+                        )
                     await page.set_input_files(self.UPLOAD_INPUT, images, timeout=30000)
                     # 图片需先上传完成，发布按钮才可点；等待标题输入框出现（发布表单就绪）后再多留缓冲。
                     await page.wait_for_selector(self.TITLE_INPUT, timeout=30000)
@@ -82,7 +103,7 @@ class XiaohongshuAdapter(RpaAdapter):
                     if not await self._click_submit(page):
                         shot = await self._save_debug_shot(page, "xhs-submit-fail")
                         return PublishResult(
-                            success=False, platform=self.name,
+                            success=False, platform=self.name, category="selector_failed",
                             error=f"未找到可点击的「发布」按钮（图片可能仍在上传或页面结构变化）。已截图: {shot}",
                         )
                     await page.wait_for_timeout(3000)
@@ -95,7 +116,10 @@ class XiaohongshuAdapter(RpaAdapter):
                     await browser.close()
         except Exception as e:
             logger.exception("小红书发布异常")
-            return PublishResult(success=False, platform=self.name, error=str(e))
+            return PublishResult(
+                success=False, platform=self.name,
+                category=_exception_category(e), error=str(e),
+            )
 
     async def fill_publish_form(self, page, *, title, content, tags=None, images=None, video=None):
         """打开发布页并自动填好（标题/正文/图片/话题），但**不点发布**，供人工复核后手动发布。
