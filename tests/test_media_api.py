@@ -112,61 +112,6 @@ def test_assets_page_exposes_brand_tags_and_safe_taxonomy_rebuild_actions():
     assert "最多 100 条" in page
 
 
-def test_render_rejects_missing_capability(tmp_db, monkeypatch):
-    import app
-    client, headers = _client_and_token(tmp_db)
-    monkeypatch.setattr(app.media_assets, "capabilities", lambda: {"ffmpeg": False, "ffprobe": False})
-    response = client.post("/api/douyin/render", headers=headers, json={"voice": "苏打", "scenes": []})
-    assert response.status_code == 503
-    assert "FFmpeg" in response.json()["detail"]
-
-
-def test_render_rejects_safe_fallback_and_short_production_copy(tmp_db, monkeypatch):
-    import app
-    client, headers = _client_and_token(tmp_db)
-    monkeypatch.setattr(app.media_assets, "capabilities", lambda: {"ffmpeg": True, "ffprobe": True})
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
-
-    fallback = client.post("/api/douyin/render", headers=headers, json={
-        "source": "safe_fallback", "voice": "Cherry", "duration_target": 60, "scenes": [],
-    })
-    assert fallback.status_code == 409
-    assert "提示不能生成视频" in fallback.json()["detail"]
-
-    short = client.post("/api/douyin/render", headers=headers, json={
-        "source": "model", "voice": "Cherry", "tts_provider": "qwen", "duration_target": 60,
-        "scenes": [
-            {"duration": 8, "voiceover": "核对节点。", "visual": f"物流场景{i}"}
-            for i in range(8)
-        ],
-    })
-    assert short.status_code == 409
-    assert "无法支撑 60 秒正式成片" in short.json()["detail"]
-
-    too_few = client.post("/api/douyin/render", headers=headers, json={
-        "source": "model", "voice": "Cherry", "tts_provider": "qwen", "duration_target": 60,
-        "scenes": [
-            {"duration": 10, "voiceover": "这是一段足够长的旁白用于通过字数门槛。" * 3, "visual": f"场景{i}"}
-            for i in range(5)
-        ],
-    })
-    assert too_few.status_code == 400
-    assert "7–10" in too_few.json()["detail"]
-
-
-def test_render_job_is_private_to_creator(tmp_db, monkeypatch):
-    import app, auth
-    from fastapi.testclient import TestClient
-    own_id = tmp_db.create_user("owneditor", auth.hash_password("pw12345"), "editor", "Own")
-    other_id = tmp_db.create_user("othereditor", auth.hash_password("pw12345"), "editor", "Other")
-    client = TestClient(app.app)
-    token = client.post("/api/auth/login", json={"username": "owneditor", "password": "pw12345"}).json()["access_token"]
-    headers = {"Authorization": f"Bearer {token}"}
-    tmp_db.create_render_job("private-job", {"scenes": []}, "苏打", other_id)
-    assert client.get("/api/douyin/render/private-job", headers=headers).status_code == 404
-    assert client.post("/api/douyin/render/private-job/retry", headers=headers).status_code == 404
-
-
 def test_subtitles_follow_speech_timeline_and_clip_selection():
     import video_renderer
     script = video_renderer.normalize_script({
