@@ -103,6 +103,28 @@ async def test_passing_scan_does_not_run_focus_review(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_dir_no_longer_produces_optimized_generation(tmp_path):
+    # 批 4 #17：optimize_prompt 死链已删，run_dir 不再产出 optimized-generation.json，
+    # manifest/返回值也不再有该键；每次质检因此省一次模型调用。
+    from video_quality.service import run_quality_mvp
+
+    async def evaluator(**kwargs):
+        return _report()
+
+    result = await run_quality_mvp(
+        VideoQualityInput(video_source=str(tmp_path / "sample.mp4")),
+        tmp_path / "run",
+        job_id="no-optimized-run",
+        preprocessor=lambda *args, **kwargs: _preprocessed(tmp_path),
+        evaluator=evaluator,
+    )
+
+    assert not (tmp_path / "run" / "optimized-generation.json").exists()
+    assert "optimized_generation" not in result["manifest"]["artifacts"]
+    assert "optimized_generation" not in result
+
+
+@pytest.mark.asyncio
 async def test_high_issue_runs_one_bounded_focus_review(tmp_path):
     from video_quality.service import run_quality_mvp
 
@@ -182,16 +204,3 @@ def test_regeneration_stops_when_score_declines_or_improves_less_than_three():
     assert declined["action"] == "manual_review"
     assert declined["reason"] == "score_declined"
     assert flat["reason"] == "no_meaningful_improvement"
-
-
-def test_prompt_optimizer_reuses_report_without_extra_model_call():
-    from video_quality.prompt_optimizer import optimize_prompt
-
-    optimized = optimize_prompt(
-        VideoQualityInput(video_source="/tmp/video.mp4", original_prompt="原提示词"),
-        _report(72, False, "high"),
-    )
-
-    assert optimized["required"] is True
-    assert optimized["revised_prompt"] == "修复闪烁"
-    assert optimized["manual_confirmation_required"] is True

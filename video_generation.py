@@ -1158,7 +1158,6 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 full_report["video_evaluation"] = evaluation_report
                 full_report["video_technical"] = result.get("technical_report") or {}
                 full_report["video_quality_artifacts"] = result["manifest"]["artifacts"]
-                full_report["optimized_generation"] = result["optimized_generation"]
                 full_report["regeneration_decision"] = result["regeneration_decision"]
                 semantic_decision = route_video_evaluation_quality(evaluation_report)
             except GenerationCanceled:

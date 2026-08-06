@@ -7,7 +7,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from .frame_extractor import extract_frames
-from .prompt_optimizer import optimize_prompt
 from .regeneration_controller import decide_regeneration
 from .schemas import VideoEvaluationReport, VideoQualityInput
 from .video_evaluator import evaluate_video
@@ -170,7 +169,6 @@ async def run_quality_mvp(
                 review_stage="focused",
             )
     final_report = _merge_reports(global_report, focused_report) if focused_report else global_report
-    optimized = optimize_prompt(request, final_report)
     decision = decide_regeneration(
         final_report,
         history=history or [],
@@ -195,7 +193,6 @@ async def run_quality_mvp(
         "focused_extraction": focus_meta,
     })
     write_json(run_dir / "problem-segments.json", problem_segments)
-    write_json(run_dir / "optimized-generation.json", optimized)
     manifest = {
         "job_id": identifier,
         "video_source": request.video_source,
@@ -216,7 +213,6 @@ async def run_quality_mvp(
             "transcript": "transcript.vtt",
             "evaluation": "evaluation.json",
             "problem_segments": "problem-segments.json",
-            "optimized_generation": "optimized-generation.json",
             "evaluation_stages": "evaluation-stages.json",
         },
     }
@@ -226,7 +222,6 @@ async def run_quality_mvp(
         "report": final_report.model_dump(),
         "technical_report": preprocessed.technical_report,
         "problem_segments": problem_segments,
-        "optimized_generation": optimized,
         "regeneration_decision": decision,
         "manifest": manifest,
     }

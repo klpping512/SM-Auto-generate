@@ -42,7 +42,6 @@ def test_admin_video_quality_endpoint_uses_static_allowlist(tmp_db, monkeypatch,
             "run_dir": str(output_dir),
             "report": {"overall_score": 88, "passed": True, "issues": []},
             "problem_segments": [],
-            "optimized_generation": {"required": False},
             "regeneration_decision": {"action": "none"},
             "manifest": {},
         }
