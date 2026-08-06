@@ -176,12 +176,25 @@ async def lifespan(app: FastAPI):
             _build_video_generation_handlers(STATIC_DIR),
         )
     )
+
+    async def _periodic_stale_cleanup():
+        while True:
+            try:
+                video_renderer.cleanup_stale_jobs()
+            except Exception:
+                logger.exception("周期清理渲染任务失败")
+            await asyncio.sleep(60)
+
+    stale_cleanup_task = asyncio.create_task(_periodic_stale_cleanup())
+
     logger.info("SA-LogiFlow v3.0 启动完成 | 数据库: %s", db.DB_PATH)
     try:
         yield
     finally:
         video_worker_stop.set()
         await video_worker_task
+        stale_cleanup_task.cancel()
+        await asyncio.gather(stale_cleanup_task, return_exceptions=True)
         sched.stop_scheduler()
         logger.info("SA-LogiFlow v3.0 关闭")
 

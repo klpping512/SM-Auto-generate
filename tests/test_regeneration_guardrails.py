@@ -184,6 +184,33 @@ def test_resume_records_lineage_and_history_is_replayed(tmp_db):
     assert [item["job_id"] for item in chain] == [prior_job["id"], resumed["id"]]
 
 
+def test_resume_hard_cap_rejects_beyond_two_regeneration_attempts(tmp_db):
+    client, headers = _client(tmp_db)
+    user = tmp_db.get_user_by_username("regen-owner")
+    project, job = _seed_needs_review_job(tmp_db, user["id"], score=70)
+    tmp_db.update_video_generation_job(job["id"], regen_attempt=2)
+
+    response = client.post(f"/api/video-generation/jobs/{job['id']}/resume", headers=headers, json={})
+    assert response.status_code == 409
+    assert "已达重生成上限" in response.json()["detail"]
+
+
+def test_retry_records_lineage_for_failed_jobs(tmp_db):
+    client, headers = _client(tmp_db)
+    user = tmp_db.get_user_by_username("regen-owner")
+    project, job = _seed_needs_review_job(tmp_db, user["id"], score=60)
+    tmp_db.update_video_generation_job(job["id"], status="failed", stage="preview_quality_check")
+
+    response = client.post(f"/api/video-generation/jobs/{job['id']}/retry", headers=headers)
+    assert response.status_code == 202, response.text
+    retried = response.json()["job"]
+
+    # 与 /resume 对齐：失败重试也补血缘，护栏据此判断连续失败历史
+    assert retried["id"] != job["id"]
+    assert retried["prior_job_id"] == job["id"]
+    assert retried["regen_attempt"] == 1
+
+
 def test_job_get_exposes_diagnostics_for_frontend(tmp_db):
     client, headers = _client(tmp_db)
     user = tmp_db.get_user_by_username("regen-owner")

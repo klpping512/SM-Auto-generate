@@ -3310,7 +3310,10 @@ def update_render_job(job_id: str, **fields):
 
 def get_unfinished_render_jobs() -> list[dict]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT id FROM video_render_jobs WHERE status IN ('pending','running')").fetchall()
+        # cleanup_stale_jobs 需要 status/created_at 判超时；只查 id 会让清理永远静默跳过
+        rows = conn.execute(
+            "SELECT id, status, created_at FROM video_render_jobs WHERE status IN ('pending','running')"
+        ).fetchall()
         return [dict(row) for row in rows]
 
 

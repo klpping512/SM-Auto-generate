@@ -134,14 +134,20 @@ python3 -c "import asyncio, publisher; print(asyncio.run(publisher.publish_via_h
         ) or retried
 ```
 
+**语义说明（重要，已核 decide_regeneration 代码）**：/retry 补血缘后，重试成功且质检通过 → `quality_passed`（不触发护栏，不误伤）；只有当重试后**仍然失败**才走 history 护栏（达上限/下滑/提升不足）——那是对"同脚本重跑仍差"的诚实信号，前端会展示原因。`quality_failed` 是前置条件（regeneration_controller.py:42），分数过了不会走到比较。此设计安全，放心做。
+
 **验收**：
 ```bash
+pytest tests/test_video_generation_api.py -q
 pytest tests/test_video_generation_ui.py -q
 pytest tests/test_video_generation_state.py -q
+pytest tests/test_regeneration_guardrails.py -q
 ```
-手测：对一个 `regen_attempt>=2` 的 job 调 `/resume` 应返回 409；对 failed job 调 `/retry` 后查 `GET /api/video-generation/jobs/{new_id}` 应带 `prior_job_id` 且 `regen_attempt=1`。
+手测（用 python 直连或起服务后 curl）：
+- 取一个 `regen_attempt>=2` 的 `needs_review` job 调 `/resume` → 应 409 "已达重生成上限"
+- 取一个 `failed` job 调 `/retry` → 返回的新 job 应带 `prior_job_id=<原 job>` 且 `regen_attempt=1`
 
-**回滚**：删除插入块。
+**回滚**：删除两个插入块（#8 的 ①②）。
 
 ---
 
@@ -176,9 +182,18 @@ pytest tests/test_video_generation_state.py -q
         await asyncio.gather(stale_cleanup_task, return_exceptions=True)
 ```
 
-**验收**：重启 app，观察日志 60s 无异常；手动向 `video_render_jobs` 插一条 `status='pending'` 且 `created_at` 为 20 分钟前的记录（`python3 -c` 或用 sqlite3），等下一个周期应被标 failed（"排队超过 10 分钟自动取消"）。验证后删掉测试记录。
+**验收**：
+1. 重启 app，日志无异常、60s 周期不报错。
+2. 插入测试记录验证清理生效（表 `video_render_jobs`：id TEXT / status / stage / progress / script / voice / output_path / error / created_by / created_at / updated_at / clips / quality_report）：
+```bash
+sqlite3 data/logiflow.db "INSERT INTO video_render_jobs (id,status,stage,progress,created_at,updated_at) VALUES ('_stale_test','pending','素材化',0,datetime('now','-20 minutes'),datetime('now'))"
+# 等下一个 60s 周期（最多 90 秒）后：
+sqlite3 data/logiflow.db "SELECT id,status,stage,error FROM video_render_jobs WHERE id='_stale_test'"
+# 期望 status='failed'、stage='超时清理'、error 含 '排队超过 10 分钟自动取消'
+sqlite3 data/logiflow.db "DELETE FROM video_render_jobs WHERE id='_stale_test'"
+```
 
-**回滚**：删除两个新增块。
+**回滚**：删除两个新增块（①周期 task ②finally cancel）。
 
 ---
 

@@ -355,6 +355,8 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             raise HTTPException(404, "视频生成任务不存在")
         if job["status"] != "needs_review":
             raise HTTPException(409, "只有待确认任务可以继续生成")
+        if int(job.get("regen_attempt") or 0) >= 2:
+            raise HTTPException(409, "已达重生成上限（2 次），请人工评审脚本或另建项目")
         project = db.get_video_project(job["project_id"], created_by=user["id"])
         payload = body.payload if body and body.payload is not None else project["current_revision"]["payload"]
         revision = db.create_video_project_revision(project["id"], payload, user["id"])
@@ -385,6 +387,12 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
         retried, _ = db.create_or_get_video_generation_job(
             job["project_id"], job["revision_id"], user["id"], job["idempotency_key"]
         )
+        # 与 /resume 对齐：失败重试也补血缘，护栏据此判断连续失败历史
+        retried = db.update_video_generation_job(
+            retried["id"],
+            prior_job_id=job_id,
+            regen_attempt=int(job.get("regen_attempt") or 0) + 1,
+        ) or retried
         db.add_video_generation_event(retried["id"], "job_retried", "任务已重新进入队列")
         return {"job": retried}
 
