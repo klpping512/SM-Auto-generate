@@ -6,6 +6,7 @@
 - 落盘保护（R4）：目录已存在且非空时必须显式 --force 才允许覆盖。
 - 固定物料机制化：把 banner + 文末三件套复制进素材包，并在 article.md 末尾固定
   追加"文末信息图服务描述发布前需业务核实"提示（占位文案不受生成链路事实锚定约束）。
+render_package 为模块级可导入函数，CLI 与 API 共用同一实现；CLI 输出文案保持稳定。
 """
 from __future__ import annotations
 
@@ -118,25 +119,20 @@ def render_markdown(article: dict, content: dict, footnotes: list[dict],
     return "\n".join(lines)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="渲染 per-article 素材包（Markdown + 图片 + meta.json）")
-    parser.add_argument("--id", type=int, required=True, help="article id")
-    parser.add_argument("--force", action="store_true", help="目标目录已存在且非空时强制覆盖")
-    args = parser.parse_args()
-
-    article = db.get_article(args.id)
+def render_package(article_id: int, force: bool = False) -> dict:
+    """渲染 per-article 素材包；失败返回 {"status":"error","error":str}，不抛异常。"""
+    article = db.get_article(article_id)
     if article is None:
-        print(f"错误：文章不存在 id={args.id}")
-        return 1
+        return {"status": "error", "error": f"文章不存在 id={article_id}"}
 
     content = json.loads(article.get("generated_content_json") or "{}")
     selections = json.loads(article.get("image_selections_json") or "{}")
+    if not isinstance(selections, dict):
+        selections = {}
     if not content or not content.get("sections"):
-        print("错误：还没有生成结果，先跑 scripts/generate_article.py --id", args.id)
-        return 1
+        return {"status": "error", "error": "还没有生成结果，先跑 scripts/generate_article.py"}
     if not selections or "cover" not in selections:
-        print("错误：还没有封面选择记录，先跑 scripts/select_article_images.py --id", args.id)
-        return 1
+        return {"status": "error", "error": "还没有封面选择记录，先跑 scripts/select_article_images.py"}
 
     materials = json.loads(article.get("materials_json") or "[]")
     footnotes = json.loads(article.get("evidence_footnotes_json") or "[]")
@@ -150,20 +146,16 @@ def main() -> int:
             texts.extend(str(value) for value in card.values())
     texts.append(content.get("conclusion") or "")
     unresolved = scan_unresolved_claims(texts, footnotes)
-    if unresolved:
-        print(f"⚠ 发现 {len(unresolved)} 处数字类片段未登记证据来源，将打【待核实】标记：")
-        for fragment in unresolved:
-            print(f"  - {fragment}")
 
     output_dir = PROJECT_ROOT / "data" / "articles" / article["slug"]
-    if output_dir.exists() and any(output_dir.iterdir()) and not args.force:
-        print(f"错误：目标目录已存在且非空，加 --force 才允许覆盖：{output_dir}")
-        return 1
+    if output_dir.exists() and any(output_dir.iterdir()) and not force:
+        return {"status": "error", "error": f"目标目录已存在且非空，加 --force 才允许覆盖：{output_dir}"}
     output_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- 已选配图文件就位（Step 4 已复制；这里只做缺文件提示） ----
+    # ---- 已选配图文件就位（缺文件只提示，不阻塞） ----
+    warnings: list[str] = []
     missing_images = []
     for slot in ("cover", *[f"section-{i:02d}" for i in range(1, len(content["sections"]) + 1)]):
         picked = selections.get(slot) or {}
@@ -173,7 +165,7 @@ def main() -> int:
         if not source_file.is_file():
             missing_images.append(f"{slot}（{picked.get('filepath')}）")
     if missing_images:
-        print(f"⚠ 以下已选配图的源文件在库里不存在（可能是文件被移动），发布前需人工处理：{missing_images}")
+        warnings.append(f"以下已选配图的源文件在库里不存在（可能是文件被移动），发布前需人工处理：{missing_images}")
 
     # ---- 固定物料复制 + 机制化提示 ----
     fixed_copied = []
@@ -183,17 +175,15 @@ def main() -> int:
             if source.is_file():
                 shutil.copy2(source, output_dir / name)
                 fixed_copied.append(name)
-        if fixed_copied:
-            print(f"固定物料已复制进素材包：{', '.join(fixed_copied)}")
+        if not fixed_copied:
+            warnings.append("固定物料目录存在但四张图都不在（banner + 文末三件套），发布前需人工补图")
     else:
-        print("⚠ 固定物料目录不存在（公众号固定物料-占位稿），素材包不含 banner/文末三件套，发布前需人工补图")
-        print(f"  查找位置：{FIXED_MATERIALS_DIR}")
+        warnings.append(f"固定物料目录不存在（公众号固定物料-占位稿），素材包不含 banner/文末三件套，发布前需人工补图（{FIXED_MATERIALS_DIR}）")
 
     # ---- 渲染 article.md ----
     markdown = render_markdown(article, content, footnotes, selections, materials, unresolved)
     article_md = output_dir / "article.md"
     article_md.write_text(markdown, encoding="utf-8")
-    print(f"已写入：{article_md}")
 
     # ---- meta.json ----
     meta = {
@@ -207,14 +197,46 @@ def main() -> int:
         "rendered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     (output_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"已写入：{output_dir / 'meta.json'}")
 
-    db.update_article(args.id, output_dir=str(output_dir), status="ready",
+    db.update_article(article_id, output_dir=str(output_dir), status="ready",
                       unresolved_claims_json=json.dumps(unresolved, ensure_ascii=False))
+    return {
+        "status": "ok",
+        "output_dir": str(output_dir),
+        "article_md": str(article_md),
+        "unresolved": unresolved,
+        "warnings": warnings,
+        "meta": meta,
+        "fixed_copied": fixed_copied,
+        "cover_target": (selections.get("cover") or {}).get("target_rel") or "cover.jpg",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="渲染 per-article 素材包（Markdown + 图片 + meta.json）")
+    parser.add_argument("--id", type=int, required=True, help="article id")
+    parser.add_argument("--force", action="store_true", help="目标目录已存在且非空时强制覆盖")
+    args = parser.parse_args()
+
+    result = render_package(args.id, args.force)
+    if result["status"] == "error":
+        print(f"错误：{result['error']}")
+        return 1
+
+    if result["unresolved"]:
+        print(f"⚠ 发现 {len(result['unresolved'])} 处数字类片段未登记证据来源，将打【待核实】标记：")
+        for fragment in result["unresolved"]:
+            print(f"  - {fragment}")
+    for warning in result["warnings"]:
+        print(f"⚠ {warning}")
+    if result["fixed_copied"]:
+        print(f"固定物料已复制进素材包：{', '.join(result['fixed_copied'])}")
+    print(f"已写入：{result['article_md']}")
+    print(f"已写入：{Path(result['output_dir']) / 'meta.json'}")
     print(f"状态已更新：id={args.id} -> ready")
-    if unresolved:
-        print(f"⚠⚠ 有 {len(unresolved)} 处待核实，发布前必须人工确认（见 article.md 中【待核实】标记）")
-    print(f"产出目录：{output_dir}（封面：{selections['cover'].get('target_rel')}）")
+    if result["unresolved"]:
+        print(f"⚠⚠ 有 {len(result['unresolved'])} 处待核实，发布前必须人工确认（见 article.md 中【待核实】标记）")
+    print(f"产出目录：{result['output_dir']}（封面：{result['cover_target']}）")
     print("下一步：人工检查 article.md 与配图，用秀米/135/Doocs-md 二次排版后手动发布；")
     print("发完后跑 scripts/mark_article_published.py --id", args.id)
     return 0

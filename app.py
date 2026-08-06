@@ -13,9 +13,12 @@ from uuid import uuid4 as _uuid4
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Request, Response, Depends, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, UploadFile, File, Query
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+import csv
+import io
 
 import database as db
 import ai_engine
@@ -23,6 +26,10 @@ import chat_intent
 import producible_topics
 import publisher
 import scheduler as sched
+import wechat_article_generator
+from scripts.create_article_draft import validate_package
+from scripts.select_article_images import search_candidates, apply_selections
+from scripts.render_article_package import render_package
 from xhs_cards import normalize_pages, pages_from_content, render_carousel
 from xhs_quality_gate import check_before_render, check_rendered
 from xhs_photo_match import pick_photos
@@ -578,6 +585,119 @@ async def delete_queue_item(item_id: int, user=Depends(get_current_user)):
     return {"status": "ok"}
 
 
+# ==================== API: Articles（公众号图文长文，阶段 0） ====================
+
+def _article_for_user(article_id: int, user: dict) -> dict:
+    article = db.get_article(article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+    if user["role"] != "admin" and article.get("created_by") != user["id"]:
+        raise HTTPException(403, "不能操作其他用户的内容")
+    return article
+
+
+def _decode_article_row(article: dict) -> dict:
+    decoded = dict(article)
+    defaults = {
+        "materials_json": [],
+        "generated_content_json": {},
+        "evidence_footnotes_json": [],
+        "unresolved_claims_json": [],
+        "image_selections_json": {},
+    }
+    for field, fallback in defaults.items():
+        raw = decoded.get(field)
+        if raw:
+            try:
+                decoded[field] = _json.loads(raw)
+            except (TypeError, ValueError):
+                decoded[field] = fallback
+        else:
+            decoded[field] = fallback
+    return decoded
+
+
+@app.get("/api/articles")
+async def list_articles(status: str = None, user=Depends(get_current_user)):
+    articles = db.list_articles(status=status)
+    if user["role"] != "admin":
+        articles = [a for a in articles if a.get("created_by") == user["id"]]
+    return [_decode_article_row(a) for a in articles]
+
+
+@app.post("/api/articles")
+async def create_article(req: dict, user=Depends(get_current_user)):
+    package = {
+        "slug": str(req.get("slug") or "").strip(),
+        "title": str(req.get("title") or "").strip(),
+        "topic_brief": str(req.get("topic_brief") or "").strip(),
+        "reference_style": str(req.get("reference_style") or "").strip(),
+        "materials": req.get("materials") if isinstance(req.get("materials"), list) else [],
+    }
+    errors = validate_package(package)
+    if errors:
+        return JSONResponse(status_code=422, content={"errors": errors})
+    article_id = db.create_article(
+        slug=package["slug"],
+        title=package["title"],
+        topic_brief=package["topic_brief"],
+        materials_json=_json.dumps(package["materials"], ensure_ascii=False),
+        reference_style=package["reference_style"],
+        created_by=user["id"],
+    )
+    db.add_audit_log(user["id"], user["username"], "create_article", target=str(article_id), detail=package["slug"])
+    return JSONResponse(status_code=201, content={"id": article_id})
+
+
+@app.get("/api/articles/{article_id}")
+async def get_article(article_id: int, user=Depends(get_current_user)):
+    return _decode_article_row(_article_for_user(article_id, user))
+
+
+@app.post("/api/articles/{article_id}/generate")
+def generate_article(article_id: int, user=Depends(get_current_user)):
+    # sync def：generate_article 内部用 asyncio.run（复用 hotspot_hook_curator 的既有写法），
+    # async def 端点在运行中的 event loop 里调用会抛 asyncio.run() cannot be called from a running event loop。
+    _article_for_user(article_id, user)
+    result = wechat_article_generator.generate_article(article_id)
+    db.add_audit_log(user["id"], user["username"], "generate_article", target=str(article_id),
+                     detail=result.get("status"))
+    return result
+
+
+@app.get("/api/articles/{article_id}/image-candidates")
+async def article_image_candidates(article_id: int, keyword: str = "", user=Depends(get_current_user)):
+    _article_for_user(article_id, user)
+    return search_candidates(keyword)
+
+
+@app.post("/api/articles/{article_id}/images")
+async def save_article_images(article_id: int, body: dict, user=Depends(get_current_user)):
+    _article_for_user(article_id, user)
+    selections = body.get("selections") if isinstance(body.get("selections"), dict) else {}
+    return apply_selections(article_id, selections)
+
+
+@app.post("/api/articles/{article_id}/render")
+async def render_article(article_id: int, body: dict = None, user=Depends(get_current_user)):
+    _article_for_user(article_id, user)
+    force = bool((body or {}).get("force"))
+    result = render_package(article_id, force=force)
+    db.add_audit_log(user["id"], user["username"], "render_article", target=str(article_id),
+                     detail=result.get("status"))
+    return result
+
+
+@app.post("/api/articles/{article_id}/publish")
+async def publish_article(article_id: int, user=Depends(get_current_user)):
+    article = _article_for_user(article_id, user)
+    if article["status"] != "ready":
+        raise HTTPException(409, f"只有 ready 才能发布（当前状态 {article['status']}）")
+    db.update_article(article_id, status="published")
+    db.add_audit_log(user["id"], user["username"], "publish_article", target=str(article_id))
+    return {"status": "published"}
+
+
 # ==================== API: Review (审批流) ====================
 
 @app.get("/api/review/pending")
@@ -694,6 +814,7 @@ async def publish_item(item_id: int, user=Depends(get_current_user)):
     if result["success"]:
         db.update_queue_status(item_id, "published")
         db.add_publish_log(item_id, item["platform"], item["title"], "published")
+        db.ensure_xhs_ledger(item_id)
     else:
         detail = publisher.failure_status_detail(result)
         shot = publisher.debug_screenshot_from_error(result.get("error"))
@@ -757,6 +878,7 @@ async def publish_batch(body: dict, user=Depends(get_current_user)):
         if result["success"]:
             db.update_queue_status(item_id, "published")
             db.add_publish_log(item_id, item["platform"], item["title"], "published")
+            db.ensure_xhs_ledger(item_id)
         else:
             detail = publisher.failure_status_detail(result)
             shot = publisher.debug_screenshot_from_error(result.get("error"))
@@ -928,6 +1050,165 @@ async def get_audit_logs(limit: int = 100, user=Depends(require_role(UserRole.AD
 async def get_publish_logs(limit: int = 50, user=Depends(get_current_user)):
     created_by = None if user["role"] == UserRole.ADMIN.value else user["id"]
     return db.get_publish_logs(limit, created_by=created_by)
+
+
+# ==================== API: 小红书发布台账 ====================
+
+def _xhs_ledger_owner_filter(user: dict) -> int | None:
+    return None if user["role"] == UserRole.ADMIN.value else user["id"]
+
+
+def _build_xhs_ledger_csv(from_date: str, to_date: str) -> str:
+    summary = db.weekly_xhs_ledger_summary(from_date, to_date)
+    ov = summary["overview"]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    writer.writerow(["# 概览"])
+    writer.writerow(["周区间", "发布条数", "达标数", "达标率", "平均阅读", "平均互动率"])
+    writer.writerow([
+        f"{from_date}~{to_date}",
+        ov["count"],
+        ov["passed"],
+        f"{ov['pass_rate']:.2%}",
+        f"{ov['avg_reads']:.1f}",
+        f"{ov['avg_interaction_rate']:.4f}",
+    ])
+    writer.writerow([])
+
+    headers = ["rank", "标题", "选题级别", "封面类型", "主词", "阅读", "赞藏", "评论", "涨粉", "48h 判定"]
+    writer.writerow(["# Top 选题（按阅读）"])
+    writer.writerow(headers)
+    for i, row in enumerate(summary["top"], 1):
+        writer.writerow([
+            i, row["title"], row["topic_level"], row["cover_type"], row["main"],
+            row["reads"], row["likes_saves"], row["comments"], row["followers_gained"],
+            row["verdict_48h"],
+        ])
+    writer.writerow([])
+
+    writer.writerow(["# Bottom 选题（按阅读）"])
+    writer.writerow(headers)
+    for i, row in enumerate(summary["bottom"], 1):
+        writer.writerow([
+            i, row["title"], row["topic_level"], row["cover_type"], row["main"],
+            row["reads"], row["likes_saves"], row["comments"], row["followers_gained"],
+            row["verdict_48h"],
+        ])
+    writer.writerow([])
+
+    writer.writerow(["# 封面类型分布"])
+    writer.writerow(["封面类型", "条数", "平均阅读", "平均赞藏"])
+    for row in summary["cover_dist"]:
+        writer.writerow([
+            row["cover_type"], row["count"],
+            f"{row['avg_reads']:.1f}", f"{row['avg_likes_saves']:.1f}",
+        ])
+    writer.writerow([])
+
+    writer.writerow(["# 关键词表现"])
+    writer.writerow(["主词", "条数", "平均阅读", "平均互动率"])
+    for row in summary["keyword_perf"]:
+        writer.writerow([
+            row["main"], row["count"],
+            f"{row['avg_reads']:.1f}", f"{row['avg_interaction_rate']:.4f}",
+        ])
+    return buf.getvalue()
+
+
+@app.get("/api/xhs/ledger/candidates")
+async def xhs_ledger_candidates(user=Depends(get_current_user)):
+    return db.list_xhs_ledger_candidates()
+
+
+@app.get("/api/xhs/ledger/export")
+async def xhs_ledger_export(
+    from_date: str | None = Query(None, alias="from"),
+    to_date: str | None = Query(None, alias="to"),
+    user=Depends(get_current_user),
+):
+    if not from_date or not to_date:
+        week_start, week_end = db.utc_week_range()
+        from_date = from_date or week_start
+        to_date = to_date or week_end
+    csv_text = _build_xhs_ledger_csv(from_date, to_date)
+    filename = f"xhs-ledger-week-{from_date}-{to_date}.csv"
+    return StreamingResponse(
+        iter([csv_text.encode("utf-8-sig")]),
+        media_type="text/csv; charset=utf-8-sig",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/xhs/ledger")
+async def xhs_ledger_list(
+    from_date: str | None = Query(None, alias="from"),
+    to_date: str | None = Query(None, alias="to"),
+    user=Depends(get_current_user),
+):
+    return db.list_xhs_ledger(
+        from_date=from_date or None,
+        to_date=to_date or None,
+        created_by=_xhs_ledger_owner_filter(user),
+    )
+
+
+@app.post("/api/xhs/ledger")
+async def xhs_ledger_create(body: dict, user=Depends(get_current_user)):
+    """历史补建：正常路径是发布自动预建 → PUT 填指标。"""
+    queue_id = body.get("queue_id")
+    if not queue_id:
+        raise HTTPException(400, "queue_id 必填")
+    item = db.get_queue_item_by_id(int(queue_id))
+    if not item:
+        raise HTTPException(404, "队列条目不存在")
+    if item.get("platform") != "xiaohongshu":
+        raise HTTPException(400, "仅支持小红书条目建档")
+    if db.get_xhs_ledger_by_queue(int(queue_id)):
+        raise HTTPException(409, "该条目已建档")
+    # 必须有 published 日志（ensure 内部也会校验）
+    with db.get_conn() as conn:
+        published = conn.execute(
+            "SELECT 1 FROM publish_log WHERE queue_id=? AND status='published' AND platform='xiaohongshu' LIMIT 1",
+            (int(queue_id),),
+        ).fetchone()
+    if not published:
+        raise HTTPException(400, "未发布条目不许建档")
+
+    ledger_id = db.ensure_xhs_ledger(int(queue_id))
+    if not ledger_id:
+        raise HTTPException(400, "建档失败：条目不符合条件")
+    fields = {k: body.get(k) for k in (
+        "topic_level", "cover_type", "reads", "likes_saves", "comments",
+        "followers_gained", "verdict_48h", "notes",
+    ) if k in body}
+    if fields:
+        try:
+            db.update_xhs_ledger(ledger_id, fields)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    row = db.get_xhs_ledger(ledger_id)
+    db.add_audit_log(user["id"], user["username"], "xhs_ledger_create", target=str(queue_id))
+    return row
+
+
+@app.put("/api/xhs/ledger/{ledger_id}")
+async def xhs_ledger_update(ledger_id: int, body: dict, user=Depends(get_current_user)):
+    row = db.get_xhs_ledger(ledger_id)
+    if not row:
+        raise HTTPException(404, "台账行不存在")
+    if user["role"] != UserRole.ADMIN.value and row.get("created_by") != user["id"]:
+        raise HTTPException(403, "不能编辑其他用户的台账")
+    fields = {k: body.get(k) for k in (
+        "topic_level", "cover_type", "reads", "likes_saves", "comments",
+        "followers_gained", "verdict_48h", "notes",
+    ) if k in body}
+    try:
+        db.update_xhs_ledger(ledger_id, fields)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    db.add_audit_log(user["id"], user["username"], "xhs_ledger_update", target=str(ledger_id))
+    return {"status": "ok"}
 
 
 # ==================== API: Knowledge Base ====================
@@ -5084,6 +5365,11 @@ async def agent_debug_log(request: Request):
 # ==================== Static Assets ====================
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# 公众号图文素材包静态服务（data/articles/{slug}/ 下的 article.md / meta.json / 图片）
+_articles_dir = Path(__file__).resolve().parent / "data" / "articles"
+_articles_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/article-assets", StaticFiles(directory=str(_articles_dir)), name="article-assets")
 
 
 if __name__ == "__main__":

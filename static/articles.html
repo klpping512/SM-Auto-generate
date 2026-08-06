@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=5"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=5"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=5"/>
+<link rel="manifest" href="/static/manifest.json?v=5"/>
+<meta name="theme-color" content="#B98A4C"/>
+<title>公众号图文工作台 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css?v=5"/>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js?v=8"></script>
+<script>
+const PAGE_ID = 'articles';
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const STATUS_LABELS = { draft: '草稿', ready: '待发', published: '已发布' };
+const STATUS_COLORS = { draft: 'var(--text-muted)', ready: '#2563EB', published: '#10B981' };
+
+let articles = [];
+let current = null;          // 详情视图当前文章（解码后）
+let imageSelections = {};    // 详情视图配图选择缓存 {slot: {asset_id} | null}
+let imageCandidates = {};    // 详情视图候选缓存 {slot: {own:[], za_stock:[]}}
+let creating = false;
+let generating = false;
+
+// ==================== 视图切换 ====================
+function render() {
+    const context = getPlatformContext();
+    const isWechat = context === 'wechat_mp';
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">公众号图文工作台</h1>
+            <button class="btn btn-primary btn-sm" onclick="openCreateModal()"><iconify-icon icon="mdi:plus" width="16"></iconify-icon> 新建草稿</button>
+        </div>
+        <div class="page-body">
+            ${isWechat ? '' : `
+            <div class="card" style="border-left:4px solid #F59E0B;margin-bottom:16px;">
+                <div class="card-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <span style="font-size:13px;">当前生产平台：<b>${platformName(context)}</b>。图文长文只在「微信公众号」平台生产。</span>
+                    <select id="bannerPlatformSelect" class="select" style="font-size:12px;padding:4px 8px;"
+                            onchange="setPlatformContext(this.value); location.reload();">
+                        ${PLATFORMS.map(p => `<option value="${p.id}" ${context === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
+                    </select>
+                </div>
+            </div>`}
+            <div id="listView"></div>
+            <div id="detailView" hidden></div>
+        </div>
+    </div>`;
+    if (isWechat) loadArticles();
+}
+
+// ==================== A. 清单 ====================
+async function loadArticles() {
+    try {
+        const resp = await apiFetch('/api/articles');
+        articles = await resp.json();
+        renderList();
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+function statusBadge(status) {
+    const label = STATUS_LABELS[status] || status;
+    const color = STATUS_COLORS[status] || 'var(--text-muted)';
+    return `<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:${color}1A;color:${color};font-weight:600;">${label}</span>`;
+}
+
+function renderList() {
+    const listView = document.getElementById('listView');
+    if (!listView) return;
+    const groups = ['draft', 'ready', 'published'].map(status => ({
+        status, items: articles.filter(a => a.status === status),
+    }));
+    const totalUnresolved = articles.reduce((sum, a) => sum + ((a.unresolved_claims_json || []).length || 0), 0);
+    listView.innerHTML = `
+        ${totalUnresolved > 0 ? `<div class="card" style="border-left:4px solid #EF4444;margin-bottom:16px;"><div class="card-body" style="font-size:13px;color:#DC2626;">
+            ⚠ ${totalUnresolved} 处数字断言待人工核实（出现在 ${articles.filter(a => (a.unresolved_claims_json || []).length).length} 篇草稿/待发文中）</div></div>` : ''}
+        ${groups.map(group => `
+        <div style="margin-bottom:20px;">
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);">${STATUS_LABELS[group.status]}（${group.items.length}）</div>
+            ${group.items.length === 0 ? '<div style="font-size:12px;color:var(--text-muted);padding:8px 0;">（无）</div>' : group.items.map(articleActionCard).join('')}
+        </div>`).join('')}
+    `;
+}
+
+function articleActionCard(a) {
+    const hasContent = !!((a.generated_content_json || {}).sections || []).length;
+    const buttons = [];
+    if (a.status === 'draft') {
+        buttons.push(`<button class="btn btn-sm btn-secondary" onclick="openDetail(${a.id})">详情</button>`);
+        buttons.push(`<button class="btn btn-sm btn-primary" ${hasContent ? '' : 'disabled title="先生成正文"' } onclick="generateArticle(${a.id})">生成</button>`);
+        buttons.push(`<button class="btn btn-sm btn-secondary" ${hasContent ? '' : 'disabled title="先生成正文"' } onclick="openDetail(${a.id})">选图</button>`);
+    } else if (a.status === 'ready') {
+        buttons.push(`<button class="btn btn-sm btn-secondary" onclick="openDetail(${a.id})">详情</button>`);
+        buttons.push(`<a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(a.slug)}/article.md" target="_blank">渲染产物</a>`);
+        buttons.push(`<button class="btn btn-sm btn-primary" onclick="publishArticle(${a.id})">发布</button>`);
+    } else {
+        buttons.push(`<button class="btn btn-sm btn-secondary" onclick="openDetail(${a.id})">详情</button>`);
+    }
+    const unresolved = (a.unresolved_claims_json || []).length;
+    return `
+    <div class="card" style="margin-bottom:10px;">
+        <div class="card-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div style="flex:1;min-width:220px;">
+                <div style="font-size:14px;font-weight:600;">${escapeHtml(a.title)}</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">id=${a.id} · ${escapeHtml(a.slug)} · 更新 ${escapeHtml(a.updated_at || '')}${unresolved ? ` · <span style="color:#DC2626;">${unresolved} 处待核实</span>` : ''}</div>
+            </div>
+            ${statusBadge(a.status)}
+            <div style="display:flex;gap:6px;">${buttons.join('')}</div>
+        </div>
+    </div>`;
+}
+
+// ==================== B. 详情 ====================
+async function openDetail(articleId) {
+    try {
+        const resp = await apiFetch(`/api/articles/${articleId}`);
+        current = await resp.json();
+        imageSelections = {};
+        imageCandidates = {};
+        const detailView = document.getElementById('detailView');
+        const listView = document.getElementById('listView');
+        if (listView) listView.hidden = true;
+        if (detailView) detailView.hidden = false;
+        renderDetail();
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+function closeDetail() {
+    current = null;
+    imageSelections = {};
+    imageCandidates = {};
+    const detailView = document.getElementById('detailView');
+    const listView = document.getElementById('listView');
+    if (detailView) detailView.hidden = true;
+    if (listView) listView.hidden = false;
+    loadArticles();
+}
+
+function renderDetail() {
+    if (!current) return;
+    const detailView = document.getElementById('detailView');
+    const content = current.generated_content_json || {};
+    const sections = (content.sections || []);
+    const footnotes = current.evidence_footnotes_json || [];
+    const materials = current.materials_json || [];
+    const unresolved = current.unresolved_claims_json || [];
+
+    const previewHtml = sections.length ? `
+        <div style="margin-top:14px;font-size:13px;line-height:1.8;background:var(--bg-secondary);padding:12px;border-radius:var(--radius-md);">
+            <div style="font-style:italic;color:var(--text-muted);">${escapeHtml(content.intro || '')}</div>
+            ${sections.map(s => `
+                <div style="margin-top:10px;">
+                    <div style="font-weight:600;">${escapeHtml(s.heading)}</div>
+                    <div>${escapeHtml(s.body || '')}</div>
+                    ${s.comparison_card ? `
+                    <table class="table" style="margin-top:6px;font-size:12px;">
+                        ${Object.entries(s.comparison_card).map(([k, v]) => `<tr><td style="padding:4px 10px;font-weight:600;white-space:nowrap;">${escapeHtml(k)}</td><td style="padding:4px 10px;">${escapeHtml(v)}</td></tr>`).join('')}
+                    </table>` : ''}
+                </div>`).join('')}
+            <div style="margin-top:10px;font-weight:600;">最后的话</div>
+            <div>${escapeHtml(content.conclusion || '')}</div>
+        </div>` : '<div style="font-size:13px;color:var(--text-muted);padding:8px 0;">尚未生成正文。</div>';
+
+    const footnotesHtml = footnotes.length ? `
+        <div style="margin-top:10px;font-size:12px;color:var(--text-muted);">
+            ${footnotes.map(n => {
+                const m = materials[n.material_index - 1];
+                return `<div style="margin-top:4px;">【来源 ${n.material_index}】${escapeHtml((m && m.source_note) || '')}：${escapeHtml(n.claim_text)}</div>`;
+            }).join('')}
+        </div>` : '';
+
+    const imageSlots = [{
+        slot: 'cover', label: '封面', defaultKeyword: (current.title || '').slice(0, 6), hint: '公众号封面建议 900×383',
+    }].concat(sections.map((s, i) => ({
+        slot: `section-${String(i + 1).padStart(2, '0')}`, label: `正文配图 ${i + 1}：${s.heading}`,
+        defaultKeyword: (s.heading || '').slice(0, 6), hint: '',
+    })));
+
+    detailView.innerHTML = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-body">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <button class="btn btn-sm btn-secondary" onclick="closeDetail()">← 返回清单</button>
+                    <div style="flex:1;min-width:200px;">
+                        <div style="font-size:15px;font-weight:600;">${escapeHtml(current.title)}</div>
+                        <div style="font-size:11px;color:var(--text-muted);">${escapeHtml(current.slug)} · ${escapeHtml(current.topic_brief || '')}</div>
+                    </div>
+                    ${statusBadge(current.status)}
+                </div>
+                ${unresolved.length ? `<div style="margin-top:10px;font-size:12px;color:#DC2626;background:#DC26260D;padding:8px 12px;border-radius:var(--radius-sm);">⚠ ${unresolved.length} 处数字断言未登记来源（渲染后已打【待核实】标记），发布前必须人工确认</div>` : ''}
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">① 生成正文</div>
+            <div class="card-body">
+                <button class="btn btn-primary btn-sm" id="generateBtn" onclick="generateArticle(${current.id})" ${current.status !== 'draft' ? 'disabled' : ''}>生成正文</button>
+                <span style="font-size:12px;color:var(--text-muted);margin-left:8px;" id="generateHint"></span>
+                ${previewHtml}
+                ${footnotesHtml}
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">② 人工选图</div>
+            <div class="card-body">
+                ${imageSlots.map(slotHtml).join('')}
+                <div style="margin-top:12px;">
+                    <button class="btn btn-primary btn-sm" onclick="saveSelections(${current.id})">保存配图</button>
+                    <span style="font-size:12px;color:var(--text-muted);margin-left:8px;">选中（高亮）的槽位会复制进素材包；未选槽位保留已有选择</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">③ 渲染素材包</div>
+            <div class="card-body">
+                <button class="btn btn-primary btn-sm" onclick="renderArticle(${current.id})">渲染素材包</button>
+                <div id="renderResult" style="margin-top:10px;"></div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">④ 发布</div>
+            <div class="card-body">
+                ${current.status === 'ready'
+                    ? '<button class="btn btn-primary btn-sm" onclick="publishArticle(' + current.id + ')">标记已发布</button><span style="font-size:12px;color:var(--text-muted);margin-left:8px;">确认已在公众号后台手动发布后标记</span>'
+                    : `<span style="font-size:13px;color:var(--text-muted);">状态：${STATUS_LABELS[current.status]}${current.status === 'draft' ? '（需先完成 ①②③）' : ''}</span>`}
+            </div>
+        </div>
+    `;
+    if (current.status !== 'draft') {
+        const generateBtn = document.getElementById('generateBtn');
+        if (generateBtn) generateBtn.title = '已生成/已发布后不可重复生成';
+    }
+}
+
+function slotHtml(slot) {
+    const candidates = imageCandidates[slot.slot] || { own: [], za_stock: [] };
+    const picked = imageSelections[slot.slot];
+    const renderItem = (item) => {
+        const isImage = String(item.file_type || '').startsWith('image');
+        const selected = picked && picked.asset_id === item.id;
+        const thumb = isImage
+            ? `<img src="/static/${encodeURI(item.filepath)}" style="width:100%;height:80px;object-fit:cover;border-radius:var(--radius-sm);" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"/>`
+            : '';
+        const fallback = isImage ? '' : `<div style="width:100%;height:80px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);background:var(--bg-secondary);border-radius:var(--radius-sm);">${escapeHtml(item.file_type || '文件')} · 无预览</div>`;
+        return `<div onclick="togglePick('${slot.slot}', ${item.id})" style="cursor:pointer;border:2px solid ${selected ? '#2563EB' : 'var(--border-color)'};border-radius:var(--radius-md);padding:6px;width:150px;flex-shrink:0;background:${selected ? '#2563EB0F' : '#fff'};">
+            ${thumb}${fallback}
+            <div style="font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
+            <div style="font-size:10px;color:var(--text-muted);">id=${item.id} · ${escapeHtml(item.category || 'other')}</div>
+            ${selected ? '<div style="font-size:10px;color:#2563EB;font-weight:600;">✓ 已选中</div>' : ''}
+        </div>`;
+    };
+    return `
+    <div style="margin-bottom:16px;border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <b style="font-size:13px;">${escapeHtml(slot.label)}</b>
+            <input class="input" id="kw-${slot.slot}" placeholder="搜索关键词" value="${escapeHtml(slot.defaultKeyword)}"
+                   style="font-size:12px;padding:4px 8px;width:180px;" onkeydown="if(event.key==='Enter') searchSlot('${slot.slot}')"/>
+            <button class="btn btn-sm btn-secondary" onclick="searchSlot('${slot.slot}')">搜索</button>
+            ${slot.hint ? `<span style="font-size:11px;color:var(--text-muted);">${escapeHtml(slot.hint)}</span>` : ''}
+        </div>
+        ${Object.keys(candidates).length ? `
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">【自有实拍】可用来证明 Buffalo 自己的能力</div>
+        <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;">${(candidates.own || []).map(renderItem).join('') || '<span style="font-size:12px;color:var(--text-muted);">（无候选）</span>'}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin:8px 0 4px;">【免版权通用素材】不能当 Buffalo 自己的实拍用</div>
+        <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;">${(candidates.za_stock || []).map(renderItem).join('') || '<span style="font-size:12px;color:var(--text-muted);">（无候选）</span>'}</div>` : '<div style="font-size:12px;color:var(--text-muted);">输入关键词点「搜索」查看候选</div>'}
+    </div>`;
+}
+
+async function searchSlot(slot) {
+    const keyword = (document.getElementById(`kw-${slot}`) || {}).value || '';
+    try {
+        const resp = await apiFetch(`/api/articles/${current.id}/image-candidates?keyword=${encodeURIComponent(keyword)}`);
+        imageCandidates[slot] = await resp.json();
+        renderDetail();
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+function togglePick(slot, assetId) {
+    const currentPick = imageSelections[slot];
+    if (currentPick && currentPick.asset_id === assetId) {
+        delete imageSelections[slot];
+    } else {
+        imageSelections[slot] = { asset_id: assetId };
+    }
+    renderDetail();
+}
+
+async function saveSelections(articleId) {
+    const payload = {};
+    const slots = ['cover'].concat(Object.keys(imageCandidates).filter(s => s.startsWith('section-')));
+    for (const slot of slots) {
+        payload[slot] = imageSelections[slot] || null;
+    }
+    // 也包含已搜索过但未选中任何图的槽位
+    for (const slot of Object.keys(imageSelections)) {
+        if (!(slot in payload)) payload[slot] = imageSelections[slot] || null;
+    }
+    try {
+        const resp = await apiFetch(`/api/articles/${articleId}/images`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selections: payload }),
+        });
+        const result = await resp.json();
+        if (result.errors && result.errors.length) {
+            showToast(`保存配图有 ${result.errors.length} 处错误：${result.errors[0]}`, 'error');
+        } else {
+            showToast('配图已保存', 'success');
+        }
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+// ==================== 生成 / 渲染 / 发布 ====================
+async function generateArticle(articleId) {
+    if (generating) return;
+    generating = true;
+    const btn = document.getElementById('generateBtn');
+    const hint = document.getElementById('generateHint');
+    if (btn) { btn.disabled = true; }
+    if (hint) hint.textContent = '生成中，通常 30 秒内，请勿重复点击…';
+    try {
+        const resp = await apiFetch(`/api/articles/${articleId}/generate`, { method: 'POST' });
+        const result = await resp.json();
+        if (result.status !== 'ok') {
+            showToast(`生成失败：${result.error || '未知错误'}`, 'error');
+            if (hint) hint.textContent = `生成失败：${result.error || ''}`;
+        } else {
+            showToast(`生成成功：${result.section_count} 节 / ${result.word_count} 字 / ${result.footnote_count} 条证据脚注`, 'success');
+            await openDetail(articleId);
+        }
+    } catch (error) {
+        showToast(error.message, 'error');
+        if (hint) hint.textContent = error.message;
+    } finally {
+        generating = false;
+    }
+}
+
+async function renderArticle(articleId) {
+    const btn = event.target;
+    const resultBox = document.getElementById('renderResult');
+    btn.disabled = true;
+    btn.textContent = '渲染中…';
+    resultBox.innerHTML = '';
+    const doRender = async (force) => {
+        const resp = await apiFetch(`/api/articles/${articleId}/render`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force }),
+        });
+        return resp.json();
+    };
+    try {
+        let result = await doRender(false);
+        if (result.status === 'error' && String(result.error || '').includes('--force')) {
+            if (confirm('素材包目录已有内容，是否覆盖重新渲染？')) {
+                result = await doRender(true);
+            } else {
+                resultBox.innerHTML = '<div style="font-size:13px;color:var(--text-muted);">已取消覆盖</div>';
+                return;
+            }
+        }
+        if (result.status !== 'ok') {
+            resultBox.innerHTML = `<div style="font-size:13px;color:#DC2626;">渲染失败：${escapeHtml(result.error || '')}</div>`;
+            return;
+        }
+        const unresolvedHtml = (result.unresolved || []).length
+            ? `<div style="font-size:13px;color:#DC2626;background:#DC26260D;padding:8px 12px;border-radius:var(--radius-sm);margin-bottom:8px;">
+                ⚠ ${result.unresolved.length} 处数字断言未登记来源，已在 article.md 打【待核实】标记，发布前必须人工确认：${result.unresolved.map(escapeHtml).join('、')}</div>` : '';
+        const warningsHtml = (result.warnings || []).map(w => `<div style="font-size:12px;color:#F59E0B;margin-top:4px;">⚠ ${escapeHtml(w)}</div>`).join('');
+        resultBox.innerHTML = `
+            <div style="font-size:13px;background:#10B9810D;padding:8px 12px;border-radius:var(--radius-sm);margin-bottom:8px;">渲染完成，状态已置为「待发」</div>
+            ${unresolvedHtml}
+            ${warningsHtml}
+            <div style="font-size:12px;color:#B91C1C;background:#FEF2F2;padding:8px 12px;border-radius:var(--radius-sm);margin-top:8px;"><b>【发布前必核】</b>文末信息图（closing-1-info.png）中「仓储/清关/干线/配送」四条服务描述为占位文案，发布前请业务同事核实具体表述与资质范围，与正文事实核查标准保持一致。</div>
+            <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;">
+                <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/article.md" target="_blank">打开 article.md</a>
+                <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/meta.json" target="_blank">打开 meta.json</a>
+                <a class="btn btn-sm btn-secondary" href="/article-assets/${encodeURIComponent(current.slug)}/cover.jpg" target="_blank">查看封面</a>
+            </div>`;
+        await openDetail(articleId);
+    } catch (error) {
+        resultBox.innerHTML = `<div style="font-size:13px;color:#DC2626;">渲染失败：${escapeHtml(error.message)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '渲染素材包';
+    }
+}
+
+async function publishArticle(articleId) {
+    if (!confirm('确认已在公众号后台手动发布这篇文章？')) return;
+    try {
+        await apiFetch(`/api/articles/${articleId}/publish`, { method: 'POST' });
+        showToast('已标记发布', 'success');
+        await loadArticles();
+        if (current && current.id === articleId) { current.status = 'published'; renderDetail(); }
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+// ==================== C. 新建草稿 ====================
+const CREATE_TEMPLATE = {
+    slug: 'sa-poe-registration-guide',
+    title: '南非PoE登记指南：中国卖家绕不开的这道坎',
+    topic_brief: '给想进入南非市场的中国卖家讲清楚 PoE 登记：是什么、周期、费用、材料，以及为什么重要。目标读者是跨境电商卖家。',
+    reference_style: '炫思速运《南非PVoC与NRCS认证边界厘清》结构：导语、分节、对比卡片、最后的话',
+    materials: [
+        { excerpt: 'PoE（Proof of Export）出口证明由南非海关出具，办理周期通常为 4–8 周，费用约 0.5%–1.5% 货值。', source_note: '南非税务局 SARS 官网 2026-07 公告', source_url: '' },
+        { excerpt: '2025 年 12 月起，南非对鞋类、纺织等品类加严了进口合规查验。', source_note: 'ITAC 贸易委员会 2026-01 通知', source_url: '' },
+    ],
+};
+
+function openCreateModal() {
+    if (creating) return;
+    creating = true;
+    document.getElementById('app').insertAdjacentHTML('beforeend', `
+    <div class="modal-overlay" id="createModal" style="position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px;">
+        <div class="card" style="width:640px;max-width:100%;max-height:90vh;overflow-y:auto;">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                <b>新建图文草稿</b>
+                <button class="btn btn-sm btn-secondary" onclick="closeCreateModal()">关闭</button>
+            </div>
+            <div class="card-body">
+                <div style="margin-bottom:10px;"><button class="btn btn-sm btn-secondary" onclick="fillCreateTemplate()">载入示例模板</button></div>
+                <div style="font-size:13px;margin-bottom:4px;">标题 <span style="color:#DC2626;">*</span></div>
+                <input class="input" id="createTitle" style="width:100%;" placeholder="如：南非PoE登记指南：中国卖家绕不开的这道坎"/>
+                <div style="font-size:13px;margin:10px 0 4px;">slug <span style="color:#DC2626;">*</span>（小写字母/数字/连字符，URL 安全）</div>
+                <input class="input" id="createSlug" style="width:100%;" placeholder="如：sa-poe-registration-guide"/>
+                <div style="font-size:13px;margin:10px 0 4px;">选题说明（可选）</div>
+                <input class="input" id="createBrief" style="width:100%;" placeholder="这篇要讲什么、目标读者是谁"/>
+                <div style="font-size:13px;margin:10px 0 4px;">参考范文/风格说明（可选，仅对标结构，不作为事实来源）</div>
+                <input class="input" id="createStyle" style="width:100%;"/>
+                <div style="font-size:13px;margin:10px 0 4px;">资料包 materials JSON <span style="color:#DC2626;">*</span>（≥1 条，每条必带 excerpt + source_note）</div>
+                <textarea class="input" id="createMaterials" rows="10" style="width:100%;font-family:monospace;font-size:12px;" placeholder='[{"excerpt": "原文片段…", "source_note": "来源说明…", "source_url": "可选"}]'></textarea>
+                <div id="createErrors" style="font-size:12px;color:#DC2626;margin-top:8px;"></div>
+                <div style="margin-top:12px;text-align:right;">
+                    <button class="btn btn-primary btn-sm" onclick="submitCreate()">创建草稿</button>
+                </div>
+            </div>
+        </div>
+    </div>`);
+}
+
+function closeCreateModal() {
+    const modal = document.getElementById('createModal');
+    if (modal) modal.remove();
+    creating = false;
+}
+
+function fillCreateTemplate() {
+    document.getElementById('createTitle').value = CREATE_TEMPLATE.title;
+    document.getElementById('createSlug').value = CREATE_TEMPLATE.slug;
+    document.getElementById('createBrief').value = CREATE_TEMPLATE.topic_brief;
+    document.getElementById('createStyle').value = CREATE_TEMPLATE.reference_style;
+    document.getElementById('createMaterials').value = JSON.stringify(CREATE_TEMPLATE.materials, null, 2);
+}
+
+function validateCreateForm() {
+    const errors = [];
+    const title = document.getElementById('createTitle').value.trim();
+    const slug = document.getElementById('createSlug').value.trim();
+    const materialsText = document.getElementById('createMaterials').value.trim();
+    if (!title) errors.push('标题不能为空');
+    if (!slug) errors.push('slug 不能为空');
+    else if (!SLUG_RE.test(slug)) errors.push('slug 格式非法（只允许小写字母/数字/连字符）');
+    let materials = null;
+    if (!materialsText) errors.push('materials 不能为空');
+    else {
+        try { materials = JSON.parse(materialsText); } catch { errors.push('materials 不是合法 JSON'); }
+        if (materials !== null) {
+            if (!Array.isArray(materials) || !materials.length) errors.push('materials 必须是至少 1 条的数组');
+            else materials.forEach((item, i) => {
+                if (!item || typeof item !== 'object') errors.push(`materials[${i}] 不是对象`);
+                else {
+                    if (!String(item.excerpt || '').trim()) errors.push(`materials[${i}] 缺少非空 excerpt（原文片段）`);
+                    if (!String(item.source_note || '').trim()) errors.push(`materials[${i}] 缺少非空 source_note（来源说明）`);
+                }
+            });
+        }
+    }
+    return { errors, materials };
+}
+
+async function submitCreate() {
+    const { errors, materials } = validateCreateForm();
+    const errorBox = document.getElementById('createErrors');
+    if (errors.length) {
+        errorBox.innerHTML = errors.map(e => `<div>· ${escapeHtml(e)}</div>`).join('');
+        return;
+    }
+    errorBox.innerHTML = '';
+    const payload = {
+        slug: document.getElementById('createSlug').value.trim(),
+        title: document.getElementById('createTitle').value.trim(),
+        topic_brief: document.getElementById('createBrief').value.trim(),
+        reference_style: document.getElementById('createStyle').value.trim(),
+        materials,
+    };
+    try {
+        const resp = await apiFetch('/api/articles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const result = await resp.json();
+        showToast('草稿已创建', 'success');
+        closeCreateModal();
+        await loadArticles();
+        openDetail(result.id);
+    } catch (error) {
+        errorBox.innerHTML = `<div>· ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+// ==================== 初始化 ====================
+render();
+</script>
+</body>
+</html>

@@ -75,6 +75,29 @@ function showToast(message, type = 'success') {
     setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateX(20px)'; setTimeout(() => toast.remove(), 300); }, 3000);
 }
 
+// ==================== 平台词表 + 生产上下文 ====================
+const PLATFORMS = [
+    { id: 'douyin',      name: '抖音',        color: '#000000' },
+    { id: 'xiaohongshu', name: '小红书',      color: '#FF2442' },
+    { id: 'wechat_mp',   name: '微信公众号',  color: '#07C160' },
+    { id: 'facebook',    name: 'Facebook',    color: '#1877F2' },
+    { id: 'twitter',     name: 'Twitter',     color: '#1DA1F2' },
+    { id: 'reddit',      name: 'Reddit',      color: '#FF4500' },
+];
+const PLATFORM_CONTEXT_KEY = 'logiflowPlatformContext';
+
+function getPlatformContext() {
+    const v = localStorage.getItem(PLATFORM_CONTEXT_KEY);
+    return PLATFORMS.some(p => p.id === v) ? v : 'douyin';
+}
+function setPlatformContext(id) {
+    localStorage.setItem(PLATFORM_CONTEXT_KEY, id);
+}
+function platformName(id) {
+    const p = PLATFORMS.find(p => p.id === id);
+    return p ? p.name : id;
+}
+
 // ==================== Sidebar ====================
 const NAV_ITEMS = [
     { section: '核心' },
@@ -82,11 +105,13 @@ const NAV_ITEMS = [
     { id: 'hotspots', label: '热点审核台', href: '/hotspots.html' },
     { id: 'assets', label: '内容资产', href: '/assets.html' },
     { id: 'video-project', label: '视频项目', href: '/video-project.html' },
+    { id: 'articles', label: '公众号图文', href: '/articles.html' },
     { id: 'editor', label: '内容编辑器', href: '/editor.html' },
     { id: 'queue', label: '发布队列', href: '/queue.html' },
     { section: '分析' },
     { id: 'home', label: '经营驾驶舱', href: '/home.html' },
     { id: 'calendar', label: '发布日历', href: '/calendar.html' },
+    { id: 'ledger', label: '发布台账', href: '/ledger.html' },
     { section: '资源' },
     { id: 'knowledge', label: '企业知识库', href: '/knowledge.html' },
     { id: 'templates', label: 'Prompt 模板', href: '/templates.html' },
@@ -103,8 +128,10 @@ const NAV_ICONS = {
     '经营驾驶舱': '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
     '内容编辑器':  '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
     '视频项目':    '<path d="M4 4h11a2 2 0 012 2v3l5-2.5v11L17 15v3a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zm2 3v10h9V7H6z"/>',
+    '公众号图文':  '<path d="M4 3h12a2 2 0 012 2v6a2 2 0 01-2 2H9l-4 4v-4H4a2 2 0 01-2-2V5a2 2 0 012-2zm2 2v4h12V5H6zm10 7h2v3h-2v-3zM2 15h2v3h3v2H2v-5zm15 1h4a1 1 0 011 1v2h2v2h-2v1a1 1 0 01-1 1h-4a1 1 0 01-1-1v-5a1 1 0 011-1zM7 9h8V7H7v2z"/>',
     '内容资产':    '<path d="M6 2a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6zm0 2h7v5h5v11H6V4z"/>',
     '发布日历':    '<path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5zm2 4h2v2H7v-2zm4 0h2v2h-2v-2zm-4 4h2v2H7v-2zm4 0h2v2h-2v-2z"/>',
+    '发布台账':    '<path d="M19 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>',
     '企业知识库':  '<path d="M6 22v-4.3l-2.6-2.6L2 16.5V22h4zm14 0v-5.5l-1.4-1.4-2.6 2.6V22h4zM12 2L2 7v1h20V7l-10-5zM2 8v2.5l1.4 1.4 2.6-2.6-4-1.3zm10 3l-5-1.6 3.4-3.4L15 9.4l-3-1.6V11zm10-1l-4 1.3 2.6 2.6L22 10.5V8zm0-1h-5l3-3-2-1-4 4-4-4-2 1 3 3H2v1l5 1.6 3 1v4h4v-4l3-1 5-1.6V9z"/>',
     'Prompt 模板':'<path d="M4 6H2v14a2 2 0 002 2h14v-2H4V6zm16-4H8a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2zm0 14H8V4h12v12zm-3-7H11v2h6V9zm0-3h-6v2h6V6zm0 6h-6v2h6v-2z"/>',
     '发布队列':    '<path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/>',
@@ -146,6 +173,13 @@ function renderSidebar(activeId) {
                 <img class="sidebar-logo-image" src="/static/icons/buffalo_logo_header.png?v=1" alt="Buffalo Logo"/>
                 <span class="sidebar-product-name">SA-LOGIFLOW · CONTENT OPERATIONS</span>
             </a>
+        </div>
+        <div class="sidebar-platform-context" style="padding:8px 12px 12px;">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">生产平台</div>
+            <select id="sidebarPlatformSelect" class="select" style="width:100%;font-size:12px;padding:6px 8px;"
+                    onchange="setPlatformContext(this.value); location.reload();" title="当前生产平台：全站生产上下文">
+                ${PLATFORMS.map(p => `<option value="${p.id}" ${getPlatformContext() === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
+            </select>
         </div>
         <nav class="sidebar-nav">${navHtml}</nav>
         <div class="sidebar-footer">

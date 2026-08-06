@@ -158,6 +158,16 @@ function projectShell(listMode=false){
       <h1 id="projectTitle">${listMode?'视频项目':'视频工作台'}</h1>
       <p id="projectSubtitle">${listMode?'选择项目进入五阶段确认工作流':'系统自动生产 · 你只需确认关键节点'}</p>
     </header>
+    <div class="card" style="border-left:4px solid var(--primary);margin:0 24px 12px;">
+      <div class="card-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;">
+        <span style="font-weight:600;">生产平台</span>
+        <select id="platformRouteSelect" class="select" style="font-size:12px;padding:4px 8px;"
+                onchange="onPlatformRouteChange(this.value)">
+          ${PLATFORMS.map(p=>`<option value="${p.id}" ${getPlatformContext()===p.id?'selected':''}>${p.name}</option>`).join('')}
+        </select>
+        <span style="font-size:12px;color:var(--text-muted);">视频工作台只生产短视频（抖音竖屏流程）；公众号图文请到「公众号图文」工作台</span>
+      </div>
+    </div>
     ${listMode?'':`<nav class="wb-stages" id="stageNav" aria-label="视频生产阶段"></nav>
     <div class="wb-body">
       <section class="wb-canvas" id="canvas"></section>
@@ -172,6 +182,16 @@ function projectShell(listMode=false){
 }
 
 function stageIndex(id){return STAGES.findIndex(s=>s.id===id)}
+
+function onPlatformRouteChange(id){
+  setPlatformContext(id);
+  if(id==='wechat_mp'){
+    showToast('视频工作台只生产短视频（抖音竖屏），公众号图文请到「公众号图文」工作台','info');
+    window.location.href='/articles.html';
+    return;
+  }
+  location.reload();
+}
 
 function renderStageNav(){
   const nav=document.getElementById('stageNav');
@@ -461,8 +481,7 @@ function qualityDiagnostics(){
   const score=Number(evaluation.overall_score);
   const failed=!(evaluation.passed===true)||score<80||evaluation.evaluation_status!=='completed';
   const blockedReason=['maximum_attempts_reached','no_meaningful_improvement','actionable_axes_healthy'].includes(decision.reason)?decision.reason:null;
-  const optimized=report.optimized_generation||{};
-  return {evaluation,decision,score,failed,blockedReason,optimized,regeneration:evaluation.regeneration||{}};
+  return {evaluation,decision,score,failed,blockedReason};
 }
 function renderDiagnosticsDecision(diag){
   if(!diag||!diag.failed)return '';
@@ -482,7 +501,7 @@ function renderDiagnosticsDecision(diag){
 function renderDiagnosticsPanel(){
   const diag=qualityDiagnostics();
   if(!diag)return '';
-  const {evaluation,decision,optimized,regeneration}=diag;
+  const {evaluation,decision}=diag;
   const scores=evaluation.scores||{};
   const issues=evaluation.issues||[];
   const axesHtml=QD_AXES.filter(([key])=>scores[key]!==undefined).map(([key,label])=>{
@@ -490,13 +509,11 @@ function renderDiagnosticsPanel(){
     return `<div class="qd-axis${value<80?' low':''}"><span>${label}</span><strong>${value.toFixed(0)}</strong></div>`;
   }).join('');
   const issuesHtml=issues.map(issue=>`<div class="qd-issue${issue.severity==='high'?' high':''}"><div class="meta">${escapeHtml(issue.severity||'')} · ${escapeHtml(issue.category||'')} · ${Number(issue.start_second||0).toFixed(1)}–${Number(issue.end_second||0).toFixed(1)}s</div><div>${escapeHtml(issue.description||'')}</div><div style="margin-top:5px"><strong>建议：</strong>${escapeHtml(issue.suggested_fix||'')}</div></div>`).join('');
-  const optHtml=optimized.required?`<div class="qd-ref"><div class="qd-ref-note">以下为文生视频式建议；本管线用真实素材拼接，改提示词不会改变画面，请以重选素材/改写口播为准。</div>${optimized.revised_prompt?`<div><strong>参考提示词：</strong>${escapeHtml(optimized.revised_prompt)}</div>`:''}${(regeneration.storyboard_changes||[]).length?`<div style="margin-top:5px"><strong>分镜建议：</strong>${regeneration.storyboard_changes.map(c=>escapeHtml(typeof c==='string'?c:JSON.stringify(c))).join('；')}</div>`:''}</div>`:'';
   return `<div class="wb-card" style="margin-top:12px"><h2>AI 质检诊断</h2><div class="qd">
     <div class="qd-score"><strong>${diag.score.toFixed(0)}</strong><span>/100 · ${evaluation.passed?'通过':'未达 80 分线'}</span>${decision.weighted_actionable_score!=null?`<span title="仅计字幕音频/提示词一致/叙事/平台适配四个重生成改得动的轴">可改轴加权分 ${Number(decision.weighted_actionable_score).toFixed(0)} / 100 · 衡量重生成能改善多少</span>`:''}${decision.score_delta!=null?`<span class="delta ${decision.score_delta>=0?'up':'down'}">Δ ${(decision.score_delta>=0?'+':'')+decision.score_delta} vs 上次</span>`:''}</div>
     ${diag.failed?renderDiagnosticsDecision(diag):''}
     ${axesHtml?`<div class="qd-axes">${axesHtml}</div>`:''}
     ${issuesHtml||'<div class="empty-note">质检未列出具体问题</div>'}
-    ${optHtml}
   </div></div>`;
 }
 function renderQualityFixesPanel(){
