@@ -272,10 +272,10 @@ def hydrate_youtube_intake_metadata(
     runner: Callable = subprocess.run,
     limit: int = INTAKE_METADATA_LIMIT,
 ) -> tuple[list[dict], dict]:
-    """Attach public video facts before the internal model decides what to download.
+    """Attach public video facts to pre-download candidates (metadata hydration).
 
-    This deliberately runs before `select_for_hook_ingestion`: the model receives
-    actual source-provided title/description, never guessed visual content.
+    Candidates receive actual source-provided title/description, never guessed
+    visual content, before any downstream analysis or curation runs.
     """
     hydrated: list[dict] = []
     report = {"requested": 0, "ready": 0, "cached": 0, "failed": []}

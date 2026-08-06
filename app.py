@@ -1378,9 +1378,9 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
 
     This legacy safety net deliberately rejects public-affairs footage that can
     mention a generic "delivery" question but sits outside Buffalo's confirmed
-    ecommerce, cross-border, warehousing and last-mile scope.  New intake runs
-    make this decision with RAG + Qwen; the local gate keeps older, pre-SOP
-    rows from silently re-entering the usable Hook library.
+    ecommerce, cross-border, warehousing and last-mile scope.  Downloaded media
+    are curated by the built-in model after analysis; the local gate keeps older,
+    pre-SOP rows from silently re-entering the usable Hook library.
     """
     evidence = event.get("evidence") or {}
     required = ("what_happened", "hook_reason", "logistics_question")
