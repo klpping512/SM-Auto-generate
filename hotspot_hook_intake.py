@@ -13,6 +13,9 @@ from typing import Iterable
 
 import model_router
 import hotspot_intake_sop
+from database import add_hook_intake_diagnostic
+# curator 不 import intake，无循环依赖；若未来反向依赖改为局部 import。
+from hotspot_hook_curator import _extract_json
 
 
 PROMPT_VERSION = "hotspot-hook-intake-v5"
@@ -84,13 +87,11 @@ def _audit_prompt(candidates: list[dict], selections: list[dict], sop: dict) -> 
 
 
 def _parse_selections(content: str, allowed: dict[int, dict], target_request_ids: set[int]) -> list[dict]:
-    raw = str(content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
-        rows = json.loads(raw).get("selections") or []
+        parsed = _extract_json(content)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("热点入库模型未返回合法 JSON") from exc
+    rows = parsed.get("selections") if isinstance(parsed, dict) else []
     selections: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -143,13 +144,11 @@ def _parse_selections(content: str, allowed: dict[int, dict], target_request_ids
 
 
 def _parse_audit(content: str, allowed_ids: set[int]) -> dict[int, str]:
-    raw = str(content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
-        rows = json.loads(raw).get("approved") or []
+        parsed = _extract_json(content)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("热点入库事实审计模型未返回合法 JSON") from exc
+    rows = parsed.get("approved") if isinstance(parsed, dict) else []
     approved: dict[int, str] = {}
     for row in rows:
         try:
@@ -160,6 +159,48 @@ def _parse_audit(content: str, allowed_ids: set[int]) -> dict[int, str]:
         if media_id in allowed_ids and reason:
             approved[media_id] = reason
     return approved
+
+
+def _call_with_json_retry(stage, job_id, role, prompt_version, messages, max_tokens, parse_fn):
+    """调用 + 解析；JSON 解析失败时绕缓存（use_cache=False）真调一次。
+
+    - 失败现场逐次写 hook_intake_diagnostics（attempt=1 初始 / attempt=2 重试）；
+    - 两次都失败 → 照旧抛 ValueError（上游行为不变）；
+    - 返回 (parsed, retried, result)。stage: 'selection' | 'audit'。
+    """
+    model = (model_router.get_route(role) or {}).get("model") or ""
+    retried = False
+
+    def _call(use_cache):
+        return asyncio.run(model_router.call_text(
+            job_id, role, messages,
+            prompt_version=prompt_version,
+            max_output_tokens=max_tokens,
+            use_cache=use_cache,
+        ))
+
+    def _parse(result, attempt):
+        content = result.get("content") or ""
+        try:
+            return parse_fn(content)
+        except ValueError as exc:
+            # 原始返回不丢；写库失败只记日志，绝不反噬决策。
+            add_hook_intake_diagnostic(
+                stage, job_id, attempt, prompt_version,
+                model=model, cache_hit=bool(result.get("cache_hit")),
+                error=str(exc), raw_content=content,
+            )
+            raise
+
+    result = _call(use_cache=True)
+    try:
+        parsed = _parse(result, 1)
+    except ValueError:
+        # 一次性重试：必须绕过缓存，避免第一次坏返回原样复现。
+        retried = True
+        result = _call(use_cache=False)
+        parsed = _parse(result, 2)
+    return parsed, retried, result
 
 
 def select_for_hook_ingestion(
@@ -200,46 +241,45 @@ def select_for_hook_ingestion(
         "planner_text",
     )
     model_router.create_budget(
-        job_id, max_calls=1, max_input_tokens=16_000,
+        job_id, max_calls=2, max_input_tokens=16_000,
         max_output_tokens=model_router.required_output_budget("planner_text", 1_000),
+        # max_calls=2 = 1 次初始选片 + 1 次 JSON 解析失败重试（同一决策尝试内）。
     )
-    result = asyncio.run(model_router.call_text(
-        job_id,
-        "planner_text",
+    selections, sel_retried, result = _call_with_json_retry(
+        "selection", job_id, "planner_text", PROMPT_VERSION,
         [
             {"role": "system", "content": "严格返回 JSON，不要 Markdown；不能根据镜头外信息或未提供的 RAG 编造事实。"},
             {"role": "user", "content": _prompt(candidates, maximum, sop, target_rows)},
         ],
-        prompt_version=PROMPT_VERSION,
-        max_output_tokens=1_000,
-    ))
-    selections = _parse_selections(result.get("content") or "", allowed, target_ids)
+        1_000,
+        lambda content: _parse_selections(content, allowed, target_ids),
+    )
     if not selections:
         return [], {
             "status": "no_qualified_media",
             "selected_count": 0,
             "model": model_router.get_route("planner_text").get("model"),
             "cache_hit": bool(result.get("cache_hit")),
+            "retries": {"selection": 1 if sel_retried else 0, "audit": 0},
             "rag_sop": sop_meta,
         }
     audit_job_id = model_router.route_scoped_job_id("hotspot-hook-intake-audit-" + hashlib.sha256(
         json.dumps({"sop": sop, "prompt_version": AUDIT_PROMPT_VERSION, "candidates": candidates, "selections": selections}, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16], "critic")
     model_router.create_budget(
-        audit_job_id, max_calls=1, max_input_tokens=10_000,
+        audit_job_id, max_calls=2, max_input_tokens=10_000,
         max_output_tokens=model_router.required_output_budget("critic", 500),
+        # max_calls=2 = 1 次初始审计 + 1 次 JSON 解析失败重试。
     )
-    audit_result = asyncio.run(model_router.call_text(
-        audit_job_id,
-        "critic",
+    approved, audit_retried, audit_result = _call_with_json_retry(
+        "audit", audit_job_id, "critic", AUDIT_PROMPT_VERSION,
         [
             {"role": "system", "content": "严格返回 JSON；RAG 证据不足或关联牵强时必须拒绝。"},
             {"role": "user", "content": _audit_prompt(candidates, selections, sop)},
         ],
-        prompt_version=AUDIT_PROMPT_VERSION,
-        max_output_tokens=500,
-    ))
-    approved = _parse_audit(audit_result.get("content") or "", {item["media_id"] for item in selections})
+        500,
+        lambda content: _parse_audit(content, {item["media_id"] for item in selections}),
+    )
     by_id = {int(row["id"]): row for row in rows}
     selected: list[dict] = []
     for selection in selections:
@@ -272,6 +312,7 @@ def select_for_hook_ingestion(
         "selected_count": len(selected),
         "model": model_router.get_route("planner_text").get("model"),
         "cache_hit": bool(result.get("cache_hit")),
+        "retries": {"selection": 1 if sel_retried else 0, "audit": 1 if audit_retried else 0},
         "rag_sop": sop_meta,
         "audit": {
             "model": model_router.get_route("critic").get("model"),

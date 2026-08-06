@@ -303,3 +303,28 @@ def classify(raw: str) -> str:
 - **与策展加固的关系**：策展那条链（`94fe241`）用的是"不改 parse、外部加失败捕获+重试+落库"；本指令在此基础上**多一步**——把 parse 的 JSON 提取升级为 `_extract_json`。原因：入库选片的两段解析**从来就没有** `<think>`/平衡 JSON 兜底（策展有 `_extract_json`），不升级就只能靠模型重试硬扛这类可避免的失败。行级校验一字未动，不违背合规。
 - **为什么诊断按 `job_id`+`stage` 而不是 asset_id**：入库选片是**批量决策**（一条调用覆盖多条候选），不是策展那种"单资产一条调用"。`job_id` 由 fingerprint 派生（`hotspot-hook-intake-{sha256}[:16]`），同一次决策的两段（selection/audit）job 前缀不同，stage 区分之。
 - 若后续发现 audit 段 `max_output_tokens=500` 偏小导致截断为主，按 dump 结论单独出指令调（不要顺手调）。
+
+## 七、总指挥核实结论（2026-08-06）
+
+> 前置核实：qcoder 对本指令调用链的六条事实核查全部属实，但定性需要修正。本小节为拍板定调，执行前先读。
+
+**事实核实（已逐一对照源码）：**
+
+1. `select_for_hook_ingestion`（`hotspot_hook_intake.py:165`）仅被两个脚本与测试调用：`dry_run_hotspot_intake_sop.py:59`、`reprocess_hotspot_hook_source.py:91`。`scheduler.py` 与 `app.py` 均无直接调用点。
+2. 生产主力路径（三天全量 `prewarm_authorized_hotspot_media` + 6h 增量 `fetch_hotspots_then_incremental_hook_intake`）在 `scheduler.py:244-249` **硬编码 `intake_decision` bypass** 了本函数——已授权视频全部进入分析，不做模型选片。
+3. **消费端已有兜底**：`app.py:217` `_normalized_hotspot_intake_decision` 防御性解析 `intake_decision_json`（"without letting malformed JSON block curation"），materialization 各读取点（L3011/3094/3164）吃坏 JSON 只会降级为 `{}`，不会炸。
+4. Curator 不 import intake（`hotspot_hook_curator.py` 仅 import model_router / hotspot_hook_selection_sop / hotspot_lexicon / database），本指令 B1 顶层 `from hotspot_hook_curator import _extract_json` **无循环依赖**，安全。
+5. `model_router.call_text` 默认 `use_cache=True`（`model_router.py:293`），B4 的绕缓存重试语义成立。
+6. 策展加固已闭环（commit `94fe241`，`curator.py:364-406`：max_calls=2 / reset=True / use_cache=False 重试 / 诊断落库），本指令 B1-B5 为同一模式的复刻。
+
+**定性修正（拍板）：**
+
+本指令**不是**"策展同款高危修复"。策展在用户可见链路（每次 materialization 都调），入库选片既低频、消费端又有兜底。本指令真实买到的价值是：
+
+1. **免费文本恢复**——`_extract_json` 剥 `<think>` + 取平衡 JSON，不花模型调用消灭一类本可避免的失败；
+2. **一次性重试**——吸收偶发坏返回，省管理员手动重跑；
+3. **诊断采样**（最有价值）——`hook_intake_diagnostics` 表给存量"截断 vs 空返回"待决问题（策展拍板先观察）额外开了一个采样源，服务后续分类定性。
+
+**优先级**：排当前挂账项（za-stock 展示修复 / 受控开闸）**之后**执行——它不是用户可见风险。执行时 B1-B5 照抄；不改行级校验；验收后把 dump 分类计数报总指挥拍板。
+
+**一个结构性提示**：调度器 bypass 选片模型是"成本换确定性"的设计（全量分析 vs 模型筛选）。若未来恢复模型驱动选片省 API 成本，本加固将从"保险"升级为"生产关键"——这也是现在便宜做掉它的理由。

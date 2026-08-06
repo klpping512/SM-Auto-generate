@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 
 def _segments():
     return [
@@ -494,3 +496,166 @@ def test_rag_sop_retrieves_using_hotspot_candidate_title_and_summary_fields(tmp_
 
     assert evidence[0]["id"] == f"brand:{warehouse_id}"
     assert evidence[0]["retrieval_score"] > evidence[1]["retrieval_score"]
+
+
+def _intake_case(tmp_db):
+    """构造一条能过行级校验的入库候选（JSON 加固测试共用）。"""
+    evidence_id = tmp_db.create_brand_evidence({
+        "claim": "Buffalo 有已确认的仓库、包裹检查和装卸日常作业能力。",
+        "evidence_note": "仅支持仓储履约准备，不证明热点现场。",
+        "status": "confirmed",
+    })
+    media_rows = [{"id": 141, "hotspot_id": 30, "duration_seconds": 240, "platform": "youtube"}]
+    hotspots = {
+        30: {
+            "title": "Warehouse teams inspect parcels before dispatch",
+            "summary": "Staff check parcels and prepare outbound loading",
+            "publisher": "SA News",
+        }
+    }
+    selection_row = {
+        "media_id": 141,
+        "rag_evidence_ids": [f"brand:{evidence_id}"],
+        "service_fit": "已确认的仓储与包裹检查作业可用于解释出库前准备。",
+        "expected_hook": "工作人员检查包裹并准备装车的现场动作。",
+        "why": "已知仓库包裹检查，母片可能包含连续履约动作。",
+        "logistics_question": "出库前应怎样核对包裹状态？",
+        "confidence": 0.82,
+    }
+    return media_rows, hotspots, selection_row
+
+
+def test_intake_retries_once_on_json_failure_then_succeeds(tmp_db, monkeypatch):
+    import hotspot_hook_intake
+
+    media_rows, hotspots, selection_row = _intake_case(tmp_db)
+    calls = []
+
+    async def fake_call(*_args, **kwargs):
+        calls.append((kwargs["prompt_version"], kwargs.get("use_cache", True)))
+        if kwargs["prompt_version"] == hotspot_hook_intake.AUDIT_PROMPT_VERSION:
+            return {"content": json.dumps({"approved": [{"media_id": 141, "reason": "仓储作业证据与包裹检查现场直接对应。"}]}, ensure_ascii=False), "cache_hit": False}
+        if kwargs.get("use_cache", True):
+            return {"content": "not json", "cache_hit": True}
+        return {"content": json.dumps({"selections": [selection_row]}, ensure_ascii=False), "cache_hit": False}
+
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+
+    selected, meta = hotspot_hook_intake.select_for_hook_ingestion(media_rows, hotspots, maximum=2)
+
+    selection_calls = [item for item in calls if item[0] == hotspot_hook_intake.PROMPT_VERSION]
+    assert len(selection_calls) == 2
+    assert selection_calls[1][1] is False  # 重试必须绕缓存
+    assert [item["id"] for item in selected] == [141]
+    assert meta["retries"]["selection"] == 1
+    assert meta["retries"]["audit"] == 0
+
+
+def test_intake_records_diagnostic_on_both_failures(tmp_db, monkeypatch):
+    import database
+    import hotspot_hook_intake
+
+    media_rows, hotspots, _row = _intake_case(tmp_db)
+    calls = []
+
+    async def fake_call(*_args, **kwargs):
+        calls.append(kwargs.get("use_cache", True))
+        return {"content": "not json", "cache_hit": bool(kwargs.get("use_cache", True))}
+
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+
+    with pytest.raises(ValueError, match="热点入库模型未返回合法 JSON"):
+        hotspot_hook_intake.select_for_hook_ingestion(media_rows, hotspots)
+
+    assert calls == [True, False]
+    rows = database.list_hook_intake_diagnostics(stage="selection")
+    assert len(rows) == 2
+    assert sorted(row["attempt_number"] for row in rows) == [1, 2]
+    assert all(row["raw_content"] == "not json" for row in rows)
+    by_attempt = {row["attempt_number"]: row for row in rows}
+    assert by_attempt[1]["cache_hit"] == 1
+    assert by_attempt[2]["cache_hit"] == 0
+
+
+def test_intake_audit_retries_on_json_failure(tmp_db, monkeypatch):
+    import hotspot_hook_intake
+
+    media_rows, hotspots, selection_row = _intake_case(tmp_db)
+
+    async def fake_call(*_args, **kwargs):
+        if kwargs["prompt_version"] == hotspot_hook_intake.AUDIT_PROMPT_VERSION:
+            if kwargs.get("use_cache", True):
+                return {"content": "audit broken", "cache_hit": True}
+            return {"content": json.dumps({"approved": [{"media_id": 141, "reason": "仓储作业证据与包裹检查现场直接对应。"}]}, ensure_ascii=False), "cache_hit": False}
+        return {"content": json.dumps({"selections": [selection_row]}, ensure_ascii=False), "cache_hit": False}
+
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+
+    selected, meta = hotspot_hook_intake.select_for_hook_ingestion(media_rows, hotspots, maximum=2)
+
+    assert [item["id"] for item in selected] == [141]
+    assert meta["retries"]["selection"] == 0
+    assert meta["retries"]["audit"] == 1
+
+
+def test_parse_selections_recovers_think_and_fence(tmp_db):
+    import hotspot_hook_intake
+
+    _media_rows, _hotspots, selection_row = _intake_case(tmp_db)
+    allowed = {141: {
+        "media_id": 141,
+        "hotspot_title": "Warehouse teams inspect parcels before dispatch",
+        "hotspot_summary": "Staff check parcels and prepare outbound loading",
+        "rag_evidence": [{"id": selection_row["rag_evidence_ids"][0]}],
+    }}
+    content = (
+        "<think>先想一下这条候选是否满足 SOP。</think>\n"
+        "```json\n"
+        + json.dumps({"selections": [selection_row]}, ensure_ascii=False)
+        + "\n```"
+    )
+
+    selections = hotspot_hook_intake._parse_selections(content, allowed, set())
+
+    assert len(selections) == 1
+    assert selections[0]["media_id"] == 141
+    assert selections[0]["admission_mode"] == "direct"
+
+
+def test_intake_budget_allows_two_calls(tmp_db, monkeypatch):
+    import hotspot_hook_intake
+
+    media_rows, hotspots, selection_row = _intake_case(tmp_db)
+    budgets = []
+
+    def capture_budget(job_id, **kwargs):
+        budgets.append((job_id, kwargs))
+
+    async def fake_call(*_args, **kwargs):
+        if kwargs["prompt_version"] == hotspot_hook_intake.AUDIT_PROMPT_VERSION:
+            return {"content": json.dumps({"approved": [{"media_id": 141, "reason": "仓储作业证据与包裹检查现场直接对应。"}]}, ensure_ascii=False), "cache_hit": False}
+        return {"content": json.dumps({"selections": [selection_row]}, ensure_ascii=False), "cache_hit": False}
+
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "create_budget", capture_budget)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_intake.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+
+    hotspot_hook_intake.select_for_hook_ingestion(media_rows, hotspots, maximum=2)
+
+    assert len(budgets) == 2
+    selection_job, selection_kwargs = budgets[0]
+    audit_job, audit_kwargs = budgets[1]
+    assert "hotspot-hook-intake-" in selection_job
+    assert "hotspot-hook-intake-audit-" in audit_job
+    assert selection_kwargs["max_calls"] == 2
+    assert audit_kwargs["max_calls"] == 2
