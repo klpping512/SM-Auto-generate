@@ -418,6 +418,9 @@ async def call_multimodal_json(
         max_output_tokens=12_000,
     )
     cached = db.get_model_cache(cache_key)
+    # 防御：命中内容为空则当未命中，继续走线上（不把空结果当有效缓存）。
+    if cached and not str((cached.get("response") or {}).get("content") or "").strip():
+        cached = None
     if cached:
         hit = record_call(
             job_id,
@@ -473,7 +476,13 @@ async def call_multimodal_json(
                         continue
                 response.raise_for_status()
                 response_payload = response.json()
-                break
+                if _visible_text_content(response_payload):
+                    break
+                # MiMo 偶发 200 但正文为空（质检不可用根因）：当瞬态失败重试，与 429/5xx 同级。
+                if attempt + 1 < max_attempts:
+                    await asyncio.sleep(min(2 ** attempt, 4))
+                    continue
+                raise RuntimeError("多模态模型返回了空内容")
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt + 1 >= max_attempts:
                     raise

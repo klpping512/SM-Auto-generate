@@ -346,3 +346,58 @@ async def test_multimodal_json_call_uses_image_content_and_json_mode(tmp_db, mon
     assert "max_completion_tokens" not in body
     assert result["content"] == '{"passed":true}'
     assert tmp_db.get_model_budget("video-eval-call")["calls_used"] == 1
+
+
+async def test_multimodal_json_retries_on_empty_content_then_succeeds(tmp_db, monkeypatch):
+    # 批13 块E1：MiMo 偶发 200 但正文为空 → 当瞬态失败重试；首两次空、第三次正常应成功且共调 3 次。
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(200, request=request, json={"choices": [{"message": {"content": ""}}], "usage": {}})
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": '{"passed":true}'}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await model_router.call_multimodal_json(
+            "eval-empty-retry", "video_evaluator",
+            [{"role": "user", "content": "Return JSON"}],
+            prompt_version="video-qa-empty", client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert calls["n"] == 3
+    assert result["content"] == '{"passed":true}'
+
+
+async def test_multimodal_json_raises_when_all_attempts_empty(tmp_db, monkeypatch):
+    # 批13 块E1：连续全空 → 重试耗尽后抛「多模态模型返回了空内容」。
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request):
+        calls["n"] += 1
+        return httpx.Response(200, request=request, json={"choices": [{"message": {"content": ""}}], "usage": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="空内容"):
+            await model_router.call_multimodal_json(
+                "eval-all-empty", "video_evaluator",
+                [{"role": "user", "content": "Return JSON"}],
+                prompt_version="video-qa-all-empty", client=client, max_attempts=3,
+            )
+    finally:
+        await client.aclose()
+
+    assert calls["n"] == 3
