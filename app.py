@@ -1017,7 +1017,7 @@ async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | Non
     events = db.list_hotspot_event_clips(asset_id=asset_id, hotspot_id=hotspot_id)
     if eligible_only:
         events = [event for event in events if _is_confirmed_renderable_hotspot_hook(event)]
-    segments = db.list_asset_segments(limit=2_000)
+    segments = db.list_asset_segments(limit=20_000)
     for event in events:
         _decorate_hotspot_event(event, segments)
     return events
@@ -1052,7 +1052,7 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
     preview_url = "/static/" + event["clip_path"] if has_proxy else public.get("url")
     preview_start = 0 if has_proxy else start_second
     preview_end = (int(event.get("duration_ms") or 0) / 1000) if has_proxy else end_second
-    event["matches"] = hotspot_event_matching.match_event(event, segments or db.list_asset_segments(limit=2_000))
+    event["matches"] = hotspot_event_matching.match_event(event, segments or db.list_asset_segments(limit=20_000))
     event["virtual_asset"] = {
         "id": event["virtual_asset_id"],
         "name": event["title_zh"],
@@ -1094,7 +1094,7 @@ async def get_hotspot_event_matches(event_id: int, user=Depends(get_current_user
     event = next((item for item in events if item["id"] == event_id), None)
     if not event:
         raise HTTPException(404, "热点事件不存在")
-    return hotspot_event_matching.match_event(event, db.list_asset_segments(limit=2_000))
+    return hotspot_event_matching.match_event(event, db.list_asset_segments(limit=20_000))
 
 
 def _topic_keywords(value: str) -> list[str]:
@@ -1232,7 +1232,7 @@ def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
         score = sum(1 for term in terms if term.casefold() in text)
         if score or item.get("confirmed_at"):
             media.append({"evidence_type": "hotspot_media", "source_id": item["id"], "content_role": "hotspot_hook", "relevance_score": score * 20 + (5 if item.get("confirmed_at") else 0), "match_reason": "已登记授权状态的热点媒体候选", "rights_status": item.get("authorization_status")})
-    for segment in db.list_asset_segments(limit=2_000):
+    for segment in db.list_asset_segments(limit=20_000):
         if segment.get("asset_hotspot_id") is not None or str(segment.get("asset_file_type") or "") != "video":
             continue
         category = str(segment.get("primary_category") or "")
@@ -1859,7 +1859,7 @@ async def _generate_topic_brief_video(
             if int(second["start_ms"]) < int(first["end_ms"]):
                 raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
     source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
-    owned_segments = [item for item in db.list_asset_segments(limit=2_000) if not item.get("asset_hotspot_id")]
+    owned_segments = [item for item in db.list_asset_segments(limit=20_000) if not item.get("asset_hotspot_id")]
     owned_images = [
         item for item in db.list_assets(file_type="image", status="active")
         if not item.get("hotspot_id")
@@ -2343,7 +2343,7 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
     if not event:
         raise HTTPException(404, "热点事件不存在")
     owned_segments = [
-        item for item in db.list_asset_segments(limit=2_000)
+        item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
     ]
     owned_images = [
@@ -2466,7 +2466,7 @@ async def create_semantic_match(req: SemanticMatchRequest, user=Depends(get_curr
     atoms = semantic_matching.build_semantic_atoms(payload)
     if not atoms:
         raise HTTPException(400, "请提供口播文案或结构化分镜")
-    assignments = semantic_matching.assign_candidates(atoms, db.list_asset_segments(limit=2_000), top_k=3)
+    assignments = semantic_matching.assign_candidates(atoms, db.list_asset_segments(limit=20_000), top_k=3)
     session_id = db.create_match_session(user["id"], payload)
     for assignment in assignments:
         atom_id = db.create_semantic_atom(session_id, assignment)
@@ -4479,7 +4479,7 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         }
     primary = locked_events[0]
     owned_segments = [
-        item for item in db.list_asset_segments(limit=2_000)
+        item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
     ]
     owned_images = [
@@ -4587,7 +4587,7 @@ async def diagnostics_owned_matching(
     if not topic:
         raise HTTPException(status_code=400, detail="topic 不能为空")
     owned_segments = [
-        item for item in db.list_asset_segments(limit=2_000)
+        item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
     ]
     locked_events: list[dict] = []
@@ -4633,7 +4633,7 @@ async def diagnostics_owned_matching(
     }
     if event is not None:
         payload["event_diagnostics"] = hotspot_event_matching.diagnose_event_matching(
-            event, db.list_asset_segments(limit=2_000),
+            event, db.list_asset_segments(limit=20_000),
         )
     return payload
 

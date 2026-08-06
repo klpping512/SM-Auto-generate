@@ -3914,8 +3914,11 @@ def list_asset_segments(asset_id: int | None = None, status: str = "active", lim
         if status:
             sql += " AND s.status=? AND a.status='active'"
             params.append(status)
+        # 全库段约 1.9 万（youtube 1.8 万 + 自有 + za-stock），cap 2000 会把
+        # 后半库资产（asset_id>314）全部截掉——生产成片与诊断都选不到。
+        # 提到 20000 覆盖当前全库，仍留 10 倍余量防失控。
         sql += " ORDER BY s.asset_id,s.segment_index LIMIT ?"
-        params.append(max(1, min(int(limit), 2_000)))
+        params.append(max(1, min(int(limit), 20_000)))
         items = []
         for row in conn.execute(sql, params).fetchall():
             item = dict(row)

@@ -239,7 +239,12 @@ def _owned_node_tag_relevance(item: dict, brief: dict) -> float:
     return overlap / max(3.0, min(float(len(wanted)), 8.0))
 
 
-_OWNED_ASSET_SOURCES = frozenset({"upload", "directory", "local_directory", "manual", "local"})
+_OWNED_ASSET_SOURCES = frozenset({
+    "upload", "directory", "local_directory", "manual", "local",
+    # 受控放行：za-stock 免版权通用背景。仅用于补视觉洞，口播由文案门禁
+    # (apply_overclaim_guard) 强制走安全模板，不构成 Buffalo 能力证明。
+    "za_stock_license",
+})
 
 
 def _is_owned_video_segment(item: dict) -> bool:
@@ -249,6 +254,8 @@ def _is_owned_video_segment(item: dict) -> bool:
 def _is_buffalo_usable_source(item: dict) -> bool:
     # Licensed stock or a generic library must not be represented as Buffalo
     # proof.  Existing legacy rows omit asset_source and remain usable.
+    # za_stock_license 是受控例外：通用背景素材，仅补视觉洞；scene 带
+    # asset_source 标记，文案门禁据此强制走安全模板（不宣称南非现场/自有能力）。
     source = item.get("asset_source")
     return not source or str(source) in _OWNED_ASSET_SOURCES
 
@@ -795,6 +802,8 @@ def plan_followup_scenes(
                 "asset_id": segment.get("asset_id"), "asset_segment_id": segment.get("id"),
                 # 文案门禁需要按镜头主分类精准拦截过度宣称。
                 "primary_category": category,
+                # 受控开闸：za-stock 通用背景段必须带来源标记，门禁据此强制安全模板。
+                "asset_source": segment.get("asset_source") or "",
                 "asset_start_ms": segment.get("start_ms", 0), "asset_end_ms": segment.get("end_ms", 0),
                 "copy_anchor": _owned_copy_anchor(segment),
                 "action_key": _owned_action_key(segment),

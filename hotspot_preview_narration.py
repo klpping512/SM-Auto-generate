@@ -326,6 +326,15 @@ def requires_safe_customs_copy(primary_category: str, logistics_nodes: list[str]
     return bool(nodes & CUSTOMS_NODES)
 
 
+# 受控开闸：za-stock 免版权通用背景，即使 primary_category=='customs' 也必须走
+# 安全准备模板——画面是通用空镜，口播不得宣称南非现场或 Buffalo 自有能力。
+_ZASTOCK_SOURCES = frozenset({"za_stock_license"})
+
+
+def is_zastock_context(source: str) -> bool:
+    return str(source or "").casefold() in _ZASTOCK_SOURCES
+
+
 def overclaim_completion_issues(voiceover: str, primary_category: str, logistics_nodes: list[str]) -> list[str]:
     """当一条 scene 用非-customs 素材在 customs 节点下宣称已完成受监管结果时，
     返回问题列表（非空即违规）。纯确定性子串匹配，无模型调用，可单测。"""
@@ -366,12 +375,15 @@ def apply_overclaim_guard(
         voiceover = str(item.get("voiceover") or "")
         overlay = str(item.get("text_overlay") or "")
         category = str(scene.get("primary_category") or "")
+        source = str(scene.get("asset_source") or "")
         try:
             max_chars = scene_voiceover_char_limit(scene)
         except (TypeError, ValueError):
             max_chars = None
-        if requires_safe_customs_copy(category, logistics_nodes):
-            # 第一道（白名单/正向强制）：借来上下文的危险 scene，无条件用安全模板，
+        # 受控开闸：za-stock 素材无论分类一律强制安全模板（画面是通用背景）。
+        # 真 customs 自有素材仍可正常改写；黑名单兜底保留。
+        if is_zastock_context(source) or requires_safe_customs_copy(category, logistics_nodes):
+            # 第一道（白名单/正向强制）：借来上下文或 za-stock 通用背景，无条件用安全模板，
             # 模型那句连看都不看——不给它自由说话的机会（真气密）。
             safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
                 category, max_chars=max_chars, min_chars=5,
@@ -379,6 +391,7 @@ def apply_overclaim_guard(
             records.append({
                 "scene": index + 1,
                 "primary_category": category,
+                "asset_source": source,
                 "mode": "whitelist_forced",
                 "issues": [],
                 "original_voiceover": voiceover,

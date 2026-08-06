@@ -55,7 +55,7 @@ def main() -> int:
         except ValueError:
             continue
     owned = [
-        item for item in db.list_asset_segments(limit=2_000)
+        item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
         and int(item.get("asset_id") or 0) not in excluded_owned_assets
     ]
