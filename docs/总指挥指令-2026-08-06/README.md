@@ -9,7 +9,7 @@
 | # | 指令 | 状态 | 说明 |
 |---|------|------|------|
 | 1 | 策展 JSON 失败：原始返回 dump + 一次性重试 | **已执行** | 落库诊断 + max_calls=2 一次性重试（use_cache=False）；保留频道 10 条 requeue 后全出合法 JSON（0 hook）；诊断表暂无现场（未触发解析失败）。文件：`策展JSON失败-原始返回dump+一次性重试-Cursor执行指令.md` |
-| 2 | za-stock 受控开闸 + 文案门禁兜底 + cap→20000 | **已执行** | `za_stock_license` 受控进池 + 口播强制安全模板 + cap 20000；清关验收 category_match↑、za customs 可用资产 24。文件：`za-stock-受控开闸-Cursor执行指令.md` |
+| 2 | za-stock 受控开闸 + 文案门禁兜底 + cap→20000 | **已执行+验收过** | `za_stock_license` 受控进池 + 口播强制安全模板 + cap 20000；清关验收 category_match↑、za customs 可用资产 24。**总指挥独立复核**（复跑真实 `diagnose_owned_matching`）：category_match=351 / after_dedup=155、category_inventory={facility:53,brand:3} 无 customs、verdict=healthy；新测 4 条，全量 811 passed。commit `46ea006`。文件：`za-stock-受控开闸-Cursor执行指令.md` |
 | 3 | za-stock 素材库展示层修复 | **待执行** | 展示 bug：media_assets.py:207 source_label 硬编码二选一 → za-stock 显示成"Buffalo 原有素材"。改为三元（免版权素材）+ assets.html 区块拆两节 + 卡片 za-stock tag（用户要求）+ 测试。文件：`za-stock-素材库展示层修复-Cursor执行指令.md`。与 #2 无文件冲突，可并行。 |
 | 4 | 入库选片 JSON 加固 | **待执行** | 另立项目转正：hotspot_hook_intake 两段模型调用（selection/audit）复刻策展 dump+重试模式；外加 parse 升级用 _extract_json（剥 think/平衡 JSON）。诊断表按 job_id+stage。文件：`入库选片JSON加固-Cursor执行指令.md`。 |
 
