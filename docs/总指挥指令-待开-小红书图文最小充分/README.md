@@ -15,6 +15,32 @@
 | 1 | P1 | 渲染前/后门禁 + 标题三层规则 | 1–2 天 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
 | 2 | P2 | SEO 词库 / 分类配图 / 差异化守卫 | ~1 周 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
 | 3 | P3 | 人工台账 + 周复盘导出 | 运营为主 | ✅ 已验收（2026-08-06 总指挥对抗审阅通过，备注见下） |
+| 4 | P1 | 内页全图打底 + 标注块（模板批） | 0.5–1 天 | ✅ 已验收（2026-08-07 总指挥对抗审阅通过，备注见下） |
+
+---
+
+## 第 4 批 · 内页全图打底 + 标注块（模板批）
+
+**状态：✅ 已验收（2026-08-07）。** 执行提交 `a8b4293`（含 990a403 日志 hash 回写）。执行指令见 [第4批-内页全图打底与标注块模板-Cursor执行指令.md](第4批-内页全图打底与标注块模板-Cursor执行指令.md)。
+
+**验收备注（2026-08-07）：** 逐条翻码 + harness 24/24 + 铁律全绿（只动渲染层与测试，零 schema，未碰 photo_match/diff_guard/quality_gate/ledger/scheduler/app.py 发布路径）。三处备注见下。
+
+1. **测试兜底机制修正（合理偏离）**：`test_upload_api` 原 `DASHSCOPE_API_KEY=""` monkeypatch 打在一个不被读取的属性上（`chat_model_available()` 读的是 `os.environ["MIMO_API_KEY"]`），是潜伏 bug；executor 改为 mock `ai_engine._complete_json_messages` 抛错强制 fallback，且 `generate_content` 对小红书有 try/except 接住落到 `_fallback_content`。只在测试代码内，修复合理。
+2. **improve log 条目位置**：第4批「已开」条追加在文件末尾、executor 的「v5 落地」条插在文件顶部，一前一后但内容正确，非阻塞。
+3. **验收 harness 取样框**：对抗验收时我自己的圆点取样框曾漏掉末页活动白点（`_dots` 白点随页码右移，图5 在 x≈681），修正后 24/24——非代码缺陷。
+
+**拍板：** 总指挥现场反馈「不只是图一有图片素材，图2到图5都要有图片素材，看着没那么乏味、也比较专业些」，参考 `小红书实例图/` 官方成品；版式方向 AskUserQuestion 确认「全图打底+标注块」，并追加定式「第一张内页标注块在下面，然后依次上-下-上交替」。
+
+**根因：** 配图素材已按页喂到渲染层（批次 2 `pick_photos` + `render_carousel(photo_pool=...)`，`pool[index % len(pool)]` 逐页解照片），但 `_draw_photo_page` 是 stub（直接回 `_draw_text_page`）、`_render_page` 只把偶数页路由给它——**照片到了绘制层被丢掉**。本批纯改渲染层，不碰素材调度。
+
+**范围：**
+1. **A** `xhs_cards.py`：`_draw_photo_page` 实现「全图打底 + 标注块」，标注块位置 `bottom if index % 2 == 1 else top`（图2下/图3上/图4下/图5上）；`_render_page` 内页一律优先照片页、无照片回退文本页；`TEMPLATE_VERSION` v4→v5
+2. **B** 测试：`test_xhs_cards.py` L44 与 `test_upload_api.py` L99 版本断言同步 v5；新增「内页交替位置 / 照片页品牌与圆点 / 无照片兜底」用例
+3. **C** 验收脚本（可选，不入库）：生产链路真渲染（真库 `pick_photos` → `render_carousel`）目检交替版式
+
+**铁律：** 显式模板批（v4→v5 是放行范围），除此之外不顺手改模板；只动渲染层与测试，不碰 `xhs_photo_match`/`xhs_diff_guard`/`xhs_quality_gate`/`xhs_ledger`/scheduler/app.py 发布路径/schema；无照片兜底不变（回退文本页）；单图缺失只影响该页、不中断渲染；不引入新依赖。
+
+**明确不做：** 改封面版式；改素材调度/门禁/选片逻辑；为对齐某规律硬凑页数。
 
 ---
 
@@ -135,6 +161,9 @@
 
 | 时间 | 说明 |
 |---|---|
+| 2026-08-07 | 第 4 批验收通过：a8b4293 逐条翻码 + harness 24/24 + 铁律全绿（纯渲染层+测试、零 schema）；备注 upload_api 兜底 monkeypatch 修正（原打在未读属性上）、improve 日志条目位置一前一后、验收取样框修正；小红书出图内页全图打底+标注块闭环 |
+| 2026-08-07 | 第 4 批已执行：a8b4293（_draw_photo_page 全图打底+标注块下/上交替 + _render_page 有图走照片页 + TEMPLATE_VERSION v5 + 测试）+ 990a403（日志 hash）；定向 15 passed |
+| 2026-08-07 | 第 4 批已开（模板批）：内页全图打底 + 标注块，位置下/上/下/上交替；根因 `_draw_photo_page` stub 丢照片，本批纯渲染层；TEMPLATE_VERSION v4→v5 + 测试断言同步 + 交替/兜底/品牌新用例；待执行/验收 |
 | 2026-08-06 | 整体修复单验收通过：R2/R1 逐条翻码 + harness 13/13 + 铁律全绿；备注改进日志重复条目（非阻塞）、scheduler 拦截幂等重臂；小红书链路守卫覆盖与日期口径闭环 |
 | 2026-08-06 | 整体修复单已执行：R2 `d864c6b`（UTC date('now')）→ R1 `c7296cd`（scheduler 接守卫）；定向 21 passed |
 | 2026-08-06 | 整体修复单已开（批次 2 两发现最小收尾）：R1 `check_scheduled_publish` 接 diff 守卫（只拦不排程、语义对齐 app.py）+ R2 guard `_today_local()` 统一 UTC `date('now')`；零 schema、两处独立提交/回滚；待执行（批次 0-3 已全部验收） |
