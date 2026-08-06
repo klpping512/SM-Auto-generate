@@ -1157,7 +1157,11 @@ RENDER_TIMEOUT = 300  # 5 分钟
 
 
 def cleanup_stale_jobs():
-    """清理卡住的渲染任务：running 超过 5 分钟的标记为 failed，pending 超过 10 分钟的也清理。"""
+    """清理卡住的渲染任务：running 超过 5 分钟的杀进程组并标 canceled，pending 超过 10 分钟的标 failed。
+
+    running 分支必须标 canceled 而非 failed：render_job 的 is_canceled 只认
+    cancel_requested/canceled，标 failed 时渲染线程照跑并在完成后覆盖成 succeeded。
+    """
     import time
     now = time.time()
     stale_count = 0
@@ -1172,12 +1176,17 @@ def cleanup_stale_jobs():
             continue
         age = now - job_time
         if job["status"] == "running" and age > RENDER_TIMEOUT:
-            db.update_render_job(job["id"], status="failed", stage="超时清理",
-                                 error=f"渲染超过 {RENDER_TIMEOUT} 秒自动终止")
+            cancel_render(job["id"])  # 真杀进程组，防僵尸 ffmpeg 继续烧资源
+            db.update_render_job(
+                job["id"], status="canceled", stage="超时清理",
+                error=f"渲染超过 {RENDER_TIMEOUT} 秒自动终止",
+            )
             stale_count += 1
         elif job["status"] == "pending" and age > RENDER_TIMEOUT * 2:
-            db.update_render_job(job["id"], status="failed", stage="超时清理",
-                                 error="排队超过 10 分钟自动取消")
+            db.update_render_job(
+                job["id"], status="failed", stage="超时清理",
+                error="排队超过 10 分钟自动取消",
+            )
             stale_count += 1
     if stale_count:
         print(f"🧹 已清理 {stale_count} 个超时渲染任务")

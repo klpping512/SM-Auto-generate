@@ -271,6 +271,53 @@ def test_cancel_terminates_all_active_ffmpeg_children(monkeypatch):
     video_renderer._ACTIVE_PROCESSES.pop("job-multi", None)
 
 
+def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
+    # 批5 #19：running 超时清理必须真杀进程组并标 canceled，
+    # 防止退回“只标状态”（标 failed 时 is_canceled 不认，渲染线程照跑并覆盖成 succeeded）。
+    import threading
+    import time
+    from datetime import datetime, timedelta
+
+    import video_renderer
+
+    def run_sleep():
+        try:
+            video_renderer.run_cancelable_process("job-stale", ["sleep", "60"], cancel_check=lambda: False)
+        except Exception:
+            pass  # 被杀后抛 CalledProcessError，符合预期
+
+    worker = threading.Thread(target=run_sleep, daemon=True)
+    worker.start()
+    for _ in range(50):
+        if video_renderer._ACTIVE_PROCESSES.get("job-stale"):
+            break
+        time.sleep(0.1)
+    process = next(iter(video_renderer._ACTIVE_PROCESSES["job-stale"]))
+
+    created = (datetime.now() - timedelta(minutes=7)).isoformat(timespec="seconds")
+    monkeypatch.setattr(video_renderer.db, "get_unfinished_render_jobs", lambda: [
+        {"id": "job-stale", "status": "running", "created_at": created},
+    ])
+    updates = []
+    monkeypatch.setattr(
+        video_renderer.db, "update_render_job",
+        lambda job_id, **kwargs: updates.append((job_id, kwargs)),
+    )
+
+    video_renderer.cleanup_stale_jobs()
+
+    # 进程组已被终止（SIGTERM 后 sleep 秒退，cancel_render 内部已 wait）
+    assert process.poll() is not None
+    # 状态标 canceled（而非 failed），is_canceled 认该状态，渲染线程必停
+    assert updates == [(
+        "job-stale",
+        {"status": "canceled", "stage": "超时清理", "error": "渲染超过 300 秒自动终止"},
+    )]
+    # run_cancelable_process 的 finally 已把进程从注册表清掉
+    worker.join(timeout=5)
+    assert not video_renderer._ACTIVE_PROCESSES.get("job-stale")
+
+
 def test_normalize_script_preserves_event_clip_range():
     import video_renderer
 
