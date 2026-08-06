@@ -327,6 +327,9 @@ function resultCardMarkup(result,id){
   const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
   resultStore.set(id,result);
   const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.result_state==='brand_assets_insufficient'||result?.result_state==='hook_selection_required';
+  const degradedNotice=result?.degraded_from_comparison
+    ?`<div class="result-warning"><strong>已自动切换科普视角</strong><p>对比评测需要真实报价/时效资料，已自动切换为科普视角生成视频；如手头有官方报价单或测试记录，可点『补充评测资料』生成正式对比评测。</p><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button></div>`
+    :'';
   const tabs=outputs.map((o,i)=>`<button class="result-tab ${i===0?'active':''}" onclick="selectResultTab('${id}',${i},this)">${escapeHtml(platformNames[o.platform]||o.platform)}</button>`).join('');
   const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const isDouyin=o.platform==='douyin';const douyinCta=isDouyin?douyinVideoEntryMarkup(o,id,i,result.hotspot_retrieval,result):'';const editorLabel=(result.result_state==='framework_pending_evidence'||result.result_state==='authenticity_blocked')?'编辑对比框架':'发送到编辑器';const actions=isDouyin
     ?`${douyinCta}<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制摘要</button></div>`
@@ -334,7 +337,7 @@ function resultCardMarkup(result,id){
   const bodyText=isDouyin?((o.body||o.content||'').slice(0,220)+((o.body||o.content||'').length>220?'…':'')):(o.body||o.content||'');
   return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(bodyText)}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">提示：${warnings.map(escapeHtml).join('；')}</div>`:''}${actions}</div>`}).join('');
   if(result?.hotspot_retrieval?.request_id)scheduleDiscoveryPoll(id,result.hotspot_retrieval.request_id);
-  return `<div class="result-card" id="result-${id}">${resultStateCard(result,id)}${showHotspotBanner?hotspotRetrievalMarkup(result,id):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
+  return `<div class="result-card" id="result-${id}">${degradedNotice}${resultStateCard(result,id)}${showHotspotBanner?hotspotRetrievalMarkup(result,id):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
 }
 function selectResultTab(id,index,btn){const card=document.getElementById(`result-${id}`);if(!card)return;card.querySelectorAll('.result-tab').forEach(b=>b.classList.toggle('active',b===btn));card.querySelectorAll('.result-panel').forEach(p=>p.classList.toggle('active',Number(p.dataset.index)===index));}
 // 抖音：需求入口 → 创建项目后跳转视频工作台（不在聊天内生产）

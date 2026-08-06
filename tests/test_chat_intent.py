@@ -45,6 +45,21 @@ def test_assess_comparison_evidence_requires_candidates_plus_metrics_or_sources(
     assert with_source["has_metrics"] and with_source["has_sources"]
 
 
+def test_comparison_to_evergreen_topic_never_reenters_comparison_gate():
+    for topic in ["南非本地快递对比评测", "最近哪家快递最好", "对比 The Courier Guy 和 Fastway 的价格", ""]:
+        rewritten = chat_intent.comparison_to_evergreen_topic(topic)
+        assert chat_intent.classify_content_mode(rewritten) != "comparison_research"
+        assert not any(
+            marker.casefold() in rewritten.casefold() for marker in chat_intent.COMPARISON_MARKERS
+        )
+
+
+def test_comparison_to_evergreen_topic_returns_safe_defaults():
+    assert chat_intent.comparison_to_evergreen_topic("") == "南非物流怎么选？关键维度科普"
+    for topic in ["南非本地快递对比评测", "最近哪家快递最好", ""]:
+        assert chat_intent.comparison_to_evergreen_topic(topic).endswith("怎么选？关键维度科普")
+
+
 def test_build_comparison_framework_has_no_fake_review_language():
     outputs = ai_engine.build_comparison_framework(
         "南非本地快递对比评测",
@@ -116,13 +131,13 @@ def _auth_client(tmp_db, username="cmp-editor"):
     return client, {"Authorization": f"Bearer {token}"}
 
 
-def test_ai_chat_comparison_without_evidence_returns_framework_and_skips_discovery(tmp_db, monkeypatch):
+def test_ai_chat_comparison_without_evidence_degrades_to_evergreen_production(tmp_db, monkeypatch):
     client, headers = _auth_client(tmp_db)
     called = {"chat": 0, "hooks": 0}
 
     async def fake_chat(**_kwargs):
         called["chat"] += 1
-        return [{"platform": "xiaohongshu", "title": "假评测", "body": "4家实测", "hashtags": [], "image_pages": []}]
+        return [{"platform": "xiaohongshu", "title": "南非物流科普", "body": "科普内容", "hashtags": [], "image_pages": []}]
 
     async def fake_hooks(*_args, **_kwargs):
         called["hooks"] += 1
@@ -138,17 +153,13 @@ def test_ai_chat_comparison_without_evidence_returns_framework_and_skips_discove
     })
     assert response.status_code == 200
     payload = response.json()
-    assert payload["content_mode"] == "comparison_research"
-    assert payload["result_state"] == "framework_pending_evidence"
-    assert payload["hotspot_retrieval"]["status"] == "not_requested"
-    assert payload["evidence_state"]["evidence_state"] == "insufficient"
-    assert called["chat"] == 0
-    assert called["hooks"] == 0
+    assert payload["degraded_from_comparison"] is True
+    assert payload["content_mode"] == "evergreen"
+    assert payload["result_state"] != "framework_pending_evidence"
+    assert called["chat"] == 1
+    assert called["hooks"] == 1
+    assert payload["outputs"][0].get("result_kind") != "framework"
     assert tmp_db.list_hotspot_discovery_requests() == []
-    assert "4家" not in payload["outputs"][0]["title"]
-    assert "实测对比" not in payload["outputs"][0]["title"]
-    assert payload["outputs"][0]["result_kind"] == "framework"
-    assert "未生成服务商排名和推荐结论" in payload["outputs"][0]["body"]
 
 
 def test_ai_chat_comparison_with_evidence_allows_formal_path(tmp_db, monkeypatch):

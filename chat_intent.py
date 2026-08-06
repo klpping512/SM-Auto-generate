@@ -136,6 +136,24 @@ def assess_comparison_evidence(
     }
 
 
+def comparison_to_evergreen_topic(topic: str) -> str:
+    """把对比评测题材确定性改写为安全科普视角。
+
+    保证：输出永远不含 COMPARISON_MARKERS（chat_intent.COMPARISON_MARKERS），
+    因此重走 classify_content_mode 不会再进对比门禁（无死循环）。
+    """
+    raw = " ".join(str(topic or "").split())
+    if not raw:
+        return "南非物流怎么选？关键维度科普"
+    if "南非" in raw and any(
+        w in raw for w in ("快递", "物流", "货运", "清关", "仓储", "配送")
+    ):
+        return "南非本地快递怎么选？关键维度科普" if "快递" in raw else "南非物流怎么选？关键维度科普"
+    if any(w in raw for w in ("快递", "物流", "货运", "配送")):
+        return "本地快递怎么选？关键维度科普"
+    return "物流服务怎么选？关键维度科普"
+
+
 def comparison_authenticity_violations(
     *texts: str,
     evidence: dict | None = None,

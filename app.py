@@ -4984,6 +4984,18 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
     platforms = [p.value for p in req.platforms]
     authenticity_blocked = False
     brand_assets_insufficient = False
+    degraded_from_comparison = False
+
+    if content_mode == "comparison_research" and evidence["evidence_state"] != "sufficient":
+        # 商务团队一键生产：对比题材无真实资料时，自动降级为科普视角，
+        # 重写消息后走正常生产链（通用物流 Hook 兜底 → 可创建视频项目）。
+        degraded_from_comparison = True
+        latest_topic = chat_intent.comparison_to_evergreen_topic(latest_topic)
+        messages = list(messages)
+        if messages and messages[-1].get("role") == "user":
+            messages[-1] = {**messages[-1], "content": latest_topic}
+        content_mode = chat_intent.classify_content_mode(latest_topic)
+        event_anchor = chat_intent.assess_event_anchor(latest_topic, context=req.context or "")
 
     if content_mode == "comparison_research" and evidence["evidence_state"] != "sufficient":
         hotspot_retrieval = {
@@ -5048,6 +5060,11 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
                     "producible_topics": [],
                 }
 
+    if degraded_from_comparison:
+        outputs, _ = ai_engine.enforce_comparison_authenticity(
+            outputs, {"sufficient": False, "evidence_state": "insufficient"},
+        )
+
     for item in outputs:
         if item["platform"] == "xiaohongshu" and item.get("title") != "生成失败":
             item["image_pages"], item["attachments"] = _render_xhs_carousel(
@@ -5093,6 +5110,12 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "hashtags": first["hashtags"], "outputs": outputs,
         "hotspot_retrieval": hotspot_retrieval,
         "content_mode": content_mode,
+        "degraded_from_comparison": degraded_from_comparison,
+        "degradation_message": (
+            "对比评测需要真实报价/时效资料，已自动切换为科普视角生成视频；"
+            "如手头有官方报价单或测试记录，可点『补充评测资料』生成正式对比评测。"
+            if degraded_from_comparison else ""
+        ),
         "result_state": result_state,
         "evidence_state": evidence,
         "event_anchor": event_anchor,
