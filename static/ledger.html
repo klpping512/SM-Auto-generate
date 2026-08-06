@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg?v=5"/>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico?v=5"/>
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png?v=5"/>
+<link rel="manifest" href="/static/manifest.json?v=5"/>
+<meta name="theme-color" content="#B98A4C"/>
+<title>发布台账 - SA-LogiFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+<link rel="stylesheet" href="/static/design-system.css?v=5"/>
+</head>
+<body>
+<div class="app-layout" id="app"></div>
+<div id="toastContainer" class="toast-container"></div>
+<script src="/static/common.js?v=8"></script>
+<script>
+const PAGE_ID = 'ledger';
+const TOPIC_LEVELS = ['S', 'A', 'B'];
+const COVER_TYPES = ['大字报', '对比图', '清单体', '实拍+标注', '问答体'];
+const VERDICTS = ['待判定', '达标', '未达标'];
+
+function seoMain(meta) {
+    if (!meta || typeof meta !== 'object') return '—';
+    return (meta.main || '').trim() || '—';
+}
+
+function optHtml(values, selected) {
+    return values.map(v => `<option value="${escapeHtml(v)}" ${v === selected ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('');
+}
+
+async function loadCandidates() {
+    const r = await apiFetch('/api/xhs/ledger/candidates');
+    return r.ok ? await r.json() : [];
+}
+
+async function loadLedger() {
+    const r = await apiFetch('/api/xhs/ledger');
+    return r.ok ? await r.json() : [];
+}
+
+async function createFromCandidate() {
+    const queueId = document.getElementById('candQueue').value;
+    if (!queueId) { showToast('请选择条目', 'error'); return; }
+    const body = {
+        queue_id: Number(queueId),
+        topic_level: document.getElementById('candLevel').value || undefined,
+        cover_type: document.getElementById('candCover').value || undefined,
+    };
+    const r = await apiFetch('/api/xhs/ledger', { method: 'POST', body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast(d.detail || d.error || '建档失败', 'error'); return; }
+    showToast('已建档', 'success');
+    init();
+}
+
+async function saveRow(id) {
+    const body = {
+        topic_level: document.getElementById(`lv-${id}`).value,
+        cover_type: document.getElementById(`cv-${id}`).value,
+        reads: Number(document.getElementById(`rd-${id}`).value || 0),
+        likes_saves: Number(document.getElementById(`lk-${id}`).value || 0),
+        comments: Number(document.getElementById(`cm-${id}`).value || 0),
+        followers_gained: Number(document.getElementById(`fg-${id}`).value || 0),
+        verdict_48h: document.getElementById(`vd-${id}`).value,
+        notes: document.getElementById(`nt-${id}`).value,
+    };
+    const r = await apiFetch(`/api/xhs/ledger/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        showToast(d.detail || '保存失败', 'error');
+        return;
+    }
+    showToast('已保存', 'success');
+}
+
+function exportCsv() {
+    const from = document.getElementById('expFrom').value;
+    const to = document.getElementById('expTo').value;
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    const token = localStorage.getItem('token') || '';
+    const url = `/api/xhs/ledger/export?${qs.toString()}`;
+    fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+        .then(async r => {
+            if (!r.ok) throw new Error('导出失败');
+            const blob = await r.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `xhs-ledger-week-${from || 'auto'}-${to || 'auto'}.csv`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        })
+        .catch(() => showToast('导出失败', 'error'));
+}
+
+async function init() {
+    const [candidates, rows] = await Promise.all([loadCandidates(), loadLedger()]);
+    const candOpts = candidates.map(c => {
+        const label = `${c.title || ''} · ${c.account_name || '无账号'} · ${c.published_on || ''}`;
+        return `<option value="${c.queue_id}">${escapeHtml(label)}</option>`;
+    }).join('');
+
+    const tableRows = rows.map(row => {
+        const id = row.id;
+        return `<tr>
+            <td>${escapeHtml(row.published_on || '')}</td>
+            <td>${escapeHtml(row.account_name || '')}</td>
+            <td title="${escapeHtml(row.title || '')}">${escapeHtml((row.title || '').slice(0, 24))}</td>
+            <td><select id="lv-${id}" class="form-input" style="min-width:56px">${optHtml(['', ...TOPIC_LEVELS], row.topic_level || '')}</select></td>
+            <td><select id="cv-${id}" class="form-input" style="min-width:90px">${optHtml(['', ...COVER_TYPES], row.cover_type || '')}</select></td>
+            <td>${escapeHtml(seoMain(row.seo_meta))}</td>
+            <td><input id="rd-${id}" class="form-input" type="number" min="0" value="${Number(row.reads || 0)}" style="width:72px"/></td>
+            <td><input id="lk-${id}" class="form-input" type="number" min="0" value="${Number(row.likes_saves || 0)}" style="width:72px"/></td>
+            <td><input id="cm-${id}" class="form-input" type="number" min="0" value="${Number(row.comments || 0)}" style="width:72px"/></td>
+            <td><input id="fg-${id}" class="form-input" type="number" value="${Number(row.followers_gained || 0)}" style="width:72px"/></td>
+            <td><select id="vd-${id}" class="form-input" style="min-width:90px">${optHtml(['', ...VERDICTS], row.verdict_48h || '')}</select></td>
+            <td><input id="nt-${id}" class="form-input" value="${escapeHtml(row.notes || '')}" style="min-width:120px"/></td>
+            <td><button class="btn btn-primary btn-sm" onclick="saveRow(${id})">保存</button></td>
+        </tr>`;
+    }).join('') || `<tr><td colspan="13" style="text-align:center;color:var(--text-muted);padding:24px">暂无台账，发布成功后会自动预建</td></tr>`;
+
+    document.getElementById('app').innerHTML = `
+    ${renderSidebar(PAGE_ID)}
+    <div class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">发布台账</h1>
+            <p style="color:var(--text-muted);font-size:13px;margin-top:4px">发布自动预建 · 人工补指标 · 周五导出复盘</p>
+        </div>
+        <div class="page-body" style="display:flex;flex-direction:column;gap:20px">
+            <div class="card" style="padding:16px">
+                <h2 style="font-size:15px;font-weight:700;margin-bottom:12px">候选建档（历史补建）</h2>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <select id="candQueue" class="form-input" style="min-width:280px"><option value="">选择已发布未建档…</option>${candOpts}</select>
+                    <select id="candLevel" class="form-input">${optHtml(['', ...TOPIC_LEVELS], '')}</select>
+                    <select id="candCover" class="form-input">${optHtml(['', ...COVER_TYPES], '')}</select>
+                    <button class="btn btn-secondary btn-sm" onclick="createFromCandidate()">建档</button>
+                </div>
+            </div>
+            <div class="card" style="padding:16px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+                    <h2 style="font-size:15px;font-weight:700">台账列表</h2>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input id="expFrom" class="form-input" type="date" title="UTC 起"/>
+                        <span style="color:var(--text-muted)">至</span>
+                        <input id="expTo" class="form-input" type="date" title="UTC 止"/>
+                        <button class="btn btn-primary btn-sm" onclick="exportCsv()">导出 CSV</button>
+                    </div>
+                </div>
+                <div style="overflow:auto">
+                    <table class="data-table" style="width:100%;font-size:12px">
+                        <thead><tr>
+                            <th>日期</th><th>账号</th><th>标题</th><th>级别</th><th>封面</th><th>主词</th>
+                            <th>阅读</th><th>赞藏</th><th>评论</th><th>涨粉</th><th>48h</th><th>备注</th><th></th>
+                        </tr></thead>
+                        <tbody>${tableRows}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+init();
+</script>
+</body>
+</html>

@@ -560,6 +560,7 @@ async def check_scheduled_publish():
         if result["success"]:
             db.update_queue_status(item_id, "published")
             db.add_publish_log(item_id, platform, item["title"], "published")
+            db.ensure_xhs_ledger(item_id)
             logger.info("定时发布成功: id=%d", item_id)
             await send_success_notify(item)
         else:

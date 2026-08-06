@@ -877,6 +877,32 @@ def init_db():
                 status TEXT DEFAULT 'active',
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            -- 小红书发布台账（人驱动回流；单表，不进门禁/守卫）
+            -- topic_level: S 已验证爆文复制 / A 搜索词占位 / B 人设日常互动
+            -- cover_type: 大字报 / 对比图 / 清单体 / 实拍+标注 / 问答体
+            -- verdict_48h: 待判定 / 达标 / 未达标（未达标原因进 notes）
+            CREATE TABLE IF NOT EXISTS xhs_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id INTEGER NOT NULL UNIQUE,
+                publish_log_id INTEGER,
+                title TEXT DEFAULT '',
+                account_name TEXT DEFAULT '',
+                published_on TEXT DEFAULT '',
+                topic_level TEXT DEFAULT '',
+                cover_type TEXT DEFAULT '',
+                seo_meta TEXT DEFAULT '{}',
+                reads INTEGER DEFAULT 0,
+                likes_saves INTEGER DEFAULT 0,
+                comments INTEGER DEFAULT 0,
+                followers_gained INTEGER DEFAULT 0,
+                verdict_48h TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (queue_id) REFERENCES queue(id)
+            );
         """)
         # 迁移旧的全局幂等索引：相同客户端键只能约束同一用户，不能跨租户串任务。
         conn.execute("DROP INDEX IF EXISTS uq_video_generation_active_key")
@@ -1084,6 +1110,282 @@ def list_xhs_seo_lexicon(status: str = "active", limit: int = 200) -> list[dict]
             (status, status, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ==================== 小红书发布台账（人驱动；不进门禁/守卫） ====================
+
+_XHS_LEDGER_UPDATE_FIELDS = frozenset({
+    "topic_level", "cover_type", "reads", "likes_saves", "comments",
+    "followers_gained", "verdict_48h", "notes",
+})
+
+
+def _parse_xhs_ledger_row(row) -> dict:
+    d = dict(row)
+    raw = d.get("seo_meta")
+    if isinstance(raw, str):
+        try:
+            d["seo_meta"] = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            d["seo_meta"] = {}
+    elif raw is None:
+        d["seo_meta"] = {}
+    return d
+
+
+def _seo_main(seo_meta) -> str:
+    if isinstance(seo_meta, str):
+        try:
+            seo_meta = json.loads(seo_meta or "{}")
+        except json.JSONDecodeError:
+            seo_meta = {}
+    if not isinstance(seo_meta, dict):
+        return "—"
+    main = str(seo_meta.get("main") or "").strip()
+    return main or "—"
+
+
+def _interaction_rate(reads: int, likes_saves: int, comments: int) -> float:
+    """(赞藏+评论)/阅读；reads=0 记 0，避免空表/预建行除零。"""
+    r = int(reads or 0)
+    if r <= 0:
+        return 0.0
+    return (int(likes_saves or 0) + int(comments or 0)) / r
+
+
+def utc_week_range() -> tuple[str, str]:
+    """UTC 本周一至 UTC 今天（与 published_on / date('now') 同口径）。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT date('now','weekday 0','-6 days') AS week_start, date('now') AS week_end"
+        ).fetchone()
+    return str(row["week_start"]), str(row["week_end"])
+
+
+def ensure_xhs_ledger(queue_id: int) -> int | None:
+    """发布成功时幂等预建台账行。已建档返回现有 id。"""
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM xhs_ledger WHERE queue_id=?", (queue_id,),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+
+        q = conn.execute("SELECT * FROM queue WHERE id=?", (queue_id,)).fetchone()
+        if not q or q["platform"] != "xiaohongshu":
+            return None
+
+        pl = conn.execute(
+            """
+            SELECT id, date(published_at) AS published_on
+            FROM publish_log
+            WHERE queue_id=? AND status='published' AND platform='xiaohongshu'
+            ORDER BY published_at DESC, id DESC
+            LIMIT 1
+            """,
+            (queue_id,),
+        ).fetchone()
+        if not pl:
+            return None
+
+        account_name = ""
+        if q["target_account_id"] is not None:
+            acc = conn.execute(
+                "SELECT name FROM accounts WHERE id=?", (q["target_account_id"],),
+            ).fetchone()
+            if acc:
+                account_name = acc["name"] or ""
+
+        seo_raw = q["seo_meta"] if "seo_meta" in q.keys() and q["seo_meta"] else "{}"
+        cur = conn.execute(
+            """
+            INSERT INTO xhs_ledger
+            (queue_id, publish_log_id, title, account_name, published_on, seo_meta, created_by)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (
+                queue_id,
+                pl["id"],
+                q["title"] or "",
+                account_name,
+                pl["published_on"] or "",
+                seo_raw if isinstance(seo_raw, str) else json.dumps(seo_raw or {}, ensure_ascii=False),
+                q["created_by"],
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_xhs_ledger(ledger_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM xhs_ledger WHERE id=?", (ledger_id,)).fetchone()
+        return _parse_xhs_ledger_row(row) if row else None
+
+
+def get_xhs_ledger_by_queue(queue_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM xhs_ledger WHERE queue_id=?", (queue_id,)).fetchone()
+        return _parse_xhs_ledger_row(row) if row else None
+
+
+def list_xhs_ledger(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    created_by: int | None = None,
+) -> list[dict]:
+    sql = "SELECT * FROM xhs_ledger WHERE 1=1"
+    params: list = []
+    if from_date:
+        sql += " AND published_on >= ?"
+        params.append(from_date)
+    if to_date:
+        sql += " AND published_on <= ?"
+        params.append(to_date)
+    if created_by is not None:
+        sql += " AND created_by = ?"
+        params.append(created_by)
+    sql += " ORDER BY published_on DESC, id DESC"
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_parse_xhs_ledger_row(r) for r in rows]
+
+
+def update_xhs_ledger(ledger_id: int, fields: dict) -> None:
+    """白名单字段更新；未知字段拒绝。"""
+    if not isinstance(fields, dict):
+        raise ValueError("fields 必须是对象")
+    unknown = [k for k in fields if k not in _XHS_LEDGER_UPDATE_FIELDS]
+    if unknown:
+        raise ValueError(f"不允许更新字段: {', '.join(unknown)}")
+    updates = {k: v for k, v in fields.items() if v is not None}
+    if not updates:
+        return
+    cols = ", ".join(f"{k}=?" for k in updates)
+    params = list(updates.values()) + [ledger_id]
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE xhs_ledger SET {cols}, updated_at=datetime('now') WHERE id=?",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError("台账行不存在")
+
+
+def list_xhs_ledger_candidates() -> list[dict]:
+    """已发布未建档的小红书条目。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.id AS queue_id, q.title, q.seo_meta,
+                   COALESCE(a.name, '') AS account_name,
+                   date(pl.published_at) AS published_on
+            FROM publish_log pl
+            JOIN queue q ON q.id = pl.queue_id
+            LEFT JOIN accounts a ON a.id = q.target_account_id
+            WHERE pl.status='published' AND pl.platform='xiaohongshu'
+              AND pl.id = (
+                  SELECT MAX(pl2.id) FROM publish_log pl2
+                  WHERE pl2.queue_id = pl.queue_id AND pl2.status='published'
+                    AND pl2.platform='xiaohongshu'
+              )
+              AND NOT EXISTS (SELECT 1 FROM xhs_ledger xl WHERE xl.queue_id = q.id)
+            ORDER BY pl.published_at DESC, pl.id DESC
+            """
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        raw = item.get("seo_meta")
+        if isinstance(raw, str):
+            try:
+                item["seo_meta"] = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                item["seo_meta"] = {}
+        elif raw is None:
+            item["seo_meta"] = {}
+        out.append(item)
+    return out
+
+
+def weekly_xhs_ledger_summary(from_date: str, to_date: str) -> dict:
+    rows = list_xhs_ledger(from_date=from_date, to_date=to_date)
+    count = len(rows)
+    passed = sum(1 for r in rows if r.get("verdict_48h") == "达标")
+    total_reads = sum(int(r.get("reads") or 0) for r in rows)
+    avg_reads = (total_reads / count) if count else 0.0
+    rates = [
+        _interaction_rate(r.get("reads"), r.get("likes_saves"), r.get("comments"))
+        for r in rows
+    ]
+    avg_rate = (sum(rates) / count) if count else 0.0
+
+    ranked = sorted(rows, key=lambda r: (int(r.get("reads") or 0), r.get("id") or 0), reverse=True)
+
+    def _row_brief(r: dict) -> dict:
+        return {
+            "title": r.get("title") or "",
+            "topic_level": r.get("topic_level") or "",
+            "cover_type": r.get("cover_type") or "",
+            "main": _seo_main(r.get("seo_meta")),
+            "reads": int(r.get("reads") or 0),
+            "likes_saves": int(r.get("likes_saves") or 0),
+            "comments": int(r.get("comments") or 0),
+            "followers_gained": int(r.get("followers_gained") or 0),
+            "verdict_48h": r.get("verdict_48h") or "",
+        }
+
+    top3 = [_row_brief(r) for r in ranked[:3]]
+    bottom3 = [_row_brief(r) for r in list(reversed(ranked[-3:]))] if ranked else []
+
+    cover_buckets: dict[str, list] = {}
+    for r in rows:
+        key = (r.get("cover_type") or "").strip() or "—"
+        cover_buckets.setdefault(key, []).append(r)
+    cover_dist = []
+    for cover_type, items in cover_buckets.items():
+        n = len(items)
+        cover_dist.append({
+            "cover_type": cover_type,
+            "count": n,
+            "avg_reads": (sum(int(i.get("reads") or 0) for i in items) / n) if n else 0.0,
+            "avg_likes_saves": (sum(int(i.get("likes_saves") or 0) for i in items) / n) if n else 0.0,
+        })
+    cover_dist.sort(key=lambda x: (-x["count"], x["cover_type"]))
+
+    kw_buckets: dict[str, list] = {}
+    for r in rows:
+        key = _seo_main(r.get("seo_meta"))
+        kw_buckets.setdefault(key, []).append(r)
+    keyword_perf = []
+    for main, items in kw_buckets.items():
+        n = len(items)
+        kw_rates = [
+            _interaction_rate(i.get("reads"), i.get("likes_saves"), i.get("comments"))
+            for i in items
+        ]
+        keyword_perf.append({
+            "main": main,
+            "count": n,
+            "avg_reads": (sum(int(i.get("reads") or 0) for i in items) / n) if n else 0.0,
+            "avg_interaction_rate": (sum(kw_rates) / n) if n else 0.0,
+        })
+    keyword_perf.sort(key=lambda x: (-x["count"], x["main"]))
+
+    return {
+        "overview": {
+            "from_date": from_date,
+            "to_date": to_date,
+            "count": count,
+            "passed": passed,
+            "pass_rate": (passed / count) if count else 0.0,
+            "avg_reads": avg_reads,
+            "avg_interaction_rate": avg_rate,
+        },
+        "top": top3,
+        "bottom": bottom3,
+        "cover_dist": cover_dist,
+        "keyword_perf": keyword_perf,
+    }
 
 
 # ==================== Users ====================
