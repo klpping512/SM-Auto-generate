@@ -1,6 +1,7 @@
 """灵感链接归一化、元数据与经授权素材化。"""
 from __future__ import annotations
 
+import datetime
 import ipaddress
 import math
 import os
@@ -283,7 +284,7 @@ def _run_ytdlp_download(
     canonical: str,
     options: dict,
     temp_dir: Path,
-) -> Path:
+) -> tuple[Path, dict]:
     from yt_dlp import YoutubeDL
 
     options = dict(options)
@@ -300,7 +301,21 @@ def _run_ytdlp_download(
         source = next((path for path in temp_dir.iterdir() if path.is_file()), None)
     if source is None:
         raise RuntimeError("平台未返回可用媒体文件")
-    return source
+    return source, info
+
+
+def _extract_upload_iso(info: dict) -> str | None:
+    """批17：从 yt-dlp 全量信息取上传日期，统一输出 YYYY-MM-DD。"""
+    upload_date = str(info.get("upload_date") or "")
+    if len(upload_date) == 8 and upload_date.isdigit():
+        return f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+    timestamp = info.get("timestamp")
+    if timestamp:
+        try:
+            return datetime.datetime.fromtimestamp(int(timestamp)).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OSError):
+            return None
+    return None
 
 
 def download_authorized_media(
@@ -331,7 +346,7 @@ def download_authorized_media(
             explicit_ranges=explicit_ranges,
         )
         sample_offsets = list(options.get("_sample_offsets") or [])
-        source = _run_ytdlp_download(canonical, options, temp_dir)
+        source, info = _run_ytdlp_download(canonical, options, temp_dir)
         asset = media_assets.ingest_file(
             source, Path(static_dir), category=item.get("primary_category") or "other",
             origin=item["source_type"], created_by=created_by, name=item.get("title") or source.stem,
@@ -339,6 +354,10 @@ def download_authorized_media(
         db.update_asset_provenance(
             asset["id"], canonical, item["license_name"], item["attribution"], item.get("hotspot_id"),
         )
+        # 批17：下载即拿到全量 info，回填父热点真实发布时间（仅当为空/1970 哨兵）
+        upload_iso = _extract_upload_iso(info)
+        if upload_iso and item.get("hotspot_id"):
+            db.update_hotspot_published_at_if_empty(int(item["hotspot_id"]), upload_iso)
         asset = dict(asset)
         asset["sample_offsets"] = sample_offsets
         asset["download_hi_res"] = bool(hi_res)
@@ -375,7 +394,7 @@ def download_hi_res_range(
             hi_res=True,
             explicit_ranges=[(padded_start, padded_end)],
         )
-        source = _run_ytdlp_download(canonical, options, temp_dir)
+        source, _ = _run_ytdlp_download(canonical, options, temp_dir)
         target = out_dir / f"hires-{Path(source).stem}-{int(start_sec * 1000)}-{int(end_sec * 1000)}.mp4"
         target.write_bytes(source.read_bytes())
         return target

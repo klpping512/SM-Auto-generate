@@ -8,6 +8,7 @@ import os
 import re
 import threading
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from uuid import uuid4 as _uuid4
 from contextlib import asynccontextmanager
@@ -1474,6 +1475,9 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
     """Expose a hotspot event as a previewable virtual asset without copying its mother video."""
     asset = db.get_asset(int(event["asset_id"])) or {}
     public = media_assets.public_asset(asset) if asset else {}
+    # 批17：卡片时效徽标取父热点真实发布时间（RSS 为 RFC2822 / YouTube 经回填为 ISO）
+    parent = db.get_hotspot(int(event["hotspot_id"])) if event.get("hotspot_id") else {}
+    event["published_at"] = (parent or {}).get("published_at")
     start_second = max(0, int(event.get("start_ms") or 0)) / 1000
     end_second = max(start_second, int(event.get("end_ms") or 0) / 1000)
     thumbnail = (
@@ -1500,6 +1504,7 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
         "clip_status": event.get("clip_status") or "pending",
         "clip_error": event.get("clip_error"),
         "source_asset_id": event["asset_id"],
+        "source_label": public.get("source_label") or "",
     }
     return event
 
@@ -1876,6 +1881,26 @@ def _compact_topic_evidence(brief: dict, event: dict, scenes: list[dict]) -> dic
     }
 
 
+def _event_date_seconds(value) -> int:
+    """批17：兼容 ISO（含 UTC 偏移）与 RSS RFC2822 日期 → epoch 秒；无法解析/1970 哨兵返回 0。
+
+    注意：不能把 ISO 截到 [:19]（会丢掉 '+00:00' 时区，产生 8h 偏移）；RFC2822
+    带 '+0200' 时区，直接 .timestamp() 才按真实 UTC epoch 折算。
+    """
+    if not value:
+        return 0
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text)          # '2026-07-30 03:51:10' / '...+00:00' / '2026-07-30'
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(text)       # 'Tue, 21 Jul 2026 13:00:00 +0200'
+        except Exception:  # noqa: BLE001
+            return 0
+    ts = dt.timestamp()
+    return int(ts) if ts > 0 else 0
+
+
 def _marketing_hook_candidates(
     brief: dict,
     limit: int = 8,
@@ -2048,11 +2073,26 @@ def _marketing_hook_candidates(
             mismatch_penalty += 8
         if kind == "unknown" and not profile_overlap:
             mismatch_penalty += 10
+        # 批17：时效入链。只对新闻锚点 Hook（timely_event）施加新鲜度加分；
+        # 常青开场（generic_logistics）不随事件时间衰减，加分恒 0。
+        freshness_bonus = 0
+        published_ts = _event_date_seconds(hotspot.get("published_at"))
+        if published_ts and str(event_clips[0].get("hook_kind") or "timely_event") != "generic_logistics":
+            age_days = (datetime.now().timestamp() - published_ts) / 86400.0
+            if age_days < 1:
+                freshness_bonus = 8
+            elif age_days < 3:
+                freshness_bonus = 5
+            elif age_days < 7:
+                freshness_bonus = 2
+            elif age_days >= 30:
+                freshness_bonus = -3
         candidates.append({
             "hotspot_id": hotspot["id"], "event_clip_id": hooks[0]["event_clip_id"] if hooks else None,
             "title": headline[:200],
             "summary": (str(hotspot.get("summary_zh") or hotspot.get("summary") or "") + " " + hook_context_text)[:500],
             "source_url": hotspot.get("source_url"), "published_at": hotspot.get("published_at"),
+            "published_ts": published_ts,
             "hook_type": "direct" if direct else "contextual", "logistics_signal": kind,
             "logistics_scenes": sorted(event_profile),
             "relevance": {
@@ -2072,12 +2112,13 @@ def _marketing_hook_candidates(
                 + intent_bridge
                 + reuse_bias
                 - mismatch_penalty
+                + freshness_bonus
             ),
             "usage_boundary": "热点只用于提出问题或解释外部背景；Buffalo 服务能力只能由知识库、品牌证据和自有镜头说明。",
             "reuse_policy": "只有该 Hook 是当前主题最强事实现场时才复用；若存在同等强相关候选，优先选择不同事件，避免连续视频看起来都用同一个开场。",
         })
     candidates.sort(
-        key=lambda item: (item["score"], str(item.get("published_at") or ""), int(item["hotspot_id"])),
+        key=lambda item: (item["score"], item.get("published_ts") or 0, int(item["hotspot_id"])),
         reverse=True,
     )
     limited = candidates[:max(1, limit)] if candidates else []
@@ -4584,7 +4625,7 @@ async def _retrieve_confirmed_chat_hooks(
                 item["score"] = item.get("score", 0) - 25
                 funnel["duplicate_or_recent"] = int(funnel.get("duplicate_or_recent") or 0) + 1
         candidates.sort(
-            key=lambda item: (item["score"], str(item.get("published_at") or ""), int(item["hotspot_id"])),
+            key=lambda item: (item["score"], item.get("published_ts") or 0, int(item["hotspot_id"])),
             reverse=True,
         )
     selected_event_ids: set[int] = set()

@@ -2153,6 +2153,16 @@ def link_hotspot_asset(hotspot_id: int, asset_id: int):
         conn.execute("UPDATE hotspots SET asset_id=?,status='ready' WHERE id=?", (asset_id, hotspot_id))
 
 
+def update_hotspot_published_at_if_empty(hotspot_id: int, published_at: str) -> None:
+    """批17：下载路径捕获真实发布时间后回填；仅当父热点发布时间缺失或为 1970 哨兵时写入。"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE hotspots SET published_at=? WHERE id=? "
+            "AND (published_at IS NULL OR published_at='' OR published_at LIKE '1970-%')",
+            (published_at, int(hotspot_id)),
+        )
+
+
 def list_hotspots(limit: int = 100) -> list[dict]:
     with get_conn() as conn:
         return [dict(row) for row in conn.execute("SELECT * FROM hotspots ORDER BY retrieved_at DESC,id DESC LIMIT ?", (limit,)).fetchall()]
