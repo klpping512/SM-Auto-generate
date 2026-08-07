@@ -62,7 +62,7 @@ async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, t
     assert result == {
         "feeds": 1, "new": 1, "updated": 0, "assets": 1, "skipped": 0,
         "errors": [], "media_errors": [],
-        "packages": 1, "signals": 1, "media_candidates": 4,
+        "packages": 1, "signals": 1, "media_candidates": 3,
         "source_health": [{"name": "Official News", "status": "ok", "items": 1, "error": ""}],
     }
     hotspot = tmp_db.list_hotspots()[0]
@@ -83,8 +83,10 @@ async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, t
     assert "不自动视为" in supporting["summary"]
     assert supporting["materialization_status"] == "materialized"
     media = tmp_db.list_hotspot_media(hotspot_id=hotspot["id"])
-    assert {(item["media_kind"], item["platform"]) for item in media} >= {
-        ("image", "direct"), ("video_link", "direct"), ("video_link", "youtube")
+    # 批16：RSS 自动灌入不再落 image 行（og:image 仍单独存 hotspots.image_candidate_url）；
+    # video_link 与 Wikimedia Commons 授权配图（独立下载通道）仍正常落库。
+    assert {(item["media_kind"], item["platform"]) for item in media} == {
+        ("video_link", "direct"), ("video_link", "youtube"), ("image", "commons")
     }
     assert all(item["rights_tier"] in {"green", "yellow"} for item in media)
     draft = hotspot_content.compose(hotspot)

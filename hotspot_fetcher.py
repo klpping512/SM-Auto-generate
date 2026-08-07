@@ -273,6 +273,10 @@ async def fetch_hotspots(
                         })
                     media_rights_tier, media_rights_note = configured_source_rights()
                     for candidate in hotspot_media.discover_media_candidates(article_response.text, final_url):
+                        if candidate.get("media_kind") == "image":
+                            # 批16：RSS 自动灌入不再落图片行（新闻配图噪音，永不用于成片）。
+                            # og:image 已单独存 hotspots.image_candidate_url 供卡片缩略图，此处跳过无副作用。
+                            continue
                         db.upsert_hotspot_media({
                             **candidate,
                             "hotspot_id": hotspot_id,

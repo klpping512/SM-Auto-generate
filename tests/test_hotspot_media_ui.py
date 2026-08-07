@@ -14,7 +14,8 @@ def test_assets_page_has_two_primary_libraries_and_hotspot_media_filters():
     assert "/api/hotspot-media" in page
     assert "hotspotMediaKind" in page
     assert "全部热点" in page
-    assert "全部媒体" in page
+    # 批16：默认媒体类型下拉文案改为"全部视频"（默认排除 image 噪音卡）
+    assert "全部视频" in page
     assert "hotspotRightsTier" not in page
     assert "全部权利状态" not in page
 
@@ -123,7 +124,11 @@ def test_hotspot_events_are_owned_by_hotspot_library_and_can_delete_source_asset
 
     assert "function filteredHotspotEvents()" in page
     assert "const visibleEvents=filteredHotspotEvents()" in page
-    assert "const eventBody=visibleEvents.length" in page
+    # 批16：热点 Hook 区按 hook_kind 拆 news 与 generic 两路（常青开场池独立区块）
+    assert "const newsEvents=visibleEvents.filter" in page
+    assert "const genericEvents=visibleEvents.filter" in page
+    assert "const genericEventBody=genericEvents.length" in page
+    assert "常青开场池" in page
     assert "assets=allAssets.filter(asset=>asset.library_origin!=='hotspot'&&!asset.hotspot_id)" in page
     assert "deleteHotspotEvent(eventId)" in page
     assert "deleteHotspotEventAsset" in page
