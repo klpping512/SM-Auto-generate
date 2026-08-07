@@ -4521,11 +4521,21 @@ def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None
     sql += " ORDER BY asset_id,event_index"
     with get_conn() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+        # 批18：并入父热点真实发布时间（原始字符串，epoch 换算在 planner 侧做）
+        parent_ids = sorted({int(row["hotspot_id"]) for row in rows if row.get("hotspot_id")})
+        published_by_parent: dict[int, str | None] = {}
+        if parent_ids:
+            marks = ",".join("?" for _ in parent_ids)
+            for prow in conn.execute(
+                f"SELECT id, published_at FROM hotspots WHERE id IN ({marks})", parent_ids
+            ).fetchall():
+                published_by_parent[int(prow["id"])] = prow["published_at"]
         for row in rows:
             row["virtual_asset_id"] = row.get("virtual_asset_id") or f"hotspot-event-{row['id']}"
             row["duration_ms"] = int(row.get("duration_ms") or (row["end_ms"] - row["start_ms"]))
             row["library_origin"] = row.get("library_origin") or "hotspot_event"
             row["hook_kind"] = row.get("hook_kind") or "timely_event"
+            row["parent_published_at"] = published_by_parent.get(int(row.get("hotspot_id") or 0))
             row["entities"] = json.loads(row.pop("entities_json") or "[]")
             row["keywords"] = json.loads(row.pop("keywords_json") or "[]")
             row["evidence"] = json.loads(row.pop("evidence_json") or "{}")

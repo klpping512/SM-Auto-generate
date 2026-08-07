@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from video_composition_policy import source_usage_report
 from video_duration_budget import rebalance_scenes_to_budget
@@ -99,7 +100,54 @@ def _event_score(event: dict, brief: dict) -> tuple[int, list[str]]:
         reasons.append("热点标题/实体与内容角度相关")
     if same_source or same_hotspot:
         reasons.append("同一热点来源补充现场画面")
-    return overlap * 10 + (4 if same_hotspot else 0) + (2 if same_source else 0), reasons
+    base = overlap * 10 + (4 if same_hotspot else 0) + (2 if same_source else 0)
+    # 批18：时效只是排序修饰：仅有相关性基础分的事件叠加新鲜度（批17 档位），
+    # 避免无关联事件纯凭新鲜入选；过期软压后保底 1 分不硬排除（低新闻期不饿库）。
+    if base > 0:
+        base = max(1, base + _event_urgency(event))
+    return base, reasons
+
+
+def _event_ts(value) -> int:
+    """批18：兼容 ISO（含 UTC 偏移）与 RSS RFC2822 日期 → epoch 秒；无法解析/1970 哨兵返回 0。
+
+    镜像批17 app._event_date_seconds 的实现，供 planner 编排层读时效，避免跨层导入。
+    """
+    if not value:
+        return 0
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(text)
+        except Exception:
+            return 0
+    ts = dt.timestamp()
+    return int(ts) if ts > 0 else 0
+
+
+def _event_urgency(event: dict | None) -> int:
+    """批18：新鲜度→开场紧迫度。仅 timely_event 有紧迫度；generic 常青不衰减恒 0；缺失无据 0。
+
+    档位镜像批17：<24h +8 / <3d +5 / <7d +2 / ≥30d −3。
+    """
+    event = event or {}
+    if str(event.get("hook_kind") or "timely_event") == "generic_logistics":
+        return 0
+    ts = _event_ts(event.get("parent_published_at"))
+    if not ts:
+        return 0
+    age_days = (datetime.now().timestamp() - ts) / 86400.0
+    if age_days < 1:
+        return 8
+    if age_days < 3:
+        return 5
+    if age_days < 7:
+        return 2
+    if age_days >= 30:
+        return -3
+    return 0
 
 
 def _event_display_title(event: dict, brief: dict) -> str:
@@ -628,9 +676,21 @@ def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
     return fallback
 
 
-def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "") -> str:
+def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "", *, event: dict | None = None, flow_role: str = "") -> str:
     topic = brief.get("logistics_topic") or "物流体验"
     if role == "hotspot_evidence":
+        kind = str((event or {}).get("hook_kind") or "timely_event")
+        # 批18：常青开场不随事件衰减，不得用"现场正在发生"新闻框架
+        if kind == "generic_logistics":
+            if index == 1:
+                return f"以{title}为背景，看一个跨境订单从仓到门，要核对哪些环节。"
+            return "场景只是入口；真正要核对的是订单进入南非后，每一步履约动作。"
+        # 批18：过期 timely（≥30天）作开场时同样走"非新闻"模板，不假装今日事件
+        if index == 1 and _event_urgency(event) < 0:
+            return f"以{title}为背景，看一个跨境订单从仓到门，要核对哪些环节。"
+        # 批18：异源中段递进——与开场事件分开表述，不混源
+        if flow_role == "escalation":
+            return f"除此之外，{title}，也在改变今天的履约预期。"
         if index == 1:
             if "musina" in title.casefold() and "拥堵" in title:
                 return "Musina 现场，筛查让卡车排起长队。你的订单，还能按原计划走吗？"
@@ -807,14 +867,40 @@ def plan_followup_scenes(
     slots: list[tuple[str, object]] = []
     hotspot_slots = [item for item in source_slots if item[0] == "hotspot"]
     owned_slots = [item for item in source_slots if item[0] == "owned"]
-    # 开头先给热点事实，随后交替 Buffalo 实拍与自有照片；不再自动生成空白
-    # 路线/订单 PPT。若图库也不足，宁可输出较短计划并由上层提示补素材。
-    slots.extend(hotspot_slots[:2])
-    if len(hotspot_slots) > 2:
-        slots.append(hotspot_slots[2])
+
+    def _slot_event(slot: tuple[str, object]) -> dict:
+        kind, payload = slot
+        return payload[1] if kind == "hotspot" else payload
+
+    def _slot_asset(slot: tuple[str, object]) -> int:
+        return int(_slot_event(slot).get("asset_id") or 0)
+
+    # 批18 动线化：不再"热点全堆开头"。
+    #   1) 开场 = 新鲜度最高 Hook（timely 优先，generic 常青兜底）——urgency 已并入
+    #      _event_score 排序，slots 里第一个就是它。
+    #   2) 同源补充现场紧跟开场（最多 1 段，原行为保留：同一事件的更多实拍）。
+    #   3) 异源事件 = mid-roll：放到首个证明段之后再出现，作局势再确认。
+    #   4) 其余热点不再强制进片头（避免新闻纪录片感）；用户锁定的跨父事件保底进片。
+    mid_roll_clip_id: int | None = None
+    slots.extend(hotspot_slots[:1])
+    if hotspot_slots:
+        primary_asset = _slot_asset(hotspot_slots[0])
+        slots.extend([item for item in hotspot_slots[1:] if _slot_asset(item) == primary_asset][:1])
+        cross_parent = next((item for item in hotspot_slots[1:] if _slot_asset(item) != primary_asset), None)
+        if cross_parent is not None:
+            mid_roll_clip_id = int(_slot_event(cross_parent).get("id") or 0)
     image_index = 0
     for position, item in enumerate(owned_slots):
         slots.append(item)
+        # mid-roll：首个证明段之后插入异源事件（escalation / supplementary）；
+        # 插入后不清空 mid_roll_clip_id，下方 scene 构建循环据此标 flow_role。
+        if mid_roll_clip_id is not None and position == 0:
+            slot = next(
+                (s for s in hotspot_slots if int(_slot_event(s).get("id") or 0) == mid_roll_clip_id),
+                None,
+            )
+            if slot is not None:
+                slots.append(slot)
         if image_index < len(context_images) and position in {0, 2, 4}:
             slots.append(("image", context_images[image_index]))
             image_index += 1
@@ -827,6 +913,12 @@ def plan_followup_scenes(
         if kind == "hotspot":
             _, event, reasons = payload
             title = _event_display_title(event, brief)
+            flow_role = (
+                "opener" if position == 1
+                else "escalation" if int(event.get("id") or 0) == (mid_roll_clip_id or -1)
+                else "supplementary"
+            )
+            hook_kind = str(event.get("hook_kind") or "timely_event")
             asset_start_ms, asset_end_ms, visual_description = _event_visual_range(event)
             duration_ms = _usable_source_duration_ms(
                 event, start_ms=asset_start_ms, end_ms=asset_end_ms,
@@ -834,8 +926,10 @@ def plan_followup_scenes(
             scenes.append({
                 "scene": position, "scene_role": "hotspot_evidence", "evidence_type": "hotspot_video",
                 "duration_ms": duration_ms, "duration": duration_ms / 1000,
-                "visual": title, "voiceover": _voiceover(brief, "hotspot_evidence", position, title),
+                "visual": title,
+                "voiceover": _voiceover(brief, "hotspot_evidence", position, title, event=event, flow_role=flow_role),
                 "text_overlay": title[:24], "asset_id": event.get("asset_id"), "event_clip_id": event.get("id"),
+                "hook_kind": hook_kind, "flow_role": flow_role,
                 "asset_start_ms": asset_start_ms, "asset_end_ms": asset_end_ms,
                 "match_reasons": (reasons or ["热点来源画面"]) + ([f"优先现场子片段：{visual_description}"] if visual_description else []),
             })

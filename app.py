@@ -2354,6 +2354,13 @@ async def _generate_topic_brief_video(
         if not item.get("hotspot_id")
     ]
     related_events = db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+    # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
+    if approved_hook_event_ids:
+        known_ids = {int(e.get("id") or 0) for e in related_events}
+        for clip_id in approved_hook_event_ids:
+            clip = db.get_hotspot_event_clip(int(clip_id))
+            if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
+                related_events.append(clip)
     planning_brief = hotspot_logistics_planner.build_brief({**source_hotspot, **event}, owned_segments, brief)
     planning_brief.update({
         "hotspot_id": event.get("hotspot_id"),
@@ -4896,6 +4903,11 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
     related_events = db.list_hotspot_event_clips(
         asset_id=primary["asset_id"], hotspot_id=primary["hotspot_id"],
     )
+    # 批18：并入跨父 locked 事件（locked_events 可含不同父热点，之前被静默丢弃）。
+    known_ids = {int(e.get("id") or 0) for e in related_events}
+    for locked in locked_events:
+        if int(locked.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(locked):
+            related_events.append(locked)
     cta_duration_ms = sum(
         int(item["duration_ms"]) for item in hotspot_video_planner.BRAND_ENDCARD_SCENES
     )
