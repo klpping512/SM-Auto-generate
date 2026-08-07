@@ -50,6 +50,8 @@ DEFAULT_ROUTES = {
         "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
         "capabilities": ["text", "vision"], "timeout": 120, "max_tokens": 1800,
         "cost_profile": "medium", "enabled": True,
+        # MiMo 默认开 thinking，推理预算会耗尽 max_tokens 导致 content 恒空（批15）。
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     "critic": {
         "role": "critic", "provider": "mimo",

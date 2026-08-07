@@ -69,6 +69,24 @@ def test_mimo_maps_enable_thinking_false_to_native_thinking_disabled(tmp_db):
     }
 
 
+def test_video_evaluator_route_disables_thinking_like_critic(tmp_db):
+    """批15：video_evaluator 必须与 planner/critic 对齐关闭 thinking，
+    否则 MiMo 推理预算耗尽 max_tokens，质检 content 恒空。"""
+    import model_router
+
+    route = model_router.get_route("video_evaluator")
+    assert model_router._safe_request_options(route) == {
+        "enable_thinking": False, "reasoning_split": True,
+    }
+    assert model_router._provider_request_options(route) == {
+        "thinking": {"type": "disabled"},
+    }
+    # 三个 JSON 敏感角色全量对齐，防后续改路由时漏配
+    for role in ("planner_text", "critic", "video_evaluator"):
+        assert model_router._safe_request_options(model_router.get_route(role)).get("enable_thinking") is False
+
+
+
 @pytest.mark.asyncio
 async def test_call_text_does_not_cache_empty_visible_content(tmp_db, monkeypatch):
     import model_router
