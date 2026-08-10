@@ -170,7 +170,7 @@ async def generate_content(
                 ))
                 logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
             except Exception as e:
-                logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%s", platform.value, topic, e)
+                logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%r", platform.value, topic, e)
                 results.append(_fallback_content(platform, topic, category))
             continue
         elif platform == Platform.DOUYIN:
@@ -230,7 +230,7 @@ async def generate_content(
             ))
             logger.info("AI 内容生成成功: platform=%s, topic=%s", platform.value, topic)
         except Exception as e:
-            logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%s", platform.value, topic, e)
+            logger.error("AI 内容生成失败: platform=%s, topic=%s, error=%r", platform.value, topic, e)
             results.append(_fallback_content(platform, topic, category))
 
     return results
@@ -1027,5 +1027,5 @@ async def _chat_one_platform(
             quality_warnings.append("已删除草稿中无证据支持的服务承诺，保留其余可用内容")
         return {"platform": platform, "title": title[:100], "body": body, "hashtags": hashtags, "image_pages": parsed.get("image_pages", []) if platform == "xiaohongshu" else [], "duration_target": DOUYIN_TARGET_SECONDS if platform == "douyin" else None, "scenes": _conservative_douyin_scenes(normalized_scenes) if platform == "douyin" else [], "music_suggestion": parsed.get("music_suggestion", "") if platform == "douyin" else "", "content": raw, "quality_warnings": quality_warnings, "source": "model_sanitized" if use_safe_fallback else "model"}
     except Exception as e:
-        logger.error("AI 对话失败: platform=%s, error=%s", platform, e)
+        logger.error("AI 对话失败: platform=%s, error=%r", platform, e)
         return _safe_chat_fallback(platform, topic, messages)

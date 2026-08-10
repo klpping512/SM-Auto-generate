@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 
 import httpx
 
 import database as db
+
+logger = logging.getLogger(__name__)
 
 
 ROLES = {
@@ -35,6 +38,8 @@ DEFAULT_ROUTES = {
         "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
         "capabilities": ["text"], "timeout": 60, "max_tokens": 2200,
         "cost_profile": "medium", "enabled": True,
+        # MiMo 默认开 thinking，推理预算会耗尽 max_tokens 导致 content 恒空（批15 同款坑）。
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     # Vision tagging — mimo-v2.5 multimodal (NOT asr).
     "vision_tagger": {
@@ -294,6 +299,7 @@ async def call_text(
     json_mode: bool = False,
     use_cache: bool = True,
     client: httpx.AsyncClient | None = None,
+    max_attempts: int = 3,
 ) -> dict:
     route = get_route(role)
     if "text" not in route["capabilities"] or not route["enabled"]:
@@ -335,31 +341,63 @@ async def call_text(
         headers["Authorization"] = f"Bearer {api_key}"
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=float(route["timeout"]))
+    response_payload: dict | None = None
     try:
-        request_body = {
-            "model": route["model"],
-            "messages": messages,
-            "max_tokens": visible_output,
-            **_provider_request_options(route),
-        }
-        if json_mode:
-            request_body["response_format"] = {"type": "json_object"}
-        response = await client.post(
-            route["base_url"].rstrip("/") + "/chat/completions",
-            headers=headers,
-            json=request_body,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        for attempt in range(max(1, max_attempts)):
+            try:
+                request_body = {
+                    "model": route["model"],
+                    "messages": messages,
+                    "max_tokens": visible_output,
+                    **_provider_request_options(route),
+                }
+                if json_mode:
+                    request_body["response_format"] = {"type": "json_object"}
+                response = await client.post(
+                    route["base_url"].rstrip("/") + "/chat/completions",
+                    headers=headers,
+                    json=request_body,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt + 1 < max_attempts:
+                        logger.warning(
+                            "call_text 瞬态失败重试: role=%s attempt=%d/%d status=%d",
+                            role, attempt + 1, max_attempts, response.status_code,
+                        )
+                        await asyncio.sleep(min(2 ** attempt, 4))
+                        continue
+                response.raise_for_status()
+                response_payload = response.json()
+                if _visible_text_content(response_payload):
+                    break
+                # MiMo 偶发 200 但正文为空（chat 降级根因）：当瞬态失败重试，与 429/5xx 同级。
+                if attempt + 1 < max_attempts:
+                    logger.warning(
+                        "call_text 空内容重试: role=%s attempt=%d/%d",
+                        role, attempt + 1, max_attempts,
+                    )
+                    await asyncio.sleep(min(2 ** attempt, 4))
+                    continue
+                raise RuntimeError("模型未返回可见文本内容")
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt + 1 >= max_attempts:
+                    raise
+                logger.warning(
+                    "call_text 网络错误重试: role=%s attempt=%d/%d error=%r",
+                    role, attempt + 1, max_attempts, exc,
+                )
+                await asyncio.sleep(min(2 ** attempt, 4))
     finally:
         if owns_client:
             await client.aclose()
-    content = _visible_text_content(payload)
+    if response_payload is None:
+        raise RuntimeError("模型未返回可见文本内容")
+    content = _visible_text_content(response_payload)
     if not content:
         # Thinking-on-by-default models can exhaust the output budget and leave
         # an empty answer; never cache that poison for Hook JSON consumers.
         raise RuntimeError("模型未返回可见文本内容")
-    usage = payload.get("usage") or {}
+    usage = response_payload.get("usage") or {}
     input_tokens = int(usage.get("prompt_tokens") or estimated_input)
     output_tokens = int(usage.get("completion_tokens") or max(1, len(content) // 4))
     stored = record_call(

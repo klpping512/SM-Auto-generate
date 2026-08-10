@@ -104,7 +104,7 @@ async def test_call_text_does_not_cache_empty_visible_content(tmp_db, monkeypatc
         with pytest.raises(RuntimeError, match="未返回可见文本内容"):
             await model_router.call_text(
                 "empty-content", "planner_text", [{"role": "user", "content": "返回 JSON"}],
-                prompt_version="empty-content-v1", client=client,
+                prompt_version="empty-content-v1", client=client, max_attempts=1,
             )
     finally:
         await client.aclose()
