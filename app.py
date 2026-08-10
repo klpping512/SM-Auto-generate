@@ -1784,8 +1784,9 @@ def _planner_json(
     title = str(payload.get("title") or "").strip()[:120]
     angle = str(payload.get("angle") or "").strip()[:500]
     scenes = payload.get("scenes") or []
-    if not title or not angle or not isinstance(scenes, list) or len(scenes) != expected_scenes:
+    if not title or not angle or not isinstance(scenes, list) or len(scenes) < expected_scenes:
         raise ValueError("内容规划模型缺少标题、角度或有效分镜")
+    scenes = scenes[:expected_scenes]
     normalized = []
     for index, item in enumerate(scenes, 1):
         if not isinstance(item, dict):
@@ -2514,6 +2515,7 @@ async def _generate_topic_brief_video(
             "第3段开头必须用一句简短的剪辑衔接（如‘镜头转到仓内’），随后只描述 Buffalo 镜头可见动作。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
+    scene_count_line = f"必须严格输出 {len(scenes)} 个分镜，分镜条数与 allowed_scenes 完全一致，不得多不得少。"
     messages = [
         {"role": "system", "content": (
             "你是南非跨境物流短视频策划。只依据提供的事实和允许分镜生成一条 50–90 秒抖音文案。"
@@ -2523,7 +2525,8 @@ async def _generate_topic_brief_video(
             "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
             "自有镜头旁白只能描述画面可见动作；没有清关、入库前或派送前事实时，不得凭画面推断这些节点已经发生。"
             "每段必须提供新的具体信息。不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
-            "用户主题是整条视频的标题和叙事主线；热点 Hook 只能作为开场事实或外部背景，绝不能改写、取代或缩窄用户主题。"
+            + scene_count_line
+            + "用户主题是整条视频的标题和叙事主线；热点 Hook 只能作为开场事实或外部背景，绝不能改写、取代或缩窄用户主题。"
             "若 brief.topic_anchor_contract 存在，标题必须命中其 title 任一词，并且 title_all 中的词必须全部出现；旁白必须展开其 narrative 任一词。"
             "不满足时不要改写成热点标题，必须按原用户主题重写标题和旁白。"
             "每个允许分镜中的 voiceover_max_chars 和 voiceover_min_chars 都是硬边界（null 的品牌 CTA 除外）。旁白必须落在两者之间：不能超出真实画面，也不能过短而留下无声的真实画面。请用事实、可见动作或条件式核对问题自然补足，不得用空泛口号填充。"
@@ -2575,7 +2578,8 @@ async def _generate_topic_brief_video(
                     "content": (
                         "你是短视频脚本 JSON 修复器。只返回完整 JSON，不要解释。"
                         "保留既定分镜数量、顺序、事实边界和所有旁白字数上下限；"
-                        "不得推荐或选择新素材，不得使用信息图、地图、流程图或文字卡。"
+                        + scene_count_line
+                        + "不得推荐或选择新素材，不得使用信息图、地图、流程图或文字卡。"
                         "逐段读取 allowed_scenes 的字数上下限。短句必须改成完整、自然且与该镜头可见动作相关的句子；"
                         "不得保留‘先核对清单’、‘配送节奏要稳’这类脱离画面的短口号，也不得用‘请核对订单信息’补字。"
                         + douyin_copywriting_sop.prompt_for_video_planner()

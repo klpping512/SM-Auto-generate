@@ -802,7 +802,10 @@ def plan_followup_scenes(
     target_duration_ms = max(50_000, min(90_000, int(target_duration_ms)))
     # 60 秒默认使用七段不重复 Buffalo 现场；90 秒最多扩展到八段。若素材不足，
     # 后续质量门禁会停止而不是循环旧叉车画面。
-    owned_limit = 7 if target_duration_ms <= 60_000 else 8
+    # 批20-补：owned_only 无热点 Hook 天然少一个槽位，但规划模型稳定输出 8 段分镜；
+    # 计划仅 7 段会让 _planner_json 场景数硬校验失败（repair 同输出）→ 502。
+    # owned_only 放宽到 8，与模型稳定行为对齐；含热点 Hook 的 mix3/hotspot_owned 保持原逻辑不变。
+    owned_limit = 8 if chain_mode == "owned_only" else (7 if target_duration_ms <= 60_000 else 8)
     # Similar assets from different files are not genuinely different proof.
     # A formal user video may show each reviewed action once; when the library
     # cannot support the requested duration after this filter, the caller must
