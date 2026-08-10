@@ -574,6 +574,21 @@ function renderReview(){
       ${renderManualPreviewReview(manualReview)}
       ${renderDiagnosticsPanel()}
     </div>`;
+  
+  // P3: 渲染完成后显示"加入发布队列"按钮
+  const primaryActionBtn = document.getElementById('primaryAction');
+  if (status === 'succeeded' && job?.output_url && publication?.publish_allowed === true) {
+    const enqueueContainer = document.createElement('div');
+    enqueueContainer.className = 'wb-card';
+    enqueueContainer.innerHTML = `
+      <h3 style="margin-bottom:12px;font-size:14px;color:#25613a">📤 快速发布入口</h3>
+      <button id="enqueueBtn" class="btn btn-primary" style="min-height:44px;min-width:180px" onclick="enqueueToPublishQueue()">
+        ✓ 加入发布队列
+      </button>
+    `;
+    const canvasDiv = document.getElementById('canvas');
+    canvasDiv.appendChild(enqueueContainer);
+  }
   document.getElementById('rail').innerHTML=`
     <div class="wb-card">
       <h3>待确认问题</h3>
@@ -720,6 +735,33 @@ async function loadJob(){
     }
   }
 }
+
+// P3: 加入发布队列
+async function enqueueToPublishQueue(){
+  if(!project?.id){showToast('项目 ID 无效','error');return;}
+  try{
+    const payload={
+      platforms:[project?.platform || 'douyin'],
+      account_targets:{},
+      scheduled_at:null,
+    };
+    const response=await apiFetch(`/api/video-projects/${project.id}/enqueue`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    const result=await response.json();
+    if(response.ok){
+      showToast('✅ 已成功加入发布队列，系统将在 1 分钟内自动发布');
+      setTimeout(()=>location.reload(),1500);
+    }else{
+      showToast('❌ '+(result.detail||'入队失败'),'error');
+    }
+  }catch(error){
+    showToast('❌ 加入失败：'+error.message,'error');
+  }
+}
+
 function startPolling(){
   if(projectPoller)clearInterval(projectPoller);
   projectPoller=setInterval(async()=>{

@@ -16,6 +16,7 @@ import video_quality.service as video_quality_service
 import video_renderer
 from auth import get_current_user, require_role
 from models import (
+    Platform,
     UserRole,
     VideoGenerationManualReviewRequest,
     VideoGenerationRequest,
@@ -23,6 +24,7 @@ from models import (
     VideoProjectCreateRequest,
     VideoProjectRevisionRequest,
     VideoQualityRequest,
+    VideoProjectEnqueueRequest,
 )
 from video_clip_refs import ClipReferenceError, resolve_clip_ref
 from video_quality.schemas import VideoQualityInput
@@ -427,5 +429,56 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             detail=f"score={result['report']['overall_score']},passed={result['report']['passed']}",
         )
         return result
+
+    # P3: 发布队列入队入口
+    @router.post("/api/video-projects/{project_id}/enqueue")
+    async def enqueue_video_project(
+        project_id: str,
+        request: VideoProjectEnqueueRequest,
+        user=Depends(get_current_user),
+    ) -> dict:
+        """将已完成渲染的视频项目加入发布队列（立即或定时）。"""
+        project = db.get_video_project(project_id, created_by=user["id"])
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        job = db.get_video_generation_job(project.get("active_job_id"))
+        if not job or job.get("status") != "succeeded" or not job.get("output_path"):
+            raise HTTPException(status_code=400, detail="成片尚未就绪，无法入队")
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        scheduled_at = request.scheduled_at or now_str
+        platforms = request.platforms or [project.get("platform", "douyin")]
+        valid_platforms = {p.value for p in Platform}
+        for platform in platforms:
+            if platform not in valid_platforms:
+                raise HTTPException(status_code=400, detail=f"不支持的平台：{platform}")
+
+        created_ids = []
+        for platform in platforms:
+            target_ids = request.account_targets.get(platform) or [None]
+            for target_id in target_ids:
+                if target_id is not None:
+                    account = db.get_account(target_id)
+                    if not account or account.get("owner_id") != user["id"]:
+                        raise HTTPException(status_code=403, detail="不能操作其他用户的账号")
+                    if account.get("platform") != platform:
+                        raise HTTPException(status_code=400, detail="目标账号与发布平台不匹配")
+                queue_id = db.add_to_queue(
+                    title=request.title or project.get("title") or "",
+                    body="",
+                    platform=platform,
+                    scheduled_at=scheduled_at,
+                    status="queued",
+                    created_by=user["id"],
+                    attachments=[{"type": "video", "path": job["output_path"]}],
+                    target_account_id=target_id,
+                )
+                created_ids.append(queue_id)
+
+        db.add_audit_log(
+            user["id"], user["username"], "enqueue_video_project",
+            target=project_id, detail=json.dumps({"queue_ids": created_ids}),
+        )
+        return {"status": "queued", "queue_ids": created_ids, "message": f"已入队 {len(created_ids)} 条"}
 
     return router

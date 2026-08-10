@@ -682,8 +682,8 @@ async def fetch_hotspots_then_incremental_hook_intake():
 
 def start_scheduler():
     """启动定时调度器。"""
-    # 每分钟检查一次定时发布任务
-    scheduler.add_job(check_scheduled_publish, "interval", minutes=1, id="scheduled_publish", replace_existing=True)
+    # 每分钟检查一次定时发布任务（加 grace time 避免错过）
+    scheduler.add_job(check_scheduled_publish, "interval", minutes=1, id="scheduled_publish", replace_existing=True, misfire_grace_time=120)
     scheduler.add_job(
         fetch_hotspots_then_incremental_hook_intake,
         "interval",
@@ -702,6 +702,7 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=3600,  # 1 小时 grace time，避免连续错过导致任务失效
     )
     scheduler.add_job(
         prewarm_authorized_hotspot_media,
@@ -725,9 +726,21 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=3600,  # 1 小时 grace time，避免连续错过导致任务失效
     )
     scheduler.start()
     logger.info("定时调度器已启动（每分钟检查定时发布任务）")
+    
+    # 服务重启后 30 秒触发一次 hook 库清理补跑
+    import asyncio
+    async def _late_start_hook_cleanup():
+        await asyncio.sleep(30)
+        try:
+            logger.info("服务重启后 30 秒，触发一次热点 Hook 库清理...")
+            await cleanup_hotspot_hook_library()
+        except Exception as e:
+            logger.warning("服务重启后 Hook 库清理失败：%s", e)
+    asyncio.create_task(_late_start_hook_cleanup())
 
 
 def stop_scheduler():

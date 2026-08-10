@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -22,6 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 import asset_taxonomy
 import database as db
 from video_clip_refs import ClipReferenceError, resolve_clip_ref
+
+logger = logging.getLogger(__name__)
 from video_composition_policy import (
     is_explanation_scene,
     source_usage_report,
@@ -887,7 +890,20 @@ def _safe_concat_command(ffmpeg: str, segments: list[Path], output: Path) -> lis
 
 
 def build_subtitle_cues(text: str, duration: float) -> list[dict]:
-    """按语义停顿分句，并按字数分配 TTS 实际时长，避免字幕与旁白硬截断。"""
+    """按语义停顿分句并按字符比例分配时长；无音频时的默认实现。"""
+    return _build_subtitle_cues_internal(text, duration, audio_path=None)
+
+
+def _build_subtitle_cues_internal(
+    text: str,
+    duration: float,
+    *,
+    audio_path: Path | None = None,
+    silence_threshold: float = -50.0,
+    min_pause_duration: float = 0.3,
+    ffmpeg: str = "ffmpeg",
+) -> list[dict]:
+    """构建字幕时间轴：有音频时用 ffmpeg silencedetect 把边界吸到真实语音段；无音频时字符比例。"""
     parts = [p.strip() for p in re.split(r"(?<=[，。！？；,.!?;])", text or "") if p.strip()]
     if not parts and text.strip():
         parts = [text.strip()]
@@ -905,10 +921,113 @@ def build_subtitle_cues(text: str, duration: float) -> list[dict]:
     parts = compact_parts
     total = sum(max(1, len(part)) for part in parts) or 1
     cursor, cues = 0.0, []
+
+    if not audio_path or not os.path.exists(audio_path):
+        for index, part in enumerate(parts):
+            end = duration if index == len(parts) - 1 else cursor + duration * max(1, len(part)) / total
+            cues.append({"start": round(cursor, 3), "end": round(end, 3), "text": part})
+            cursor = end
+        return cues
+
+    silence_points = _detect_silence_points(str(audio_path), silence_threshold, min_pause_duration, ffmpeg=ffmpeg)
+    if silence_points:
+        return _align_cues_to_silence(parts, duration, silence_points, tolerance=0.12)
+
     for index, part in enumerate(parts):
         end = duration if index == len(parts) - 1 else cursor + duration * max(1, len(part)) / total
         cues.append({"start": round(cursor, 3), "end": round(end, 3), "text": part})
         cursor = end
+    return cues
+
+
+def _detect_silence_points(
+    audio_path: str,
+    threshold: float = -50.0,
+    min_duration: float = 0.3,
+    ffmpeg: str = "ffmpeg",
+) -> list[tuple[float, float]]:
+    """用 ffmpeg silencedetect 检测静音段，返回 (start, end) 列表。"""
+    try:
+        cmd = [
+            ffmpeg,
+            "-i", audio_path,
+            "-af", f"silencedetect=noise={threshold}dB:d={min_duration}",
+            "-f", "null", "-",
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60,
+            stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+        )
+        stderr = result.stderr or ""
+        starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", stderr)]
+        ends = [float(m.group(1)) for m in re.finditer(r"silence_end: ([\d.]+)", stderr)]
+        points = []
+        si = ei = 0
+        while si < len(starts) and ei < len(ends):
+            if starts[si] < ends[ei]:
+                points.append((starts[si], ends[ei]))
+                si += 1
+                ei += 1
+            else:
+                ei += 1
+        return points
+    except Exception:
+        logger.warning("静音检测失败：%s", audio_path, exc_info=True)
+        return []
+
+
+def _align_cues_to_silence(
+    parts: list[str],
+    total_duration: float,
+    silence_points: list[tuple[float, float]],
+    tolerance: float = 0.12,
+) -> list[dict]:
+    """语音时间轴映射：把字符比例边界投影到真实语音段，保证每个 cue 不跨静音、末条 end=总时长。"""
+    speech: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in sorted(silence_points, key=lambda x: x[0]):
+        if start > cursor + tolerance:
+            speech.append((cursor, min(start, total_duration)))
+        cursor = max(cursor, end)
+    if cursor < total_duration - tolerance:
+        speech.append((cursor, total_duration))
+
+    total_chars = sum(max(1, len(p)) for p in parts) or 1
+
+    # 无有效语音段 → 回退字符比例
+    if not speech:
+        cur = 0.0
+        cues = []
+        for i, part in enumerate(parts):
+            end = total_duration if i == len(parts) - 1 else cur + total_duration * max(1, len(part)) / total_chars
+            cues.append({"start": round(cur, 3), "end": round(end, 3), "text": part})
+            cur = end
+        return cues
+
+    speech_total = sum(e - s for s, e in speech)
+    cum = 0.0
+    boundaries_sec = [0.0]
+    for p in parts[:-1]:
+        cum += max(1, len(p))
+        boundaries_sec.append(speech_total * cum / total_chars)
+
+    def sec_to_real(sec: float) -> float:
+        for s, e in speech:
+            span = e - s
+            if sec <= span:
+                return s + sec
+            sec -= span
+        return speech[-1][1]
+
+    cues = []
+    for i, part in enumerate(parts):
+        start = sec_to_real(boundaries_sec[i])
+        end = sec_to_real(boundaries_sec[i + 1]) if i + 1 < len(parts) else speech[-1][1]
+        cues.append({
+            "start": round(max(start, 0.0), 3),
+            "end": round(min(max(end, start + 0.05), total_duration), 3),
+            "text": part,
+        })
     return cues
 
 
@@ -1376,7 +1495,13 @@ def render_job(
                         "必须拆分成可用的真实素材 Beat 或补充未使用的 Buffalo 自有图片，禁止循环真实视频"
                     )
             scene_durations.append(duration)
-            cues = build_subtitle_cues(scene["voiceover"], min(speech_duration, duration))
+            audio_path = wav if os.path.exists(wav) else None
+            cues = _build_subtitle_cues_internal(
+                scene["voiceover"],
+                min(speech_duration, duration),
+                audio_path=audio_path,
+                ffmpeg=ffmpeg or "ffmpeg",
+            )
             subtitle_sync = subtitle_sync_report(cues, speech_duration)
             subtitle_sync_reports.append(subtitle_sync)
             scene_subtitles.append({"render_duration": duration, "sync": subtitle_sync})

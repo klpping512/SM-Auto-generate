@@ -67,6 +67,7 @@ from auth import (
     hash_password,
     get_current_user, require_role,
 )
+import random
 from models import (
     GenerateRequest, GenerateResponse,
     QueueCreateRequest, AccountCreateRequest, AccountCredentialsRequest, ReviewRequest, ChatRequest, ChatDualLibraryVideoRequest,
@@ -83,7 +84,7 @@ from models import (
     ModelRouteRequest, TtsPreviewRequest,
 )
 import publish_readiness
-from routes import auth_routes, config_routes, hotspot_package_routes, page_routes, video_generation_routes
+from routes import auth_routes, config_routes, hotspot_package_routes, page_routes, video_generation_routes, admin_router
 from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
 
 # 从项目本地的 .env 加载敏感配置；.env 已加入 .gitignore，不会进入源码仓库。
@@ -224,6 +225,7 @@ app.include_router(config_routes.router)
 app.include_router(hotspot_package_routes.router)
 app.include_router(page_routes.create_router(STATIC_DIR))
 app.include_router(video_generation_routes.create_router(lambda: STATIC_DIR))
+app.include_router(admin_router.router)
 
 # 扫码登录会话仅用于本机单进程部署；前端据此获得明确的成功/超时/错误状态。
 scan_login_sessions: dict[str, dict] = {}
@@ -2087,6 +2089,19 @@ def _marketing_hook_candidates(
                 freshness_bonus = 2
             elif age_days >= 30:
                 freshness_bonus = -3
+        # P1: 加入素材使用惩罚
+        asset_id = hooks[0].get("asset_id") if hooks else None
+        usage_penalty = 0
+        if asset_id and str(asset_id).isdigit():
+            asset = db.get_asset(int(asset_id))
+            if asset:
+                usage_count = int(asset.get("usage_count") or 0)
+                # 取 min(usage, 5) 避免过度惩罚 + _usage_freshness_penalty(last_used_at)
+                last_used_at = asset.get("last_used_at")
+                freshness_pen = hotspot_video_planner._usage_freshness_penalty(last_used_at)
+                usage_boundary = min(usage_count, 5) + freshness_pen
+                usage_penalty = usage_boundary
+        
         candidates.append({
             "hotspot_id": hotspot["id"], "event_clip_id": hooks[0]["event_clip_id"] if hooks else None,
             "title": headline[:200],
@@ -2113,15 +2128,38 @@ def _marketing_hook_candidates(
                 + reuse_bias
                 - mismatch_penalty
                 + freshness_bonus
+                - usage_penalty
             ),
+            "_tiebreak": random.random(),
             "usage_boundary": "热点只用于提出问题或解释外部背景；Buffalo 服务能力只能由知识库、品牌证据和自有镜头说明。",
             "reuse_policy": "只有该 Hook 是当前主题最强事实现场时才复用；若存在同等强相关候选，优先选择不同事件，避免连续视频看起来都用同一个开场。",
         })
+    # P1: 同分随机 tie-break
     candidates.sort(
-        key=lambda item: (item["score"], item.get("published_ts") or 0, int(item["hotspot_id"])),
+        key=lambda item: (item["score"], item.get("published_ts") or 0, item.get("_tiebreak", 0.0)),
         reverse=True,
     )
     limited = candidates[:max(1, limit)] if candidates else []
+    
+    # 如果有多条同分，随机打乱后取前 limit
+    if len(limited) > 1:
+        scores = [item["score"] for item in limited]
+        if len(set(scores)) == 1:
+            # 全部分数相同，随机打乱
+            random.shuffle(limited)
+        else:
+            # 按分数分组，每组内随机打乱
+            groups = {}
+            for item in limited:
+                score = item["score"]
+                if score not in groups:
+                    groups[score] = []
+                groups[score].append(item)
+            reshuffled = []
+            for score in sorted(groups.keys(), reverse=True):
+                random.shuffle(groups[score])
+                reshuffled.extend(groups[score])
+            limited = reshuffled[:max(1, limit)]
     funnel["passed"] = len(limited)
     rag = [{"claim": item.get("claim", "")[:300], "note": item.get("evidence_note", "")[:300]} for item in brand_evidence]
     return limited, kb_context, rag, funnel

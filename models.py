@@ -394,6 +394,14 @@ class VideoQualityRequest(BaseModel):
     auto_regenerate: bool = False
 
 
+# P3: 发布队列入队请求体
+class VideoProjectEnqueueRequest(BaseModel):
+    platforms: list[str] = Field(default=[], description="要发布的平台（Platform 枚举值字符串，如 douyin/xiaohongshu）")
+    account_targets: dict[str, list[int]] = Field(default={}, description="平台 -> 目标账号主键列表")
+    scheduled_at: Optional[str] = Field(None, description="计划发布时间；留空=立即发布")
+    title: Optional[str] = None
+
+
 # ==================== Topics ====================
 
 class TopicCategory(BaseModel):

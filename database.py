@@ -3387,9 +3387,9 @@ def list_hotspot_hook_cleanup_candidates(retention_days: int = 10, protect_days:
                  AND asset_id IS NOT NULL
                  AND download_status='downloaded'
                  AND processing_status='ready'
-                 AND datetime(COALESCE(confirmed_at,created_at)) < datetime('now', ?)
-                 AND datetime(COALESCE(confirmed_at,created_at)) < datetime('now', ?)
-               ORDER BY datetime(COALESCE(confirmed_at,created_at)),id""",
+                 AND datetime(created_at) < datetime('now', ?)
+                 AND datetime(created_at) < datetime('now', ?)
+               ORDER BY datetime(created_at),id""",
             (f"-{retention_days} days", f"-{protect_days} days"),
         ).fetchall()
         return [dict(row) for row in rows]
