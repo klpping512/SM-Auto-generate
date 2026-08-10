@@ -69,6 +69,7 @@ def source_usage_report(scenes: Iterable[dict]) -> dict:
     issues: list[str] = []
     segment_scenes: dict[int, list[int]] = defaultdict(list)
     owned_assets: dict[int, list[int]] = defaultdict(list)
+    za_stock_assets: dict[int, list[int]] = defaultdict(list)
     image_assets: dict[int, list[int]] = defaultdict(list)
     hotspot_assets: dict[int, list[tuple[int, tuple[int, int] | None]]] = defaultdict(list)
     exact_ranges: dict[tuple[int, int, int], list[int]] = defaultdict(list)
@@ -105,6 +106,8 @@ def source_usage_report(scenes: Iterable[dict]) -> dict:
             exact_ranges[(asset_id, *clip_range)].append(scene_number)
         if str(scene.get("evidence_type") or "") == "hotspot_video" or scene.get("event_clip_id"):
             hotspot_assets[asset_id].append((scene_number, clip_range))
+        elif str(scene.get("asset_source") or "") == "za_stock_license":
+            za_stock_assets[asset_id].append(scene_number)
         else:
             owned_assets[asset_id].append(scene_number)
 
@@ -114,6 +117,9 @@ def source_usage_report(scenes: Iterable[dict]) -> dict:
     for asset_id, scene_numbers in owned_assets.items():
         if len(scene_numbers) > 1:
             issues.append(f"Buffalo 原始视频 {asset_id} 被第{'、'.join(map(str, scene_numbers))}镜重复使用")
+    for asset_id, scene_numbers in za_stock_assets.items():
+        if len(scene_numbers) > 1:
+            issues.append(f"za_stock 素材 {asset_id} 被第{'、'.join(map(str, scene_numbers))}镜重复使用")
     for asset_id, scene_numbers in image_assets.items():
         if len(scene_numbers) > 1:
             issues.append(f"Buffalo 静态图片 {asset_id} 被第{'、'.join(map(str, scene_numbers))}镜重复使用")
@@ -136,6 +142,7 @@ def source_usage_report(scenes: Iterable[dict]) -> dict:
         "passed": not issues,
         "issues": list(dict.fromkeys(issues)),
         "owned_asset_count": len(owned_assets),
+        "za_stock_asset_count": len(za_stock_assets),
         "hotspot_parent_count": len(hotspot_assets),
         "asset_segment_count": len(segment_scenes),
         "image_asset_count": len(image_assets),

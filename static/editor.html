@@ -378,8 +378,13 @@ async function init() {
     // 加载本地草稿
     const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
     const linkedProjectId = new URLSearchParams(location.search).get('project_id');
+    const importProjectId = new URLSearchParams(location.search).get('import_project');
     if (linkedProjectId) {
         location.replace(`/video-project.html?id=${encodeURIComponent(linkedProjectId)}&stage=brief`);
+        return;
+    }
+    if (importProjectId) {
+        loadVideoProjectDraft(importProjectId);
         return;
     }
     loadDraft();
@@ -735,6 +740,11 @@ async function loadVideoProjectDraft(projectId) {
             generatedContents.douyin.rendered_video = previewVideo;
             generatedContents.douyin.attachments = [...(generatedContents.douyin.attachments || []).filter(item => item.type !== 'video'), previewVideo];
         }
+        const script = linkedJob?.quality_report?.script || {};
+        const revPayload = payload.brief || {};
+        generatedContents.douyin.title = activeVideoProject.title || script.title || '';
+        generatedContents.douyin.body = (script.scenes || []).map(s => (s || {}).voiceover).filter(Boolean).join('\n');
+        generatedContents.douyin.hashtags = buildImportHashtags(activeVideoProject, revPayload, script);
         importedFromChat = true;
         currentPreview = 'douyin';
         refreshPreviewTabs();
@@ -744,6 +754,29 @@ async function loadVideoProjectDraft(projectId) {
     } catch (error) {
         showToast(error.message, 'error');
     }
+}
+
+// 批20 D3：视频项目导入编辑器时的标签自动生成（上限 8）
+function buildImportHashtags(project, brief, script) {
+  const tags = [];
+  const add = (t) => {
+    const s = String(t || '').replace(/^#/, '').trim();
+    if (s && !tags.includes(s)) tags.push(s);
+  };
+  const chainMode = (project.source_snapshot && typeof project.source_snapshot === 'object' && project.source_snapshot.chain_mode)
+    || (project.source_snapshot && typeof project.source_snapshot === 'string' && (JSON.parse(project.source_snapshot).chain_mode || '')) || '';
+  const title = String(project.title || script.title || '');
+  // 1) 话题核心词：取标题"｜"前主题，按2字以上片段取前2个
+  const subject = title.split('｜')[0].trim();
+  (subject.match(/[一-龥A-Za-z]{2,}/g) || []).slice(0, 2).forEach(add);
+  // 2) 物流节点：brief.logistics_nodes 前2个
+  (Array.isArray(brief.logistics_nodes) ? brief.logistics_nodes : []).slice(0, 2).forEach(add);
+  // 3) 链路标签
+  if (chainMode === 'mix3') add('南非素材');
+  if (chainMode && chainMode !== 'owned_only') add('热点追踪');
+  // 4) 固定组合
+  ['南非物流', '跨境电商', '卖家出海'].forEach(add);
+  return tags.slice(0, 8);
 }
 
 function renderKnowledgeBase() {

@@ -752,6 +752,7 @@ def plan_followup_scenes(
     owned_images: list[dict] | None = None,
     *,
     allow_adaptation: bool = False,
+    chain_mode: str = "hotspot_owned",
 ) -> list[dict]:
     # A MiMo + critic approved set has already passed factual relevance review.
     # Preserve that decision rather than applying a second keyword-only filter
@@ -814,25 +815,39 @@ def plan_followup_scenes(
             continue
         used_actions.add(action)
         distinct_owned.append(item)
-    # ---- za_stock 补充层：硬上限 2，仅在有缺口时进片（批13）----
+    # ---- za_stock 补充层：硬上限 2，mix3 强制 ≥1（批20）----
     # 必须在全量 distinct_owned 上分层，而非已按 owned_limit 切片的子集：
     # za_stock 被 rank 的 -int(id) 垫底，先切片会把它们全切掉，补充层就成空操作。
     ZA_STOCK_SOURCE = "za_stock_license"
     ZA_STOCK_MAX_SCENES = 2
     buffalo = [item for item in distinct_owned if item.get("asset_source") != ZA_STOCK_SOURCE]
     zastock = [item for item in distinct_owned if item.get("asset_source") == ZA_STOCK_SOURCE]
-    # 缺口 = brief 需要但 buffalo 未覆盖的功能类目
-    eligible = _eligible_owned_categories(brief)
-    covered: set[str] = set()
-    for item in buffalo:
-        covered |= _functional_categories(item)
-    gap = (eligible - covered) if eligible is not None else set()
-    # 1) 优先补缺口类目；2) buffalo 总量不足 owned_limit 时补位
-    picks = [it for it in zastock if _functional_categories(it) & gap][:ZA_STOCK_MAX_SCENES]
-    if len(picks) < ZA_STOCK_MAX_SCENES and len(buffalo) < owned_limit:
-        picks += [it for it in zastock if it not in picks][:ZA_STOCK_MAX_SCENES - len(picks)]
+    picks: list[dict] = []
+    if chain_mode in {"mix3", "hotspot_owned"}:
+        # 缺口 = brief 需要但 buffalo 未覆盖的功能类目
+        eligible = _eligible_owned_categories(brief)
+        covered: set[str] = set()
+        for item in buffalo:
+            covered |= _functional_categories(item)
+        gap = (eligible - covered) if eligible is not None else set()
+        if chain_mode == "mix3":
+            # 强制 ≥1：先补缺口类目，再兜底任意可用段；上限仍 ZA_STOCK_MAX_SCENES
+            picks = [it for it in zastock if _functional_categories(it) & gap][:ZA_STOCK_MAX_SCENES]
+            if not picks:
+                picks = [it for it in zastock if it not in picks][:1]
+            picks = picks[:ZA_STOCK_MAX_SCENES]
+            if not picks:
+                raise ValueError(
+                    "mix3 链路强制要求至少一段 za_stock（南非免版权）素材，但库中暂无可用段；"
+                    "请补充南非素材，或改选其他链路。"
+                )
+        else:  # hotspot_owned 保持现状：仅缺口/自有不足时补位
+            picks = [it for it in zastock if _functional_categories(it) & gap][:ZA_STOCK_MAX_SCENES]
+            if len(picks) < ZA_STOCK_MAX_SCENES and len(buffalo) < owned_limit:
+                picks += [it for it in zastock if it not in picks][:ZA_STOCK_MAX_SCENES - len(picks)]
+    # owned_only：picks 恒空（纯自有，不含 za_stock）
     # buffalo 保底 + za_stock 追加后重新交织，避免 za_stock 堆在片尾
-    owned = _diversify_owned_candidates(buffalo[:owned_limit - len(picks)] + picks)
+    owned = _diversify_owned_candidates(buffalo[:max(0, owned_limit - len(picks))] + picks)
     # Ideal formal plans avoid automatic image inserts. Adaptive chat plans may
     # re-enable up to three stills as rhythm bridges when owned footage is thin.
     if allow_adaptation and len(owned) < 4:
@@ -955,6 +970,8 @@ def plan_followup_scenes(
                 "primary_category": category,
                 # 受控开闸：za-stock 通用背景段必须带来源标记，门禁据此强制安全模板。
                 "asset_source": segment.get("asset_source") or "",
+                # 批20：mix3 强制入片的 za_stock 段带强制标记，供前端/复核可见链路兑现。
+                "stock_required": True if str(segment.get("asset_source") or "") == ZA_STOCK_SOURCE else None,
                 "asset_start_ms": segment.get("start_ms", 0), "asset_end_ms": segment.get("end_ms", 0),
                 "copy_anchor": _owned_copy_anchor(segment),
                 "action_key": _owned_action_key(segment),

@@ -561,8 +561,8 @@ function renderReview(){
   const issues=[...new Set(job?.quality_report?.gate?.issues||[])];
   const adjustments=job?.quality_report?.automatic_adjustments||[];
   const preview=job?.preview_url&&job.preview_url!==job.output_url?`<h3>低清预览</h3><video src="${escapeHtml(job.preview_url)}" controls></video>${renderQuality(job.quality_report?.preview_quality)}`:'';
-  const outputLabel=internalPreview?'内部测试预览':(publishAllowed?'高清成片':'高清内部验收成片');
-  const outputDownload=internalPreview?'下载内部预览':(publishAllowed?'下载 MP4':'下载内部验收成片');
+  const outputLabel=internalPreview?'内部测试预览':'高清成片';
+  const outputDownload=internalPreview?'下载内部预览':'下载 MP4';
   const output=job?.output_url?`<h3 style="margin-top:14px">${outputLabel}</h3><video src="${escapeHtml(job.output_url)}" controls></video>${gatedDownload(job.output_url,outputDownload)}${renderQuality(internalPreview?job.quality_report?.preview_quality:job.quality_report?.final_quality)}`:'';
   document.getElementById('canvas').innerHTML=`
     <div class="wb-card media-box">
@@ -575,16 +575,22 @@ function renderReview(){
       ${renderDiagnosticsPanel()}
     </div>`;
   
-  // P3: 渲染完成后显示"加入发布队列"按钮
+  // P3: 渲染完成后显示"去内容编辑器 + 加入发布队列"按钮
   const primaryActionBtn = document.getElementById('primaryAction');
-  if (status === 'succeeded' && job?.output_url && publication?.publish_allowed === true) {
+  if (status === 'succeeded' && job?.output_url && !internalPreview) {
     const enqueueContainer = document.createElement('div');
     enqueueContainer.className = 'wb-card';
     enqueueContainer.innerHTML = `
-      <h3 style="margin-bottom:12px;font-size:14px;color:#25613a">📤 快速发布入口</h3>
-      <button id="enqueueBtn" class="btn btn-primary" style="min-height:44px;min-width:180px" onclick="enqueueToPublishQueue()">
-        ✓ 加入发布队列
-      </button>
+      <h3 style="margin-bottom:12px;font-size:14px;color:#25613a">📤 发布入口</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="toEditorBtn" class="btn btn-primary" style="min-height:44px;min-width:180px"
+          onclick="location.href='/editor.html?import_project=' + encodeURIComponent(project?.id || '')">
+          去内容编辑器（写文案·选标签·发布）
+        </button>
+        <button id="enqueueBtn" class="btn btn-secondary" style="min-height:44px;min-width:150px" onclick="enqueueToPublishQueue()">
+          加入发布队列
+        </button>
+      </div>
     `;
     const canvasDiv = document.getElementById('canvas');
     canvasDiv.appendChild(enqueueContainer);

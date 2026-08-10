@@ -869,7 +869,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     used_segment_ids.add(int(segment["id"]))
                     scene_reports.append({
                         "scene": index + 1, "score": 100, "hard_failures": [], "issues": [],
-                        "library_origin": "owned",
+                        "library_origin": "za_stock" if str(scene.get("asset_source") or "") == "za_stock_license" else "owned",
                     })
                 continue
             assignment = assignment_by_scene.get(index, {"candidates": []})

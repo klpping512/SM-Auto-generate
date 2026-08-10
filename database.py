@@ -521,6 +521,7 @@ def init_db():
                 locations_json TEXT NOT NULL DEFAULT '[]',
                 logistics_nodes_json TEXT NOT NULL DEFAULT '[]',
                 freshness_mode TEXT NOT NULL DEFAULT 'recent_or_evergreen',
+                chain_mode TEXT NOT NULL DEFAULT 'hotspot_owned',
                 time_window_days INTEGER NOT NULL DEFAULT 7,
                 platforms_json TEXT NOT NULL DEFAULT '["douyin"]',
                 content_form TEXT NOT NULL DEFAULT 'video',
@@ -994,11 +995,13 @@ def init_db():
         _ensure_column(conn, "video_generation_jobs", "output_purged_at", "TEXT")
         # P3-A 人在环重生成血缘：resume 新建 job 指向前序 job，质检护栏据此回灌 history
         _ensure_column(conn, "video_generation_jobs", "prior_job_id", "TEXT")
+        _ensure_column(conn, "topic_briefs", "chain_mode", "TEXT NOT NULL DEFAULT 'hotspot_owned'")
         _ensure_column(conn, "video_generation_jobs", "regen_attempt", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "sample_bundles", "preview_path", "TEXT")
         _seed_defaults(conn)
     record_schema_migration("2026-08-03-delivery-loop", "hook_kind/logistics_scenes + schema_migrations baseline")
     record_schema_migration("2026-08-06-articles-table", "新增 articles 表：公众号图文长文生产")
+    record_schema_migration("2026-08-10-batch20-chain-mode", "topic_briefs.chain_mode 视频生成链路选择")
     logger.info("数据库初始化完成: %s", DB_PATH)
 
 
@@ -2882,6 +2885,7 @@ def create_topic_brief(data: dict, created_by: int) -> dict:
         "locations_json": json.dumps(data.get("locations") or [], ensure_ascii=False),
         "logistics_nodes_json": json.dumps(data.get("logistics_nodes") or [], ensure_ascii=False),
         "freshness_mode": str(data.get("freshness_mode") or "recent_or_evergreen"),
+        "chain_mode": str(data.get("chain_mode") or "hotspot_owned"),
         "time_window_days": max(1, int(data.get("time_window_days") or 7)),
         "platforms_json": json.dumps(data.get("platforms") or ["douyin"], ensure_ascii=False),
         "content_form": str(data.get("content_form") or "video"),
@@ -2894,10 +2898,10 @@ def create_topic_brief(data: dict, created_by: int) -> dict:
         conn.execute(
             """INSERT INTO topic_briefs
                (id,raw_input,subject,audience,goal,angle,locations_json,logistics_nodes_json,
-                freshness_mode,time_window_days,platforms_json,content_form,must_include_json,
+                freshness_mode,chain_mode,time_window_days,platforms_json,content_form,must_include_json,
                 must_avoid_json,source_hotspot_package_id,status,created_by)
                VALUES (:id,:raw_input,:subject,:audience,:goal,:angle,:locations_json,:logistics_nodes_json,
-                :freshness_mode,:time_window_days,:platforms_json,:content_form,:must_include_json,
+                :freshness_mode,:chain_mode,:time_window_days,:platforms_json,:content_form,:must_include_json,
                 :must_avoid_json,:source_hotspot_package_id,:status,:created_by)""",
             {**fields, "id": brief_id, "created_by": created_by},
         )
@@ -2921,12 +2925,12 @@ def update_topic_brief(brief_id: str, data: dict, created_by: int) -> dict | Non
     with get_conn() as conn:
         conn.execute(
             """UPDATE topic_briefs SET raw_input=?,subject=?,audience=?,goal=?,angle=?,locations_json=?,
-               logistics_nodes_json=?,freshness_mode=?,time_window_days=?,platforms_json=?,content_form=?,
+               logistics_nodes_json=?,freshness_mode=?,chain_mode=?,time_window_days=?,platforms_json=?,content_form=?,
                must_include_json=?,must_avoid_json=?,source_hotspot_package_id=?,status=?,updated_at=datetime('now')
                WHERE id=? AND created_by=?""",
             (merged["raw_input"], merged.get("subject", ""), merged["audience"], merged["goal"], merged["angle"],
              json.dumps(merged["locations"], ensure_ascii=False), json.dumps(merged["logistics_nodes"], ensure_ascii=False),
-             merged["freshness_mode"], int(merged["time_window_days"]), json.dumps(merged["platforms"], ensure_ascii=False),
+             merged["freshness_mode"], merged["chain_mode"], int(merged["time_window_days"]), json.dumps(merged["platforms"], ensure_ascii=False),
              merged["content_form"], json.dumps(merged["must_include"], ensure_ascii=False),
              json.dumps(merged["must_avoid"], ensure_ascii=False), merged.get("source_hotspot_package_id"),
              merged.get("status", "draft"), brief_id, created_by),

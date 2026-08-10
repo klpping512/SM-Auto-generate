@@ -741,8 +741,14 @@ async def review_item(item_id: int, req: ReviewRequest, user=Depends(require_rol
         if error:
             raise HTTPException(409, error)
         db.update_queue_review(item_id, user["id"], "approved", req.note)
-        # 自动加入发布队列
-        db.update_queue_status(item_id, "queued")
+        # 批20：审核通过即发布——无 scheduled_at 时兜底为 now，否则调度器永不取
+        if item.get("scheduled_at"):
+            db.update_queue_status(item_id, "queued")
+        else:
+            db.update_queue_status(
+                item_id, "queued",
+                scheduled_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
         db.add_audit_log(user["id"], user["username"], "approve_content", target=str(item_id), detail=req.note)
     elif req.action == "reject":
         db.update_queue_review(item_id, user["id"], "rejected", req.note)
@@ -1856,14 +1862,14 @@ def _compact_long_formal_voiceovers(generated: dict, voiceover_limits: list[int 
     return repaired
 
 
-def _compact_topic_evidence(brief: dict, event: dict, scenes: list[dict]) -> dict:
+def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict]) -> dict:
     """Only send selected, short evidence summaries to the remote planner."""
     facts = [{
         "title": str(event.get("title_zh") or event.get("title_en") or "")[:160],
         "summary": str(event.get("summary_zh") or event.get("summary") or "")[:400],
         "location": str(event.get("location") or "")[:80],
         "published_at": str(event.get("published_at") or "")[:40],
-    }]
+    }] if event else []
     allowed_scenes = [{
         "scene": item["scene"], "role": item["scene_role"],
         "visual": str(item.get("copy_anchor") or item.get("visual") or "")[:120],
@@ -2322,6 +2328,15 @@ async def autopilot_topic_brief_video(brief_id: str, body: TopicAutoPilotRequest
     brief = db.get_topic_brief(brief_id, user["id"])
     if not brief:
         raise HTTPException(404, "选题简报不存在")
+    chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
+    if chain_mode == "owned_only":
+        result = await _generate_topic_brief_video(
+            brief_id,
+            TopicBriefGenerateRequest(hotspot_event_id=None, platform=body.platform,
+                                      target_duration_ms=body.target_duration_ms, chain_mode="owned_only"),
+            user,
+        )
+        return {**result, "autopilot": {"chain_mode": "owned_only", "hotspot_id": None, "hook_clips": []}}
     candidates, kb_context, brand_evidence, _funnel = _marketing_hook_candidates(brief, limit=20)
     candidates, model_meta = await _model_decide_marketing_hooks(brief, candidates, kb_context, brand_evidence, limit=5)
     chosen = next((item for item in candidates if item.get("can_render_video") and item.get("event_clip_id")), None)
@@ -2333,7 +2348,7 @@ async def autopilot_topic_brief_video(brief_id: str, body: TopicAutoPilotRequest
     result = await _generate_topic_brief_video(
         brief_id,
         TopicBriefGenerateRequest(hotspot_event_id=int(chosen["event_clip_id"]), platform=body.platform,
-                                  target_duration_ms=body.target_duration_ms),
+                                  target_duration_ms=body.target_duration_ms, chain_mode=chain_mode),
         user,
     )
     return {**result, "autopilot": {"hotspot_id": chosen["hotspot_id"], "hook_clips": chosen["hook_clips"],
@@ -2362,51 +2377,59 @@ async def _generate_topic_brief_video(
     brief = db.get_topic_brief(brief_id, user["id"])
     if not brief:
         raise HTTPException(404, "选题简报不存在")
-    event = db.get_hotspot_event_clip(body.hotspot_event_id)
-    if not event:
+    chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
+    event = db.get_hotspot_event_clip(body.hotspot_event_id) if body.hotspot_event_id else None
+    if chain_mode != "owned_only" and not event:
         raise HTTPException(404, "热点事件不存在")
-    approved_hook_event_ids = list(dict.fromkeys(
-        int(event_id) for event_id in body.approved_hook_event_ids if int(event_id) > 0
-    ))
-    if approved_hook_event_ids:
-        if int(event["id"]) not in approved_hook_event_ids:
-            approved_hook_event_ids.insert(0, int(event["id"]))
-        if not 1 <= len(approved_hook_event_ids) <= 2:
-            raise HTTPException(409, "聊天成片必须锁定一至两段已确认 Hook。")
-        locked_events = [db.get_hotspot_event_clip(event_id) for event_id in approved_hook_event_ids]
-        if (
-            any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
-            or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
-                   for item in locked_events)
-            or not _is_same_confirmed_hotspot_event(locked_events)
-        ):
-            raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
-        if len(locked_events) == 2:
-            first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
-            if int(second["start_ms"]) < int(first["end_ms"]):
-                raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
-    source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
+    approved_hook_event_ids: list[int] = []
+    source_hotspot: dict = {}
+    related_events: list[dict] = []
+    if chain_mode != "owned_only":
+        approved_hook_event_ids = list(dict.fromkeys(
+            int(event_id) for event_id in body.approved_hook_event_ids if int(event_id) > 0
+        ))
+        if approved_hook_event_ids:
+            if int(event["id"]) not in approved_hook_event_ids:
+                approved_hook_event_ids.insert(0, int(event["id"]))
+            if not 1 <= len(approved_hook_event_ids) <= 2:
+                raise HTTPException(409, "聊天成片必须锁定一至两段已确认 Hook。")
+            locked_events = [db.get_hotspot_event_clip(event_id) for event_id in approved_hook_event_ids]
+            if (
+                any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
+                or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
+                       for item in locked_events)
+                or not _is_same_confirmed_hotspot_event(locked_events)
+            ):
+                raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
+            if len(locked_events) == 2:
+                first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
+                if int(second["start_ms"]) < int(first["end_ms"]):
+                    raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
+        source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
+        related_events = db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+        # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
+        if approved_hook_event_ids:
+            known_ids = {int(e.get("id") or 0) for e in related_events}
+            for clip_id in approved_hook_event_ids:
+                clip = db.get_hotspot_event_clip(int(clip_id))
+                if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
+                    related_events.append(clip)
     owned_segments = [item for item in db.list_asset_segments(limit=20_000) if not item.get("asset_hotspot_id")]
     owned_images = [
         item for item in db.list_assets(file_type="image", status="active")
         if not item.get("hotspot_id")
     ]
-    related_events = db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
-    # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
-    if approved_hook_event_ids:
-        known_ids = {int(e.get("id") or 0) for e in related_events}
-        for clip_id in approved_hook_event_ids:
-            clip = db.get_hotspot_event_clip(int(clip_id))
-            if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
-                related_events.append(clip)
-    planning_brief = hotspot_logistics_planner.build_brief({**source_hotspot, **event}, owned_segments, brief)
-    planning_brief.update({
-        "hotspot_id": event.get("hotspot_id"),
-        "source_asset_id": event.get("asset_id"),
-        # 用户在热点 Hook 库中明确点选的片段必须成为成片的首个热点证据，
-        # 不能被同一母片的其他 Hook 静默替换。
-        "primary_event_id": event.get("id"),
-    })
+    planning_brief = hotspot_logistics_planner.build_brief(
+        {**source_hotspot, **event} if event else {}, owned_segments, brief
+    )
+    if event:
+        planning_brief.update({
+            "hotspot_id": event.get("hotspot_id"),
+            "source_asset_id": event.get("asset_id"),
+            # 用户在热点 Hook 库中明确点选的片段必须成为成片的首个热点证据，
+            # 不能被同一母片的其他 Hook 静默替换。
+            "primary_event_id": event.get("id"),
+        })
     if approved_hook_event_ids:
         planning_brief["approved_hook_event_ids"] = approved_hook_event_ids
     endcard_duration_ms = sum(
@@ -2418,6 +2441,7 @@ async def _generate_topic_brief_video(
             planning_brief, related_events, owned_segments, target_duration_ms=base_duration_ms,
             owned_images=owned_images,
             allow_adaptation=True,
+            chain_mode=chain_mode,
         )
     except ValueError as exc:
         # Planner input originates from verified Hooks and reviewed internal
@@ -2430,7 +2454,12 @@ async def _generate_topic_brief_video(
             "next_action": "请确认 Hook 仍可播放，或补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
         }) from exc
     hotspot_count = sum(item.get("evidence_type") == "hotspot_video" for item in scenes)
-    owned_count = sum(item.get("evidence_type") == "owned_video" for item in scenes)
+    owned_count = sum(
+        item.get("evidence_type") == "owned_video"
+        and str(item.get("asset_source") or "") != "za_stock_license"
+        for item in scenes
+    )
+    za_stock_count = sum(str(item.get("asset_source") or "") == "za_stock_license" for item in scenes)
     image_count = sum(item.get("evidence_type") == "image" for item in scenes)
     planned_duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     # 品牌 CTA 会在下方统一追加；准入时应按终片时长判断，而不是把尚未追加的
@@ -2440,12 +2469,13 @@ async def _generate_topic_brief_video(
     )
     adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
     # Hook is the hard gate. Thin owned inventory is adaptation, not a block.
-    if hotspot_count < 1 or not scenes:
+    if chain_mode != "owned_only" and (hotspot_count < 1 or not scenes):
         raise HTTPException(409, {
             "message": "证据不足：缺少可用热点 Hook 镜头，不能生成成片。",
             "coverage": {
                 "hotspot_video": hotspot_count,
                 "owned_video": owned_count,
+                "za_stock": za_stock_count,
                 "image": image_count,
                 "duration_ms": final_planned_duration_ms,
             },
@@ -2453,27 +2483,43 @@ async def _generate_topic_brief_video(
             "adaptation": adaptation,
             "next_action": "重新锁定强相关热点 Hook，或换用已确认可渲染的事件片段。",
         })
+    if chain_mode == "owned_only" and not scenes:
+        raise HTTPException(409, {
+            "message": "证据不足：缺少可用的 Buffalo 自有素材，不能生成纯自有成片。",
+            "coverage": {"owned_video": owned_count, "za_stock": za_stock_count, "image": image_count,
+                         "duration_ms": final_planned_duration_ms},
+            "required": {"owned_video": 1},
+            "next_action": "补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
+        })
     if not model_router.key_is_available("planner_text"):
         raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请配置 MIMO_API_KEY 后重试。")
     context = _compact_topic_evidence(brief, event, scenes)
-    if hotspot_count == 1:
+    if chain_mode == "owned_only":
+        hotspot_story_contract = (
+            "全片只描述 Buffalo 镜头可见动作，不引用任何未提供的热点事实，也不得伪装为热点追更。"
+            "每段开头用一句简短剪辑衔接（如‘镜头转到仓内’）再描述可见动作。"
+        )
+        hotspot_quota_line = "无热点 Hook；全片使用自有镜头。"
+    elif hotspot_count == 1:
         hotspot_story_contract = (
             "叙事开场只有第1段热点 Hook：前两秒给出强现场事实和一个与卖家有关的问题。"
             "第1段只能描述允许 Hook 中可见或已给出的热点事实，不得写卖家已经采取了什么动作。"
             "第2段开头必须用一句简短的剪辑衔接（如‘镜头转到仓内’），随后只描述 Buffalo 镜头可见动作。"
         )
+        hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     else:
         hotspot_story_contract = (
             "前两段是同一事件的热点事实：第1段前两秒给出强现场事实和卖家问题，第2段只补充同一现场可见情况。"
             "前两段只能描述允许 Hook 中可见或已给出的热点事实；第2段不得写卖家已经采取了什么动作。"
             "第3段开头必须用一句简短的剪辑衔接（如‘镜头转到仓内’），随后只描述 Buffalo 镜头可见动作。"
         )
+        hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     messages = [
         {"role": "system", "content": (
             "你是南非跨境物流短视频策划。只依据提供的事实和允许分镜生成一条 50–90 秒抖音文案。"
             + hotspot_story_contract
-            + f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
-            "热点事实不得写‘堵死’、全面瘫痪、完全停摆或全线停摆等原始事实未证实的夸张断言。"
+            + hotspot_quota_line
+            + "热点事实不得写‘堵死’、全面瘫痪、完全停摆或全线停摆等原始事实未证实的夸张断言。"
             "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
             "自有镜头旁白只能描述画面可见动作；没有清关、入库前或派送前事实时，不得凭画面推断这些节点已经发生。"
             "每段必须提供新的具体信息。不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
@@ -2622,7 +2668,8 @@ async def _generate_topic_brief_video(
     duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     title = f"{generated['title']}｜{duration_ms // 1000}秒动态视频"
     project_snapshot = {
-        "topic_brief_id": brief_id, "hotspot_event_id": event["id"], "brief": planning_brief,
+        "topic_brief_id": brief_id, "hotspot_event_id": event["id"] if event else None, "brief": planning_brief,
+        "chain_mode": chain_mode,
         "model": model_router.get_route("planner_text").get("model"), "model_cache_hit": result.get("cache_hit", False),
         "copywriting_sop": douyin_copywriting_sop.metadata(),
         "overclaim_guard": overclaim_records,
@@ -2630,6 +2677,8 @@ async def _generate_topic_brief_video(
         "provenance": {
             "hotspot_video": hotspot_count,
             "owned_video": owned_count,
+            "za_stock": za_stock_count,
+            "chain_mode": chain_mode,
             "image": image_count,
             "duration_ms": duration_ms,
             "adapted": bool(adaptation.get("adapted")),
@@ -2672,6 +2721,7 @@ async def _generate_topic_brief_video(
         "coverage": {
             "hotspot_video": hotspot_count,
             "owned_video": owned_count,
+            "za_stock": za_stock_count,
             "image": image_count,
             "duration_ms": duration_ms,
         },
@@ -2798,6 +2848,9 @@ def _build_video_generation_handlers(static_dir: Path):
         hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
         if not hook_ids:
             raise RuntimeError("缺少锁定 Hook，无法生成正式脚本")
+        brief_for_chain = await asyncio.to_thread(
+            db.get_topic_brief, str(snapshot.get("topic_brief_id") or ""), job["created_by"]
+        )
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
@@ -2810,6 +2863,7 @@ def _build_video_generation_handlers(static_dir: Path):
                 approved_hook_event_ids=hook_ids,
                 platform=str(project.get("platform") or snapshot.get("platform") or "douyin"),
                 target_duration_ms=int(project.get("target_duration_ms") or snapshot.get("target_duration_ms") or 60_000),
+                chain_mode=(brief_for_chain or {}).get("chain_mode") or snapshot.get("chain_mode") or "hotspot_owned",
             ),
             {
                 "id": int(job["created_by"]),
@@ -5413,6 +5467,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             logistics_nodes=logistics_nodes,
             platforms=[body.platform],
             content_form="video",
+            chain_mode=body.chain_mode,
         )),
         user["id"],
     )
@@ -5423,6 +5478,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "session_id": body.session_id,
         "topic_brief_id": brief["id"],
         "matched_event_clip_ids": locked_hook_ids,
+        "chain_mode": body.chain_mode,
         "logistics_nodes": logistics_nodes,
         "platform": body.platform,
         "target_duration_ms": body.target_duration_ms,

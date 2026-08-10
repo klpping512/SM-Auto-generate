@@ -174,6 +174,7 @@ class ChatDualLibraryVideoRequest(BaseModel):
     hotspot_event_ids: list[int] = Field(..., min_length=1, max_length=2)
     platform: str = Field(default="douyin", max_length=32)
     target_duration_ms: int = Field(default=60_000, ge=50_000, le=90_000)
+    chain_mode: str = Field(default="hotspot_owned", pattern=r"^(mix3|hotspot_owned|owned_only)$")
     session_id: str = Field(default="", max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=128)
     tts_provider: str = Field(default="mimo", max_length=32)
@@ -295,6 +296,7 @@ class TopicBriefCreateRequest(BaseModel):
     locations: list[str] = Field(default_factory=list, max_length=10)
     logistics_nodes: list[str] = Field(default_factory=list, max_length=10)
     freshness_mode: str = Field(default="recent_or_evergreen", pattern=r"^(recent|evergreen|recent_or_evergreen)$")
+    chain_mode: str = Field(default="hotspot_owned", pattern=r"^(mix3|hotspot_owned|owned_only)$")
     time_window_days: int = Field(default=7, ge=1, le=3650)
     platforms: list[str] = Field(default_factory=lambda: ["douyin"], min_length=1, max_length=5)
     content_form: str = Field(default="video", max_length=50)
@@ -314,10 +316,11 @@ class TopicEvidenceSelectionRequest(BaseModel):
 
 class TopicBriefGenerateRequest(BaseModel):
     """Create one bounded, evidence-backed video project from a confirmed brief."""
-    hotspot_event_id: int = Field(..., ge=1)
+    hotspot_event_id: int | None = Field(default=None, ge=1)
     approved_hook_event_ids: list[int] = Field(default_factory=list, max_length=2)
     platform: str = Field(default="douyin", max_length=32)
     target_duration_ms: int = Field(default=60_000, ge=50_000, le=90_000)
+    chain_mode: str | None = Field(default=None, pattern=r"^(mix3|hotspot_owned|owned_only)$")
 
 
 class TopicHotspotRecommendationRequest(BaseModel):
@@ -328,6 +331,7 @@ class TopicHotspotRecommendationRequest(BaseModel):
 class TopicAutoPilotRequest(BaseModel):
     platform: str = Field(default="douyin", max_length=32)
     target_duration_ms: int = Field(default=60_000, ge=50_000, le=90_000)
+    chain_mode: str | None = Field(default=None, pattern=r"^(mix3|hotspot_owned|owned_only)$")
 
 
 class ModelRouteRequest(BaseModel):
