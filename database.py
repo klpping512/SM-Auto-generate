@@ -4515,7 +4515,7 @@ def replace_hotspot_event_clips(asset_id: int, hotspot_id: int, events: list[dic
         return created
 
 
-def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None = None) -> list[dict]:
+def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None = None, limit: int | None = None) -> list[dict]:
     sql = "SELECT * FROM hotspot_event_clips WHERE 1=1"
     params: list = []
     if asset_id is not None:
@@ -4523,6 +4523,9 @@ def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None
     if hotspot_id is not None:
         sql += " AND hotspot_id=?"; params.append(hotspot_id)
     sql += " ORDER BY asset_id,event_index"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(max(1, int(limit)))
     with get_conn() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
         # 批18：并入父热点真实发布时间（原始字符串，epoch 换算在 planner 侧做）
