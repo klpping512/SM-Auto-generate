@@ -2131,15 +2131,26 @@ def update_asset_provenance(asset_id: int, source_url: str, license_name: str, a
 
 def upsert_hotspot(data: dict) -> tuple[int, bool]:
     with get_conn() as conn:
-        row = conn.execute("SELECT id,snapshot_sha256 FROM hotspots WHERE source_url=?", (data["source_url"],)).fetchone()
+        row = conn.execute(
+            "SELECT id,snapshot_sha256,published_at FROM hotspots WHERE source_url=?",
+            (data["source_url"],),
+        ).fetchone()
         if row:
             changed = row["snapshot_sha256"] != data["snapshot_sha256"]
+            # 刷新元数据时若新 payload 无可用发布时间，保留已回填的真实 published_at，避免被 None 清空。
+            incoming_pub = data.get("published_at")
+            pub_usable = bool(
+                incoming_pub
+                and str(incoming_pub).strip()
+                and not str(incoming_pub).startswith("1970-")
+            )
+            published_at = incoming_pub if pub_usable else row["published_at"]
             conn.execute(
                 """UPDATE hotspots SET title=?,summary=?,publisher=?,published_at=?,retrieved_at=?,
                    snapshot_sha256=?,image_candidate_url=?,status=?,
                    translation_status=CASE WHEN ? THEN 'stale' ELSE translation_status END
                    WHERE id=?""",
-                (data["title"], data.get("summary", ""), data["publisher"], data.get("published_at"),
+                (data["title"], data.get("summary", ""), data["publisher"], published_at,
                  data["retrieved_at"], data["snapshot_sha256"], data.get("image_candidate_url"),
                  "updated" if changed else "unchanged", changed, row["id"]),
             )

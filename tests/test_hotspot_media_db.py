@@ -34,6 +34,22 @@ def test_hotspot_translation_cache_round_trip(tmp_db):
     assert item["translated_at"]
 
 
+def test_upsert_hotspot_preserves_published_at_when_refresh_omits_it(tmp_db):
+    hotspot_id, _ = tmp_db.upsert_hotspot(_hotspot())
+    assert tmp_db.get_hotspot(hotspot_id)["published_at"] == "2026-07-22T08:00:00+00:00"
+
+    refreshed = _hotspot()
+    refreshed["published_at"] = None
+    refreshed["snapshot_sha256"] = "snapshot-v2"
+    refreshed["title"] = "Port operations update (refreshed)"
+    returned_id, created = tmp_db.upsert_hotspot(refreshed)
+    assert returned_id == hotspot_id
+    assert created is False
+    item = tmp_db.get_hotspot(hotspot_id)
+    assert item["published_at"] == "2026-07-22T08:00:00+00:00"
+    assert item["title"] == "Port operations update (refreshed)"
+
+
 def test_changed_hotspot_snapshot_invalidates_cached_translation(tmp_db):
     hotspot_id, _ = tmp_db.upsert_hotspot(_hotspot())
     tmp_db.update_hotspot_translation(

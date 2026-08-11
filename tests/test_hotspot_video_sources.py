@@ -261,10 +261,10 @@ def test_precheck_marks_unavailable_as_retryable_and_keeps_downloadable(tmp_db):
     assert by_id["bad01"]["retry_after"]
 
 
-def test_evergreen_channel_scans_deeper_until_min_downloadable(tmp_db):
+def test_evergreen_channel_scans_full_playlist_cap(tmp_db):
     import hotspot_video_sources
 
-    # 前 4 条不可下，后 3 条可下；scan_cap=8，min_downloadable=3 → 应扫到第 7 条停
+    # 前 4 条不可下，后 4 条可下；evergreen 必须扫完 scan_cap=8，不能在凑满 min_downloadable 后提前停。
     entries = [
         {"id": f"v{i:02d}", "title": f"clip {i}", "duration": 80, "timestamp": 1784690000 + i}
         for i in range(8)
@@ -292,9 +292,36 @@ def test_evergreen_channel_scans_deeper_until_min_downloadable(tmp_db):
         runner=runner,
         precheck=True,
     )
-    assert result["downloadable"] == 3
+    assert result["downloadable"] == 4
     assert result["retryable"] == 4
-    assert result["source_health"][0]["scanned"] == 7
+    assert result["source_health"][0]["scanned"] == 8
+
+
+def test_non_evergreen_channel_stops_at_limit(tmp_db):
+    import hotspot_video_sources
+
+    entries = [
+        {"id": f"n{i:02d}", "title": f"news {i}", "duration": 80, "timestamp": 1784690000 + i}
+        for i in range(6)
+    ]
+
+    def runner(command, **_kwargs):
+        if "-F" in command:
+            return SimpleNamespace(returncode=0, stdout="22 mp4\n", stderr="")
+        assert command[command.index("--playlist-end") + 1] == "3"
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"entries": entries}), stderr="")
+
+    result = hotspot_video_sources.fetch_youtube_channel_hotspots(
+        [{
+            "name": "CNBC Africa",
+            "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ",
+        }],
+        runner=runner,
+        limit=3,
+        precheck=True,
+    )
+    assert result["downloadable"] == 3
+    assert result["source_health"][0]["scanned"] == 3
 
 
 def test_refetch_does_not_downgrade_downloaded_mother(tmp_db):

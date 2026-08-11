@@ -497,7 +497,10 @@ def fetch_youtube_channel_hotspots(
                     downloadable_count += 1
                     if media_id:
                         result["accepted_media_ids"].append(int(media_id))
-                    if downloadable_count >= target_downloadable:
+                    # 非 evergreen：读满本轮 limit 即停。
+                    # evergreen：必须扫完 scan_cap；若仅按“已可下载条数”提前 break，
+                    # 最新窗里已入库的旧条目会占满配额，永远扩不出更深历史候选。
+                    if (not evergreen) and downloadable_count >= target_downloadable:
                         break
                     continue
                 # 不可下载：不进可物料化母片池，记 retryable 延后重试（突发新闻台同样适用）。
