@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 ROLES = {
-    "planner_text", "chat_text", "vision_tagger", "video_evaluator", "critic", "tts", "asr",
+    "planner_text", "chat_text", "vision_tagger", "video_evaluator",
+    "hook_visual_critic", "critic", "tts", "asr",
 }
 
 MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
@@ -56,6 +57,15 @@ DEFAULT_ROUTES = {
         "capabilities": ["text", "vision"], "timeout": 120, "max_tokens": 1800,
         "cost_profile": "medium", "enabled": True,
         # MiMo 默认开 thinking，推理预算会耗尽 max_tokens 导致 content 恒空（批15）。
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
+    },
+    # Hotspot Hook multi-frame visual critic — independent budget from planner/text critic.
+    "hook_visual_critic": {
+        "role": "hook_visual_critic", "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
+        "capabilities": ["text", "vision"], "timeout": 90, "max_tokens": 900,
+        "json_mode": False, "cost_profile": "medium", "enabled": True,
         "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     "critic": {

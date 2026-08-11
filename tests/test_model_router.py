@@ -78,6 +78,29 @@ def test_video_evaluator_route_disables_thinking_like_critic(tmp_db):
     assert model_router._safe_request_options(route) == {
         "enable_thinking": False, "reasoning_split": True,
     }
+
+
+def test_hook_visual_critic_route_is_independent_vision_role(tmp_db):
+    import model_router
+
+    assert "hook_visual_critic" in model_router.ROLES
+    route = model_router.get_route("hook_visual_critic")
+    assert route["model"] == "mimo-v2.5"
+    assert set(route["capabilities"]) == {"text", "vision"}
+    assert route["timeout"] == 90
+    assert route["max_tokens"] == 900
+    assert route["api_key_env"] == "MIMO_API_KEY"
+    assert model_router._safe_request_options(route) == {
+        "enable_thinking": False, "reasoning_split": True,
+    }
+    # Separate cache identity from text critic / planner.
+    key_visual = model_router.make_cache_key(
+        "hook_visual_critic", {"messages": [{"role": "user", "content": "x"}]}, "hotspot-hook-visual-audit-v1",
+    )
+    key_critic = model_router.make_cache_key(
+        "critic", {"messages": [{"role": "user", "content": "x"}]}, "hotspot-hook-grounding-audit-v5",
+    )
+    assert key_visual != key_critic
     assert model_router._provider_request_options(route) == {
         "thinking": {"type": "disabled"},
     }

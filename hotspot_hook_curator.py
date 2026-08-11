@@ -12,8 +12,11 @@ import json
 import re
 from typing import Any, Iterable
 
+from pathlib import Path
+
 import model_router
 import hotspot_hook_selection_sop
+import hotspot_hook_visual_audit
 import hotspot_lexicon
 from database import add_hook_curation_diagnostic
 
@@ -82,7 +85,7 @@ MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
 PROMPT_VERSION = "hotspot-hook-curation-v8-empty-repair"
-AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v4"
+AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v5"
 
 
 def _derive_hook_keywords(fact_text: str) -> list[str]:
@@ -174,6 +177,7 @@ def _curation_job_id(asset_id: int, source_title: str, source_context: str, segm
 def _audit_job_id(asset_id: int, source_title: str, source_context: str, hooks: list[dict]) -> str:
     """Give each factual-audit pass an evidence-sensitive, retry-safe budget."""
     payload = {
+        "prompt_version": AUDIT_PROMPT_VERSION,
         "hook_selection_sop": hotspot_hook_selection_sop.policy_contract(),
         "source_title": str(source_title or ""),
         "source_context": str(source_context or ""),
@@ -181,6 +185,7 @@ def _audit_job_id(asset_id: int, source_title: str, source_context: str, hooks: 
             {
                 "event_index": hook["event_index"],
                 "what_happened": hook["evidence"]["what_happened"],
+                "visual_audit": (hook.get("evidence") or {}).get("visual_audit") or {},
                 "segments": [_compact_segment(segment) for segment in hook["segments"]],
             }
             for hook in hooks
@@ -193,25 +198,32 @@ def _audit_job_id(asset_id: int, source_title: str, source_context: str, hooks: 
 
 
 def _audit_prompt(source_title: str, source_context: str, hooks: list[dict]) -> str:
-    candidates = [
-        {
+    candidates = []
+    for hook in hooks:
+        visual = dict((hook.get("evidence") or {}).get("visual_audit") or {})
+        candidates.append({
             "candidate_index": hook["event_index"],
+            "title_zh": hook.get("title_zh"),
             "what_happened": hook["evidence"]["what_happened"],
             "hook_reason": hook["evidence"]["hook_reason"],
+            "visual_scene_type": visual.get("scene_type"),
+            "visual_objects": visual.get("visible_objects") or [],
+            "visual_actions": visual.get("visible_actions") or [],
             "segments": [_compact_segment(segment) for segment in hook["segments"]],
-        }
-        for hook in hooks
-    ]
+        })
     return (
-        "你是热点素材库的事实核验模型，不负责补救或润色。母片标题是已验证事件事实："
-        f"{source_title[:240] or '未提供'}。逐条核验候选 Hook：仅在以下全部成立时才接受："
-        "（1）候选的画面说明与母片标题/获准范围不矛盾；（2）画面说明可由给出的镜头证据直接支持；"
+        "你是热点素材库的事实核验模型，不负责补救或润色。"
+        "母片标题和来源摘要只是待核对的来源线索，不能证明候选帧中出现了对应地点、主体或动作。"
+        f"来源线索标题：{source_title[:240] or '未提供'}。"
+        "逐条核验候选 Hook：仅在以下全部成立时才接受："
+        "（1）画面可见事实（visual_objects/visual_actions/scene_type）与 what_happened 不矛盾；"
+        "（2）来源事件身份与画面可见事实不矛盾，但不能仅靠标题补足画面缺失的地点或动作；"
         "（3）没有把垃圾、普通袋子、路人或未知物品臆断为包裹、货物、订单或物流作业；"
-        "（4）不是主播/字幕/标题页空镜。社会、体育、政务等非物流现场只要画面可核验也应接受，"
-        "不要仅因缺少物流视觉就拒绝。新闻合集允许不同独立事件各保留一条，互不要求同一 identity。"
-        "不确定、矛盾、依赖猜测的候选必须拒绝。"
+        "（4）不是主播/字幕/标题页/Logo 卡。若视觉审核已标明标题卡或主播，必须拒绝。"
+        "社会、体育、政务等非物流现场只要画面可核验也可接受，不要仅因缺少物流视觉就拒绝。"
+        "新闻合集允许不同独立事件各保留一条。不确定、矛盾、依赖猜测的候选必须拒绝。"
         "严格返回单行 JSON：{\"accepted\":[{\"candidate_index\":1,\"reason\":\"不超过80字\"}]}。"
-        f"本轮获准事件范围：{source_context[:1200] or '仅可使用与母片标题直接一致的镜头'}\n"
+        f"本轮获准事件范围：{source_context[:1200] or '仅可使用与来源线索直接一致且画面可核验的镜头'}\n"
         f"后端 Hook 选择 SOP：{json.dumps(hotspot_hook_selection_sop.policy_contract(), ensure_ascii=False)}\n"
         f"候选：{json.dumps(candidates, ensure_ascii=False)}"
     )
@@ -262,12 +274,30 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
             continue
         if candidate_index in allowed:
             accepted_indexes.add(candidate_index)
-    accepted = [item for item in hooks if int(item["event_index"]) in accepted_indexes]
+    accepted = []
+    for item in hooks:
+        evidence = dict(item.get("evidence") or {})
+        if int(item["event_index"]) in accepted_indexes:
+            evidence["text_audit"] = {
+                "status": "accepted",
+                "prompt_version": AUDIT_PROMPT_VERSION,
+            }
+            item["evidence"] = evidence
+            item["review_status"] = "confirmed"
+            accepted.append(item)
+        else:
+            evidence["text_audit"] = {
+                "status": "rejected",
+                "prompt_version": AUDIT_PROMPT_VERSION,
+            }
+            item["evidence"] = evidence
+            item["review_status"] = "review_required"
     return accepted, {
         "status": "verified" if accepted else "rejected_all",
         "accepted_count": len(accepted),
         "model": model_router.get_route("critic").get("model"),
         "cache_hit": bool(result.get("cache_hit")),
+        "prompt_version": AUDIT_PROMPT_VERSION,
     }
 
 
@@ -328,7 +358,8 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
             "logistics_scenes": _derive_hook_keywords(f"{happened} {title}"),
             "hook_kind": "timely_event",
             "confidence": round(confidence, 3),
-            "review_status": "confirmed",
+            # confirmed only after visual + text audits both accept.
+            "review_status": "review_required",
             "segments": selected,
             "evidence": {
                 "what_happened": happened,
@@ -387,13 +418,18 @@ def curate_hook_clips(
     source_title: str,
     segments: Iterable[dict],
     source_context: str = "",
+    *,
+    static_root: Path | str | None = None,
+    source_video_path: Path | str | None = None,
+    asset_filepath: str | None = None,
 ) -> tuple[list[dict], dict]:
     """由内置策展模型从母片已分析镜头中作 Hook 决策；无模型或无有效片段时不入库。"""
     ordered = sorted((dict(item) for item in segments), key=lambda item: int(item.get("segment_index") or 0))
     if not ordered:
         return [], {"status": "no_segments", "reason": "母片没有可供策展的已分析镜头"}
-    if not model_router.key_is_available("planner_text") or not model_router.key_is_available("critic"):
-        return [], {"status": "model_unavailable", "reason": "内置 Hook 策展模型未配置"}
+    required_roles = ("planner_text", "critic", "hook_visual_critic")
+    if not all(model_router.key_is_available(role) for role in required_roles):
+        return [], {"status": "model_unavailable", "reason": "内置 Hook 策展或视觉审核模型未配置"}
     job_id = model_router.route_scoped_job_id(
         _curation_job_id(int(asset_id), source_title, source_context, ordered), "planner_text"
     )
@@ -464,6 +500,32 @@ def curate_hook_clips(
             "hook_count": 0,
             "empty_result_retry": retried_empty,
         }
+    hooks, visual_audit = hotspot_hook_visual_audit.audit_hooks(
+        int(asset_id),
+        hooks,
+        static_root=static_root,
+        source_video_path=source_video_path,
+        asset_filepath=asset_filepath,
+    )
+    if visual_audit.get("status") == "model_unavailable":
+        return [], {
+            "status": "temporarily_unavailable",
+            "reason": visual_audit.get("reason") or "视觉审核模型暂时不可用",
+            "model": model_router.get_route("planner_text").get("model"),
+            "cache_hit": bool(result.get("cache_hit")),
+            "hook_count": 0,
+            "empty_result_retry": retried_empty,
+            "visual_audit": visual_audit,
+        }
+    if not hooks:
+        return [], {
+            "status": "no_qualified_hooks",
+            "model": model_router.get_route("planner_text").get("model"),
+            "cache_hit": bool(result.get("cache_hit")),
+            "hook_count": 0,
+            "empty_result_retry": retried_empty,
+            "visual_audit": visual_audit,
+        }
     hooks, audit = _audit_hooks(int(asset_id), source_title, source_context, hooks)
     return hooks, {
         "status": "curated" if hooks else "no_qualified_hooks",
@@ -471,6 +533,7 @@ def curate_hook_clips(
         "cache_hit": bool(result.get("cache_hit")),
         "hook_count": len(hooks),
         "empty_result_retry": retried_empty,
+        "visual_audit": visual_audit,
         "grounding_audit": audit,
         "hook_selection_sop": {
             "sop_id": hotspot_hook_selection_sop.SOP_ID,

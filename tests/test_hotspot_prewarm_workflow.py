@@ -367,3 +367,11 @@ def test_manual_prewarm_script_enables_the_current_scheduler_gate():
     source = (Path(__file__).parents[1] / "scripts" / "run_authorized_hotspot_prewarm.py").read_text(encoding="utf-8")
 
     assert 'os.environ["HOTSPOT_HOOK_SYNC_ENABLED"] = "1"' in source
+    assert "--fetch-only" in source
+    assert "skipped_fetch_only" in source
+    assert "if args.fetch_only:" in source
+    assert "await scheduler.prewarm_authorized_hotspot_media" in source
+    fetch_only_idx = source.index("if args.fetch_only:")
+    prewarm_idx = source.index("await scheduler.prewarm_authorized_hotspot_media")
+    assert fetch_only_idx < prewarm_idx
+    assert "if not args.fetch_only:" in source

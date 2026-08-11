@@ -59,3 +59,9 @@ def test_requeue_uncurated_selects_json_failures_and_zero_hooks():
         "progress_detail": "内置模型已筛出 2 条精华 Hook 片段",
         "error_message": None,
     })
+
+
+def test_reprocess_script_passes_static_root_into_curator():
+    source = (Path(__file__).parents[1] / "scripts" / "reprocess_hotspot_hook_source.py").read_text(encoding="utf-8")
+    assert 'static_root=PROJECT_ROOT / "static"' in source
+    assert 'asset_filepath=asset.get("filepath")' in source

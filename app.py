@@ -3773,6 +3773,8 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
                     str(hotspot.get("title_zh") or hotspot.get("title") or ""),
                     segments,
                     source_context,
+                    static_root=STATIC_DIR,
+                    asset_filepath=asset.get("filepath"),
                 )
             except Exception as exc:
                 logger.warning("热点 Hook 策展未完成，母片不入 Hook 库: %s", exc)

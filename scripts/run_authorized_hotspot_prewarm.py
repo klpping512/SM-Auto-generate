@@ -24,16 +24,20 @@ parser.add_argument(
     "--media-ids", default="",
     help="仅本次受控验收：逗号分隔的已授权热点媒体 ID；仍必须通过模型选择与事实审计",
 )
+parser.add_argument(
+    "--fetch-only",
+    action="store_true",
+    help="只抓取元数据并同步授权状态，绝不下载、分析或策展 Hook",
+)
 args = parser.parse_args()
 if args.channel_video_limit is not None:
     os.environ["HOTSPOT_YOUTUBE_CHANNEL_VIDEO_LIMIT"] = str(max(1, min(12, args.channel_video_limit)))
 os.environ.setdefault("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "1")
-# `HOTSPOT_HOOK_SYNC_ENABLED` is the current scheduler gate and takes
-# precedence over the legacy prewarm flag when both are present in .env.
-# Set both here so this explicit operator command cannot silently fetch feeds
-# and then skip hook selection/download.
-os.environ["HOTSPOT_HOOK_SYNC_ENABLED"] = "1"
-os.environ["HOTSPOT_PREWARM_ENABLED"] = "1"
+# Explicit operator command: enable sync unless this is a metadata-only fetch.
+# `--fetch-only` must never force the scheduler prewarm gate on.
+if not args.fetch_only:
+    os.environ["HOTSPOT_HOOK_SYNC_ENABLED"] = "1"
+    os.environ["HOTSPOT_PREWARM_ENABLED"] = "1"
 
 import database as db
 import hotspot_fetcher
@@ -66,11 +70,20 @@ async def main() -> int:
             media_ids.append(int(raw.strip()))
         except ValueError:
             continue
-    prewarm = await scheduler.prewarm_authorized_hotspot_media(media_ids=media_ids or None)
+    if args.fetch_only:
+        prewarm = {
+            "status": "skipped_fetch_only",
+            "downloaded": 0,
+            "processed": 0,
+            "reason": "fetch-only mode never calls scheduler.prewarm_authorized_hotspot_media",
+        }
+    else:
+        prewarm = await scheduler.prewarm_authorized_hotspot_media(media_ids=media_ids or None)
     media = db.list_hotspot_media(lifecycle_status="active", limit=500)
     summary = {
         "fetch": fetched,
         "promoted_existing_configured_media": promoted,
+        "fetch_only": bool(args.fetch_only),
         "prewarm": prewarm,
         "authorized_long_video": [
             {"id": item["id"], "hotspot_id": item["hotspot_id"], "duration_seconds": item.get("duration_seconds"),

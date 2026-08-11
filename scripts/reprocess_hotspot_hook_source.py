@@ -110,6 +110,8 @@ def _reprocess_media(media_id: int, *, skip_analysis: bool) -> dict:
             str(hotspot.get("title_zh") or hotspot.get("title") or ""),
             db.list_asset_segments(asset_id=int(asset["id"]), limit=500),
             source_context,
+            static_root=PROJECT_ROOT / "static",
+            asset_filepath=asset.get("filepath"),
         )
         # A re-curation replaces the complete Hook set for this mother asset.  Remove
         # only its generated preview proxies first, so rejected old clips cannot

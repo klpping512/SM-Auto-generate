@@ -8,6 +8,8 @@ def test_config_page_can_view_and_replace_each_model_role():
     assert "planner_text" in page
     assert "chat_text" in page
     assert "vision_tagger" in page
+    assert "video_evaluator" in page
+    assert "hook_visual_critic" in page
     assert "critic" in page
     assert "tts" in page
     assert "asr" in page

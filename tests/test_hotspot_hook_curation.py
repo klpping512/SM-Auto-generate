@@ -4,6 +4,40 @@ import json
 import pytest
 
 
+def _pass_visual(hooks):
+    import hotspot_hook_visual_audit as visual
+
+    for hook in hooks:
+        evidence = dict(hook.get("evidence") or {})
+        evidence["visual_audit"] = {
+            "status": "accepted",
+            "prompt_version": visual.VISUAL_AUDIT_PROMPT_VERSION,
+            "scene_type": "port",
+            "frame_offsets_ms": [400, 5000, 9600],
+            "frame_sha256": ["a" * 64, "b" * 64, "c" * 64],
+            "visible_objects": ["卡车"],
+            "visible_actions": ["排队"],
+            "model": "mimo-test",
+            "cache_hit": False,
+        }
+        hook["evidence"] = evidence
+    return hooks, {"status": "verified", "accepted_count": len(hooks)}
+
+
+def _patch_curator_models(monkeypatch, fake_call):
+    import hotspot_hook_curator
+
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    monkeypatch.setattr(
+        hotspot_hook_curator.hotspot_hook_visual_audit,
+        "audit_hooks",
+        lambda asset_id, hooks, **kwargs: _pass_visual(hooks),
+    )
+
+
 def _segments():
     return [
         {
@@ -38,10 +72,7 @@ def test_qwen_curates_only_grounded_contiguous_hook_segments(tmp_db, monkeypatch
             "logistics_question": "入口检查变慢时，卖家应怎样核对到仓与配送计划？", "confidence": 0.88,
         }]}, ensure_ascii=False), "cache_hit": False}
 
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_curator_models(monkeypatch, fake_call)
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(7, "港口入口现场", _segments())
 
@@ -51,16 +82,17 @@ def test_qwen_curates_only_grounded_contiguous_hook_segments(tmp_db, monkeypatch
     assert hooks[0]["start_ms"] == 0
     assert hooks[0]["end_ms"] == 10_000
     assert hooks[0]["segments"][0]["id"] == 11
-    assert hooks[0]["evidence"] == {
-        "what_happened": "多辆货车在入口排队，工作人员正在检查。",
-        "hook_reason": "连续现场动作和排队画面能快速呈现压力。",
-        "logistics_question": "入口检查变慢时，卖家应怎样核对到仓与配送计划？",
-        "curator": "planner_text",
-        "hook_sop_id": "buffalo-hotspot-hook-selection",
-        "hook_sop_version": "v3",
-        "event_identity": "港口入口货车排队检查",
-        "selected_segment_indexes": [0, 1],
-    }
+    assert hooks[0]["review_status"] == "confirmed"
+    assert hooks[0]["evidence"]["what_happened"] == "多辆货车在入口排队，工作人员正在检查。"
+    assert hooks[0]["evidence"]["hook_reason"] == "连续现场动作和排队画面能快速呈现压力。"
+    assert hooks[0]["evidence"]["logistics_question"] == "入口检查变慢时，卖家应怎样核对到仓与配送计划？"
+    assert hooks[0]["evidence"]["curator"] == "planner_text"
+    assert hooks[0]["evidence"]["hook_sop_id"] == "buffalo-hotspot-hook-selection"
+    assert hooks[0]["evidence"]["hook_sop_version"] == "v3"
+    assert hooks[0]["evidence"]["event_identity"] == "港口入口货车排队检查"
+    assert hooks[0]["evidence"]["selected_segment_indexes"] == [0, 1]
+    assert hooks[0]["evidence"]["visual_audit"]["status"] == "accepted"
+    assert hooks[0]["evidence"]["text_audit"]["status"] == "accepted"
 
 
 def test_hook_curator_rejects_invalid_duration_or_unexplained_model_output(tmp_db, monkeypatch):
@@ -72,10 +104,7 @@ def test_hook_curator_rejects_invalid_duration_or_unexplained_model_output(tmp_d
             "title_zh": "泛新闻", "what_happened": "", "hook_reason": "吸睛", "logistics_question": "物流怎样？", "confidence": 0.9,
         }]}, ensure_ascii=False)}
 
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_curator_models(monkeypatch, fake_call)
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(8, "泛新闻", _segments())
 
@@ -108,7 +137,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
     assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v8-empty-repair"
-    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v4"
+    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v5"
 
 
 def test_hook_curator_rejects_an_obvious_anchor_only_segment_before_model_audit():
@@ -216,10 +245,7 @@ def test_qwen_critic_rejects_hook_that_contradicts_verified_event_fact(tmp_db, m
             "hook_reason": "反常画面", "logistics_question": "末端为何停摆？", "confidence": 0.9,
         }]}, ensure_ascii=False), "cache_hit": False}
 
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_curator_models(monkeypatch, fake_call)
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(9, "垃圾罢工导致街道垃圾成堆", _segments())
 
@@ -250,9 +276,7 @@ def test_curator_retries_valid_empty_once_when_safe_window_exists(tmp_db, monkey
             "logistics_question": "入口检查变慢时，卖家应怎样核对到仓计划？", "confidence": 0.88,
         }]}), "cache_hit": False}
 
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    _patch_curator_models(monkeypatch, fake_call)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(10, "港口入口现场", _segments())
@@ -262,6 +286,7 @@ def test_curator_retries_valid_empty_once_when_safe_window_exists(tmp_db, monkey
     assert planner_messages[1]["kwargs"]["use_cache"] is False
     assert "上一轮返回了空 hooks" in planner_messages[1]["messages"][-1]["content"]
     assert meta["empty_result_retry"] is True
+    assert hooks[0]["evidence"]["visual_audit"]["status"] == "accepted"
 
 
 def test_curator_does_not_retry_empty_when_every_window_is_anchor_only(tmp_db, monkeypatch):
@@ -273,9 +298,7 @@ def test_curator_does_not_retry_empty_when_every_window_is_anchor_only(tmp_db, m
         calls.append((args, kwargs))
         return {"content": json.dumps({"hooks": []}), "cache_hit": False}
 
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    _patch_curator_models(monkeypatch, fake_call)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(11, "新闻播报", [_segments()[2]])
@@ -283,6 +306,43 @@ def test_curator_does_not_retry_empty_when_every_window_is_anchor_only(tmp_db, m
     assert hooks == []
     assert len(calls) == 1
     assert meta["empty_result_retry"] is False
+
+
+def test_empty_result_repair_still_goes_through_visual_audit(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    visual_calls = []
+    planner_calls = []
+
+    async def fake_call(*args, **kwargs):
+        if kwargs["prompt_version"] == hotspot_hook_curator.AUDIT_PROMPT_VERSION:
+            return {"content": json.dumps({"accepted": [{"candidate_index": 1, "reason": "ok"}]}), "cache_hit": False}
+        planner_calls.append(1)
+        if len(planner_calls) == 1:
+            return {"content": json.dumps({"hooks": []}), "cache_hit": False}
+        return {"content": json.dumps({"hooks": [{
+            "event_identity": "港口入口货车排队检查",
+            "start_segment_index": 0, "end_segment_index": 1,
+            "title_zh": "港口入口卡车排队", "what_happened": "多辆货车在入口排队。",
+            "hook_reason": "连续现场动作。",
+            "logistics_question": "入口检查变慢时如何核对？", "confidence": 0.88,
+        }]}), "cache_hit": False}
+
+    def tracking_visual(asset_id, hooks, **kwargs):
+        visual_calls.append(len(hooks))
+        return _pass_visual(hooks)
+
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_a, **_k: None)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
+    monkeypatch.setattr(hotspot_hook_curator.hotspot_hook_visual_audit, "audit_hooks", tracking_visual)
+
+    hooks, meta = hotspot_hook_curator.curate_hook_clips(12, "港口入口现场", _segments())
+    assert len(hooks) == 1
+    assert visual_calls == [1]
+    assert meta["empty_result_retry"] is True
+    assert len(planner_calls) == 2
 
 
 def test_replacing_rejected_hooks_can_remove_only_its_generated_preview_folder(tmp_path):

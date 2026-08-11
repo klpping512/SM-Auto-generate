@@ -79,6 +79,32 @@ def test_extract_json_used_by_audit_path():
     assert payload == {"accepted": [{"candidate_index": 1, "reason": "画面一致"}]}
 
 
+def _pass_visual(hooks):
+    for hook in hooks:
+        evidence = dict(hook.get("evidence") or {})
+        evidence["visual_audit"] = {
+            "status": "accepted",
+            "prompt_version": "hotspot-hook-visual-audit-v1",
+            "scene_type": "port",
+            "frame_offsets_ms": [400, 5000, 9600],
+            "frame_sha256": ["a" * 64, "b" * 64, "c" * 64],
+            "visible_objects": ["卡车"],
+            "visible_actions": ["排队"],
+        }
+        hook["evidence"] = evidence
+    return hooks, {"status": "verified", "accepted_count": len(hooks)}
+
+
+def _patch_visual(monkeypatch):
+    import hotspot_hook_curator
+
+    monkeypatch.setattr(
+        hotspot_hook_curator.hotspot_hook_visual_audit,
+        "audit_hooks",
+        lambda asset_id, hooks, **kwargs: _pass_visual(hooks),
+    )
+
+
 def test_curate_retries_once_on_json_parse_failure_then_succeeds(tmp_db, monkeypatch):
     import hotspot_hook_curator
 
@@ -105,6 +131,7 @@ def test_curate_retries_once_on_json_parse_failure_then_succeeds(tmp_db, monkeyp
     monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_visual(monkeypatch)
 
     hooks, meta = hotspot_hook_curator.curate_hook_clips(91, "港口入口现场", _segments())
 
@@ -127,6 +154,7 @@ def test_curate_records_diagnostic_on_both_failures(tmp_db, monkeypatch):
     monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_visual(monkeypatch)
 
     with pytest.raises(ValueError, match="Hook 策展模型未返回合法 JSON"):
         hotspot_hook_curator.curate_hook_clips(92, "港口入口现场", _segments())
@@ -166,6 +194,7 @@ def test_curate_budget_allows_two_calls(tmp_db, monkeypatch):
     monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", fake_budget)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
     monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "qwen-test"})
+    _patch_visual(monkeypatch)
 
     hotspot_hook_curator.curate_hook_clips(93, "港口入口现场", _segments())
     # 第一条是策展 budget（max_calls=2）；后续 critic audit 仍保持 max_calls=1。
