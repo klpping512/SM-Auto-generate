@@ -81,7 +81,7 @@ MAX_HOOKS_PER_SOURCE = 3
 MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
-PROMPT_VERSION = "hotspot-hook-curation-v7"
+PROMPT_VERSION = "hotspot-hook-curation-v8-empty-repair"
 AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v4"
 
 
@@ -346,6 +346,42 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
     return result
 
 
+def _has_safe_hook_window(segments: list[dict]) -> bool:
+    """Return whether deterministic gates expose any 4–14s contiguous window.
+
+    This never creates a Hook.  It only decides whether one empty model response
+    deserves the workflow's single existing retry; the retry result still goes
+    through ``_parse`` and the independent critic audit.
+    """
+    ordered = sorted(segments, key=lambda item: int(item.get("segment_index") or 0))
+    for start_pos, first in enumerate(ordered):
+        selected: list[dict] = []
+        previous_index: int | None = None
+        for item in ordered[start_pos:]:
+            index = int(item.get("segment_index") or 0)
+            if previous_index is not None and index != previous_index + 1:
+                break
+            selected.append(item)
+            previous_index = index
+            duration_ms = int(item.get("end_ms") or 0) - int(first.get("start_ms") or 0)
+            if duration_ms > MAX_HOOK_MS:
+                break
+            if duration_ms >= MIN_HOOK_MS and not hotspot_hook_selection_sop.obvious_rejection_reason(selected):
+                return True
+    return False
+
+
+def _empty_result_repair_instruction() -> str:
+    return (
+        "上一轮返回了空 hooks，但后端确定性门禁确认至少存在一个连续 4–14 秒、且不是纯主播/标题页/"
+        "地图/Logo 墙的可用画面窗口。请仅重做一次选择：优先从 description、tags、transcript、OCR "
+        "直接支持的可见动作或现场状态中选 1–3 条。若画面不能证明母片标题中的具体结论，"
+        "event_identity、title_zh 和 what_happened 必须改写为中性的可见场景事实，不得照抄或扩写"
+        "未被画面支持的实体、因果、数量或 Buffalo 服务能力。只有所有候选都确实不满足画面门禁时"
+        "才再次返回空数组。仍按原 JSON schema 返回，不要解释。"
+    )
+
+
 def curate_hook_clips(
     asset_id: int,
     source_title: str,
@@ -361,7 +397,7 @@ def curate_hook_clips(
     job_id = model_router.route_scoped_job_id(
         _curation_job_id(int(asset_id), source_title, source_context, ordered), "planner_text"
     )
-    # max_calls=2 = 1 次初始策展 + 1 次 JSON 解析失败重试（同一策展尝试内）。
+    # max_calls=2 = 1 次初始策展 + 1 次坏 JSON 或过度保守空结果修复（同一策展尝试内）。
     # reset=True 保持"每次重跑=1 次完整尝试"语义；不得再往上放。
     model_router.create_budget(
         job_id, max_calls=2, max_input_tokens=14_000,
@@ -397,6 +433,7 @@ def curate_hook_clips(
             raise
 
     result = _call()
+    retried_empty = False
     try:
         hooks = _try_parse(result, 1)
     except ValueError:
@@ -404,12 +441,24 @@ def curate_hook_clips(
         # 命中缓存时 budget 已记 1 次调用，max_calls=2 恰好容纳这次真调。
         result = _call(use_cache=False)
         hooks = _try_parse(result, 2)
+    else:
+        # A valid empty array is normally a legitimate rejection.  MiMo may,
+        # however, over-apply the event-grounding clause and reject every frame
+        # even when deterministic gates expose visible, non-anchor footage.
+        # Spend the workflow's one existing retry on a neutral-scene repair;
+        # never retry when all windows are deterministically unusable.
+        if not hooks and _has_safe_hook_window(ordered):
+            messages.append({"role": "user", "content": _empty_result_repair_instruction()})
+            result = _call(use_cache=False)
+            hooks = _try_parse(result, 2)
+            retried_empty = True
     if not hooks:
         return [], {
             "status": "no_qualified_hooks",
             "model": model_router.get_route("planner_text").get("model"),
             "cache_hit": bool(result.get("cache_hit")),
             "hook_count": 0,
+            "empty_result_retry": retried_empty,
         }
     hooks, audit = _audit_hooks(int(asset_id), source_title, source_context, hooks)
     return hooks, {
@@ -417,6 +466,7 @@ def curate_hook_clips(
         "model": model_router.get_route("planner_text").get("model"),
         "cache_hit": bool(result.get("cache_hit")),
         "hook_count": len(hooks),
+        "empty_result_retry": retried_empty,
         "grounding_audit": audit,
         "hook_selection_sop": {
             "sop_id": hotspot_hook_selection_sop.SOP_ID,

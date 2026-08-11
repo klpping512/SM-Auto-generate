@@ -107,7 +107,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "多事件合集" in prompt
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
-    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v7"
+    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v8-empty-repair"
     assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v4"
 
 
@@ -228,6 +228,63 @@ def test_qwen_critic_rejects_hook_that_contradicts_verified_event_fact(tmp_db, m
     assert meta["grounding_audit"]["status"] == "rejected_all"
 
 
+def test_curator_retries_valid_empty_once_when_safe_window_exists(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    planner_messages = []
+
+    async def fake_call(*args, **kwargs):
+        if kwargs["prompt_version"] == hotspot_hook_curator.AUDIT_PROMPT_VERSION:
+            return {
+                "content": json.dumps({"accepted": [{"candidate_index": 1, "reason": "画面事实成立"}]}),
+                "cache_hit": False,
+            }
+        planner_messages.append({"messages": args[2], "kwargs": kwargs})
+        if len(planner_messages) == 1:
+            return {"content": json.dumps({"hooks": []}), "cache_hit": False}
+        return {"content": json.dumps({"hooks": [{
+            "event_identity": "港口入口货车排队检查",
+            "start_segment_index": 0, "end_segment_index": 1,
+            "title_zh": "港口入口卡车排队", "what_happened": "多辆货车在入口排队，工作人员正在检查。",
+            "hook_reason": "连续现场动作能快速建立问题。",
+            "logistics_question": "入口检查变慢时，卖家应怎样核对到仓计划？", "confidence": 0.88,
+        }]}), "cache_hit": False}
+
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
+
+    hooks, meta = hotspot_hook_curator.curate_hook_clips(10, "港口入口现场", _segments())
+
+    assert len(hooks) == 1
+    assert len(planner_messages) == 2
+    assert planner_messages[1]["kwargs"]["use_cache"] is False
+    assert "上一轮返回了空 hooks" in planner_messages[1]["messages"][-1]["content"]
+    assert meta["empty_result_retry"] is True
+
+
+def test_curator_does_not_retry_empty_when_every_window_is_anchor_only(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    calls = []
+
+    async def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"content": json.dumps({"hooks": []}), "cache_hit": False}
+
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "key_is_available", lambda _role: True)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
+
+    hooks, meta = hotspot_hook_curator.curate_hook_clips(11, "新闻播报", [_segments()[2]])
+
+    assert hooks == []
+    assert len(calls) == 1
+    assert meta["empty_result_retry"] is False
+
+
 def test_replacing_rejected_hooks_can_remove_only_its_generated_preview_folder(tmp_path):
     import hotspot_event_media
 
@@ -243,5 +300,4 @@ def test_replacing_rejected_hooks_can_remove_only_its_generated_preview_folder(t
 
     assert not target.exists()
     assert (untouched / "event-0050.mp4").is_file()
-
 
