@@ -399,9 +399,13 @@ def curate_hook_clips(
     )
     # max_calls=2 = 1 次初始策展 + 1 次坏 JSON 或过度保守空结果修复（同一策展尝试内）。
     # reset=True 保持"每次重跑=1 次完整尝试"语义；不得再往上放。
+    per_call_output_budget = model_router.required_output_budget("planner_text", 1_000)
     model_router.create_budget(
-        job_id, max_calls=2, max_input_tokens=14_000,
-        max_output_tokens=model_router.required_output_budget("planner_text", 1_000),
+        job_id, max_calls=2,
+        # The router enforces cumulative job budgets.  Both the original call
+        # and the single repair may consume the full per-call envelope.
+        max_input_tokens=28_000,
+        max_output_tokens=per_call_output_budget * 2,
         reset=True,
     )
     messages = [

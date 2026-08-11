@@ -170,4 +170,6 @@ def test_curate_budget_allows_two_calls(tmp_db, monkeypatch):
     hotspot_hook_curator.curate_hook_clips(93, "港口入口现场", _segments())
     # 第一条是策展 budget（max_calls=2）；后续 critic audit 仍保持 max_calls=1。
     assert budgets[0].get("max_calls") == 2
+    assert budgets[0].get("max_input_tokens") == 28_000
+    assert budgets[0].get("max_output_tokens") == 2_000
     assert budgets[0].get("reset") is True
