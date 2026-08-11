@@ -10,5 +10,6 @@ pytest==8.3.3
 pytest-asyncio==0.24.0
 cryptography==44.0.0
 python-dotenv==1.1.1
+yt-dlp>=2026.7,<2027
 Pillow>=10,<13
 beautifulsoup4>=4.12,<5
