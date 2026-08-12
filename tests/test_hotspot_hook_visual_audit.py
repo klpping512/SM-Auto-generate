@@ -61,6 +61,19 @@ def test_port_operation_payload_is_accepted():
     assert flags["scene_type"] == "port"
 
 
+def test_agriculture_field_payload_is_accepted_and_not_forced_into_port():
+    import hotspot_hook_visual_audit as visual
+
+    ok, flags = visual._decision_from_payload(_port_accept_payload(
+        scene_type="agriculture",
+        visible_objects=["积雪", "围栏", "牛", "记者"],
+        visible_actions=["牛在觅食", "记者报道"],
+        reason="三帧均为积雪牧场现场",
+    ))
+    assert ok is True
+    assert flags["scene_type"] == "agriculture"
+
+
 def test_missing_source_video_rejects_without_confirming(tmp_db, monkeypatch):
     import hotspot_hook_visual_audit as visual
 

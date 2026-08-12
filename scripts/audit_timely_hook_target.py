@@ -68,7 +68,7 @@ def _scene_bucket(event: dict) -> str:
     evidence = event.get("evidence") or {}
     visual = evidence.get("visual_audit") or {}
     scene = str(visual.get("scene_type") or "").strip().lower()
-    if scene in {"port", "border", "road", "warehouse", "delivery", "other"}:
+    if scene in {"port", "border", "road", "warehouse", "delivery", "agriculture", "other"}:
         return scene
     scenes = event.get("logistics_scenes") or []
     if isinstance(scenes, str):
@@ -84,6 +84,7 @@ def _scene_bucket(event: dict) -> str:
         ("road", ("road", "linehaul", "道路", "干线", "中断", "卡车", "公路")),
         ("warehouse", ("warehouse", "仓储", "仓库", "货架", "设施")),
         ("delivery", ("delivery", "last_mile", "配送", "末端", "派送")),
+        ("agriculture", ("agriculture", "farm", "牧场", "农场", "牛群", "畜牧", "农田")),
     ]
     for name, keys in mapping:
         if any(key in text for key in keys):

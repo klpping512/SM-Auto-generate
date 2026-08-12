@@ -19,8 +19,10 @@ from typing import Any
 import model_router
 from video_quality.frame_extractor import extract_at_timestamps
 
-VISUAL_AUDIT_PROMPT_VERSION = "hotspot-hook-visual-audit-v1"
-SCENE_TYPES = {"port", "border", "road", "warehouse", "delivery", "other", "non_event"}
+VISUAL_AUDIT_PROMPT_VERSION = "hotspot-hook-visual-audit-v2-scene-taxonomy"
+SCENE_TYPES = {
+    "port", "border", "road", "warehouse", "delivery", "agriculture", "other", "non_event",
+}
 ROLE = "hook_visual_critic"
 
 
@@ -120,7 +122,7 @@ def _visual_prompt(start_ms: int, end_ms: int) -> str:
         f"候选时间窗：{start_ms}-{end_ms} 毫秒。"
         "描述你实际看到的对象、动作、场景类型，并判断是否为标题页/Logo/主播/演播室/地图/信息图/空镜。"
         "严格返回单行 JSON："
-        '{"accepted":true,"scene_type":"port|border|road|warehouse|delivery|other|non_event",'
+        '{"accepted":true,"scene_type":"port|border|road|warehouse|delivery|agriculture|other|non_event",'
         '"visible_objects":["仅列实际可见对象"],"visible_actions":["仅列实际可见动作"],'
         '"is_title_or_logo_card":false,"is_anchor_or_studio":false,"is_map_or_infographic":false,'
         '"supports_visible_event":true,"reason":"不超过80字"}'
