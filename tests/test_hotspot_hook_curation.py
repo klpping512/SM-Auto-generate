@@ -136,7 +136,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "多事件合集" in prompt
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
-    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v8-empty-repair"
+    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v9-optional-logistics-question"
     assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v6"
 
 
@@ -201,6 +201,37 @@ def test_hook_curator_accepts_soft_confidence_floor():
 
     assert len(hooks) == 1
     assert hooks[0]["confidence"] == 0.36
+
+
+def test_hook_curator_allows_empty_logistics_question_for_grounded_scene():
+    import hotspot_hook_curator
+
+    hooks = hotspot_hook_curator._parse(json.dumps({"hooks": [{
+        "event_identity": "港口入口货车排队检查",
+        "start_segment_index": 0, "end_segment_index": 0,
+        "title_zh": "入口货车排队", "what_happened": "货车在入口排队。",
+        "hook_reason": "现场排队清晰。", "logistics_question": "", "confidence": 0.88,
+    }]}, ensure_ascii=False), _segments())
+
+    assert len(hooks) == 1
+    assert hooks[0]["evidence"]["logistics_question"] == ""
+
+
+def test_curate_records_valid_empty_response_reason(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    async def fake_call(*_args, **_kwargs):
+        return {"content": json.dumps({"hooks": []}), "cache_hit": False}
+
+    _patch_curator_models(monkeypatch, fake_call)
+
+    hooks, meta = hotspot_hook_curator.curate_hook_clips(94, "港口入口现场", _segments())
+
+    assert hooks == []
+    assert meta["status"] == "no_qualified_hooks"
+    rows = tmp_db.list_hook_curation_diagnostics(asset_id=94)
+    assert len(rows) == 1
+    assert rows[0]["error"] == "model_empty_hooks"
 
 
 def test_hook_curation_prompt_keeps_all_long_video_segments_inside_input_budget():
@@ -360,4 +391,3 @@ def test_replacing_rejected_hooks_can_remove_only_its_generated_preview_folder(t
 
     assert not target.exists()
     assert (untouched / "event-0050.mp4").is_file()
-

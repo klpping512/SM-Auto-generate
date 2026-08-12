@@ -50,6 +50,15 @@ PREFILTER_NOISE_TOPIC_BLOCKLIST = (
     # 演播室/播客（无现场 b-roll）
     "podcast", "talk show",
 )
+# 标题含噪音主题词时仍放行的现场线索。预筛只能降低无效下载，不能用母片
+# 标题的单个主题词替代镜头审核；例如“卡车事故导致法庭外道路封锁”仍值得
+# 下载分析。最终是否真实、是否与标题一致，继续由三帧视觉审核和事实审核决定。
+PREFILTER_FIELD_ACTIVITY_MARKERS = (
+    "road", "street", "traffic", "truck", "cargo", "container", "port", "harbour", "harbor",
+    "border", "customs", "warehouse", "delivery", "logistics", "airport", "flood", "storm",
+    "snow", "fire", "crash", "accident", "roadblock", "protest", "卡车", "货运", "港口", "道路",
+    "边境", "海关", "仓储", "配送", "洪水", "暴雨", "降雪", "起火", "事故", "封路", "抗议",
+)
 
 
 def prefilter_mother_candidate(item: dict) -> tuple[bool, str]:
@@ -58,11 +67,17 @@ def prefilter_mother_candidate(item: dict) -> tuple[bool, str]:
         str(item.get(field) or "")
         for field in ("intake_title", "title", "publisher")
     ).casefold()
+    headline = " ".join(
+        str(item.get(field) or "")
+        for field in ("intake_title", "title")
+    ).casefold()
     for token in PREFILTER_TITLE_BLOCKLIST:
         if token.casefold() in title:
             return False, f"title_blocklist:{token}"
     for token in PREFILTER_NOISE_TOPIC_BLOCKLIST:
-        if token.casefold() in title:
+        if token.casefold() in title and not any(
+            marker.casefold() in headline for marker in PREFILTER_FIELD_ACTIVITY_MARKERS
+        ):
             return False, f"noise_topic_blocklist:{token}"
     duration = float(item.get("duration_seconds") or 0)
     if duration > 0 and duration < PREFILTER_MIN_SEC:

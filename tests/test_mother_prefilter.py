@@ -37,3 +37,29 @@ def test_prefilter_skips_too_short_and_too_long():
     })
     assert ok_short is False and "too_short" in reason_short
     assert ok_long is False and "too_long" in reason_long
+
+
+def test_prefilter_keeps_noise_headline_when_it_also_has_field_activity():
+    import hotspot_media
+
+    ok, reason = hotspot_media.prefilter_mother_candidate({
+        "title": "Court hearing follows truck crash that blocked a road",
+        "duration_seconds": 96,
+        "publisher": "eNCA",
+    })
+
+    assert ok is True
+    assert reason == ""
+
+
+def test_prefilter_still_skips_studio_court_headline_without_field_clue():
+    import hotspot_media
+
+    ok, reason = hotspot_media.prefilter_mother_candidate({
+        "title": "Court hearing update",
+        "duration_seconds": 96,
+        "publisher": "eNCA",
+    })
+
+    assert ok is False
+    assert "noise_topic_blocklist:court" in reason

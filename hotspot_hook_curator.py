@@ -84,7 +84,7 @@ MAX_HOOKS_PER_SOURCE = 3
 MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
-PROMPT_VERSION = "hotspot-hook-curation-v8-empty-repair"
+PROMPT_VERSION = "hotspot-hook-curation-v9-optional-logistics-question"
 AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v6"
 
 _LEISURE_TITLE_MARKERS = ("休闲", "海滨", "海滩", "度假", "观光", "打卡游玩")
@@ -159,8 +159,8 @@ def _prompt(source_title: str, source_context: str, segments: list[dict]) -> str
         "只要画面事实可核验也可保留。不要决定最终选题、不要替 Buffalo 编造服务能力，"
         "不要选择主播空镜、标题页、泛泛地图或无法说明发生何事的镜头。\n"
         "每个 Hook 必须：1) 由连续镜头组成；2) 总时长 4–14 秒；3) 用证据描述画面里发生的事；"
-        "4) 说明它为何能吸引停留；5) 给出谨慎的 logistics_question（物流向画面给直接切入，"
-        "非物流现场可用弱关联条件式问题），不能声称 Buffalo 已解决或已介入。\n"
+        "4) 说明它为何能吸引停留；5) 物流向画面可给出谨慎的 logistics_question（非物流现场可留空，"
+        "不得为了凑问题编造物流因果），不能声称 Buffalo 已解决或已介入。\n"
         "母片标题和本轮获准的事件范围优先级高于镜头猜测。新闻合集（多事件合集）允许最多 3 条"
         "不同 event_identity，每条仍须对应标题范围内可核验的独立现场，镜头不重叠。"
         "若镜头描述与事件范围冲突，或不能确定画面正在呈现该事件，跳过该候选。"
@@ -168,7 +168,7 @@ def _prompt(source_title: str, source_context: str, segments: list[dict]) -> str
         "若没有满足条件的 Hook，返回空数组。严格返回单行 JSON："
         "{\"hooks\":[{\"event_identity\":\"不超过48字、该候选事件的稳定标识\",\"start_segment_index\":0,\"end_segment_index\":1,"
         "\"title_zh\":\"不超过32字\",\"what_happened\":\"不超过120字的可核验画面事实\","
-        "\"hook_reason\":\"不超过100字\",\"logistics_question\":\"不超过100字\","
+        "\"hook_reason\":\"不超过100字\",\"logistics_question\":\"可选，不超过100字\","
         "\"confidence\":0到1}]}。\n"
         f"母片标题：{source_title[:240] or '未提供'}\n"
         f"本轮获准事件范围：{source_context[:1200] or '仅可使用与母片标题直接一致的镜头'}\n"
@@ -369,7 +369,10 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
         happened = str(row.get("what_happened") or "").strip()[:120]
         reason = str(row.get("hook_reason") or "").strip()[:100]
         question = str(row.get("logistics_question") or "").strip()[:100]
-        if not (MIN_HOOK_MS <= duration_ms <= MAX_HOOK_MS and title and candidate_identity and happened and reason and question):
+        # logistics_question 是给后续策划的可选桥接字段，不是“真实画面”证明。
+        # 非物流现场或模型无法提出谨慎问题时允许留空，不能因此误杀已满足
+        # 连续时长、可见事实、事件身份和理由门禁的真实 Hook。
+        if not (MIN_HOOK_MS <= duration_ms <= MAX_HOOK_MS and title and candidate_identity and happened and reason):
             continue
         if not MIN_HOOK_CONFIDENCE <= confidence <= 1:
             continue
@@ -438,8 +441,24 @@ def _empty_result_repair_instruction() -> str:
         "直接支持的可见动作或现场状态中选 1–3 条。若画面不能证明母片标题中的具体结论，"
         "event_identity、title_zh 和 what_happened 必须改写为中性的可见场景事实，不得照抄或扩写"
         "未被画面支持的实体、因果、数量或 Buffalo 服务能力。只有所有候选都确实不满足画面门禁时"
-        "才再次返回空数组。仍按原 JSON schema 返回，不要解释。"
+        "才再次返回空数组。logistics_question 仅在画面确实支持物流切入时填写，否则留空。"
+        "仍按原 JSON schema 返回，不要解释。"
     )
+
+
+def _empty_result_diagnostic_reason(content: str, segments: list[dict]) -> str:
+    """Explain a valid zero-hook response without weakening deterministic gates."""
+    try:
+        payload = _extract_json(content)
+    except ValueError:
+        return "model_empty_hooks"
+    rows = payload.get("hooks") if isinstance(payload, dict) else payload
+    if not rows:
+        return "model_empty_hooks"
+    try:
+        return "deterministic_parse_rejection" if not _parse(content, segments) else "no_qualified_hooks"
+    except ValueError:
+        return "model_invalid_json"
 
 
 def curate_hook_clips(
@@ -522,6 +541,13 @@ def curate_hook_clips(
             hooks = _try_parse(result, 2)
             retried_empty = True
     if not hooks:
+        add_hook_curation_diagnostic(
+            int(asset_id), 2 if retried_empty else 1, PROMPT_VERSION,
+            model=route_model,
+            cache_hit=bool(result.get("cache_hit")),
+            error=_empty_result_diagnostic_reason(result.get("content") or "", ordered),
+            raw_content=result.get("content") or "",
+        )
         return [], {
             "status": "no_qualified_hooks",
             "model": model_router.get_route("planner_text").get("model"),
@@ -547,6 +573,13 @@ def curate_hook_clips(
             "visual_audit": visual_audit,
         }
     if not hooks:
+        add_hook_curation_diagnostic(
+            int(asset_id), 2 if retried_empty else 1, PROMPT_VERSION,
+            model=route_model,
+            cache_hit=bool(result.get("cache_hit")),
+            error="visual_audit_rejected_all",
+            raw_content=json.dumps(visual_audit, ensure_ascii=False),
+        )
         return [], {
             "status": "no_qualified_hooks",
             "model": model_router.get_route("planner_text").get("model"),
@@ -556,6 +589,14 @@ def curate_hook_clips(
             "visual_audit": visual_audit,
         }
     hooks, audit = _audit_hooks(int(asset_id), source_title, source_context, hooks)
+    if not hooks:
+        add_hook_curation_diagnostic(
+            int(asset_id), 2 if retried_empty else 1, PROMPT_VERSION,
+            model=route_model,
+            cache_hit=bool(result.get("cache_hit")),
+            error="grounding_audit_rejected_all",
+            raw_content=json.dumps(audit, ensure_ascii=False),
+        )
     return hooks, {
         "status": "curated" if hooks else "no_qualified_hooks",
         "model": model_router.get_route("planner_text").get("model"),
