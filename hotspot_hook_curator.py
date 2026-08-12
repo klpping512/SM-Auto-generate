@@ -85,7 +85,27 @@ MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
 PROMPT_VERSION = "hotspot-hook-curation-v8-empty-repair"
-AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v5"
+AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v6"
+
+_LEISURE_TITLE_MARKERS = ("休闲", "海滨", "海滩", "度假", "观光", "打卡游玩")
+_EMERGENCY_VISUAL_MARKERS = ("急救", "救护", "燃烧", "浓烟", "火灾", "火光", "事故", "残骸", "车祸")
+
+
+def _title_contradicts_visual(title_zh: str, visual: dict | None) -> bool:
+    """Hard gate: reject leisure/beach titles when frames show emergency/road incidents."""
+    title = str(title_zh or "")
+    visual = visual or {}
+    blob = " ".join(
+        [
+            str(visual.get("reason") or ""),
+            str(visual.get("scene_type") or ""),
+            *[str(x) for x in (visual.get("visible_objects") or [])],
+            *[str(x) for x in (visual.get("visible_actions") or [])],
+        ]
+    )
+    if any(m in title for m in _LEISURE_TITLE_MARKERS) and any(m in blob for m in _EMERGENCY_VISUAL_MARKERS):
+        return True
+    return False
 
 
 def _derive_hook_keywords(fact_text: str) -> list[str]:
@@ -217,10 +237,11 @@ def _audit_prompt(source_title: str, source_context: str, hooks: list[dict]) -> 
         f"来源线索标题：{source_title[:240] or '未提供'}。"
         "逐条核验候选 Hook：仅在以下全部成立时才接受："
         "（1）画面可见事实（visual_objects/visual_actions/scene_type）与 what_happened 不矛盾；"
-        "（2）来源事件身份与画面可见事实不矛盾，但不能仅靠标题补足画面缺失的地点或动作；"
-        "（3）没有把垃圾、普通袋子、路人或未知物品臆断为包裹、货物、订单或物流作业；"
-        "（4）不是主播/字幕/标题页/Logo 卡。若视觉审核已标明标题卡或主播，必须拒绝。"
-        "社会、体育、政务等非物流现场只要画面可核验也可接受，不要仅因缺少物流视觉就拒绝。"
+        "（2）title_zh 必须与画面可见事实一致；若画面是公路事故/燃烧车辆/急救车，标题不得写成海滨休闲、度假或无关日常；"
+        "（3）来源事件身份与画面可见事实不矛盾，但不能仅靠标题补足画面缺失的地点或动作；"
+        "（4）没有把垃圾、普通袋子、路人或未知物品臆断为包裹、货物、订单或物流作业；"
+        "（5）不是主播/字幕/标题页/Logo 卡。若视觉审核已标明标题卡或主播，必须拒绝。"
+        "社会、体育、政务等非物流现场只要画面可核验且标题如实描述画面也可接受，不要仅因缺少物流视觉就拒绝。"
         "新闻合集允许不同独立事件各保留一条。不确定、矛盾、依赖猜测的候选必须拒绝。"
         "严格返回单行 JSON：{\"accepted\":[{\"candidate_index\":1,\"reason\":\"不超过80字\"}]}。"
         f"本轮获准事件范围：{source_context[:1200] or '仅可使用与来源线索直接一致且画面可核验的镜头'}\n"
@@ -277,7 +298,9 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
     accepted = []
     for item in hooks:
         evidence = dict(item.get("evidence") or {})
-        if int(item["event_index"]) in accepted_indexes:
+        visual = dict(evidence.get("visual_audit") or {})
+        idx = int(item["event_index"])
+        if idx in accepted_indexes and not _title_contradicts_visual(str(item.get("title_zh") or ""), visual):
             evidence["text_audit"] = {
                 "status": "accepted",
                 "prompt_version": AUDIT_PROMPT_VERSION,
@@ -285,13 +308,19 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
             item["evidence"] = evidence
             item["review_status"] = "confirmed"
             accepted.append(item)
-        else:
-            evidence["text_audit"] = {
-                "status": "rejected",
-                "prompt_version": AUDIT_PROMPT_VERSION,
-            }
-            item["evidence"] = evidence
-            item["review_status"] = "review_required"
+            continue
+        reject_reason = (
+            "title_visual_conflict"
+            if idx in accepted_indexes
+            else "text_audit_rejected"
+        )
+        evidence["text_audit"] = {
+            "status": "rejected",
+            "prompt_version": AUDIT_PROMPT_VERSION,
+            "reason": reject_reason,
+        }
+        item["evidence"] = evidence
+        item["review_status"] = "review_required"
     return accepted, {
         "status": "verified" if accepted else "rejected_all",
         "accepted_count": len(accepted),

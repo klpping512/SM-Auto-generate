@@ -98,7 +98,7 @@ def test_hook_visual_critic_route_is_independent_vision_role(tmp_db):
         "hook_visual_critic", {"messages": [{"role": "user", "content": "x"}]}, "hotspot-hook-visual-audit-v1",
     )
     key_critic = model_router.make_cache_key(
-        "critic", {"messages": [{"role": "user", "content": "x"}]}, "hotspot-hook-grounding-audit-v5",
+        "critic", {"messages": [{"role": "user", "content": "x"}]}, "hotspot-hook-grounding-audit-v6",
     )
     assert key_visual != key_critic
     assert model_router._provider_request_options(route) == {

@@ -137,7 +137,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
     assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v8-empty-repair"
-    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v5"
+    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v6"
 
 
 def test_hook_curator_rejects_an_obvious_anchor_only_segment_before_model_audit():
