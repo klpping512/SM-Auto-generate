@@ -680,6 +680,38 @@ async def fetch_hotspots_then_incremental_hook_intake():
     return report
 
 
+async def cleanup_hotspot_hook_cycle():
+    """每天检查 12 天周期 Hook 清理；门禁未过则只预览，不按年龄粗删。"""
+    static_dir = os.environ.get("STATIC_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "static"
+    )
+    try:
+        import hotspot_hook_cycle_cleanup as hook_cycle
+
+        report = await asyncio.to_thread(
+            hook_cycle.run_scheduled_hook_cycle_cleanup,
+            static_dir,
+        )
+        status = report.get("status")
+        alerts = (report.get("gates") or {}).get("alerts") or []
+        if status == "blocked" or alerts:
+            logger.warning(
+                "Hook 周期清理未执行删除 status=%s alerts=%s qualified=%s",
+                status,
+                alerts,
+                (report.get("gates") or {}).get("qualified_count"),
+            )
+        else:
+            logger.info(
+                "Hook 周期清理完成 status=%s deleted=%s dry_run=%s",
+                status,
+                report.get("deleted_count"),
+                report.get("dry_run"),
+            )
+    except Exception:
+        logger.exception("Hook 周期清理任务失败")
+
+
 def start_scheduler():
     """启动定时调度器。"""
     # 每分钟检查一次定时发布任务（加 grace time 避免错过）
@@ -717,30 +749,20 @@ def start_scheduler():
         max_instances=1,
         coalesce=True,
     )
+    # 批22：按 12 天完整周期检查清理，禁止用旧版 10 天年龄清理代替。
     scheduler.add_job(
-        cleanup_hotspot_hook_library,
+        cleanup_hotspot_hook_cycle,
         "cron",
         hour=int(os.environ.get("HOTSPOT_HOOK_CLEANUP_HOUR", "3")),
-        minute=45,
-        id="hotspot_hook_library_cleanup",
+        minute=int(os.environ.get("HOTSPOT_HOOK_CLEANUP_MINUTE", "15")),
+        id="hotspot_hook_cycle_cleanup",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=3600,  # 1 小时 grace time，避免连续错过导致任务失效
+        misfire_grace_time=3600,
     )
     scheduler.start()
-    logger.info("定时调度器已启动（每分钟检查定时发布任务）")
-    
-    # 服务重启后 30 秒触发一次 hook 库清理补跑
-    import asyncio
-    async def _late_start_hook_cleanup():
-        await asyncio.sleep(30)
-        try:
-            logger.info("服务重启后 30 秒，触发一次热点 Hook 库清理...")
-            await cleanup_hotspot_hook_library()
-        except Exception as e:
-            logger.warning("服务重启后 Hook 库清理失败：%s", e)
-    asyncio.create_task(_late_start_hook_cleanup())
+    logger.info("定时调度器已启动（每分钟发布检查 + 三天热点预热 + 12 天 Hook 周期清理）")
 
 
 def stop_scheduler():

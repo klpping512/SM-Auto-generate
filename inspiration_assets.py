@@ -238,6 +238,10 @@ def build_ytdlp_options(
     )
     if proxy:
         options["proxy"] = proxy
+    if source_type == "youtube":
+        # 云端代理下 web client 偶发被 YouTube reset；Android client 可稳定
+        # 返回公开元数据和可下载格式，不携带 Cookie、不绕过 DRM。
+        options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
     if progress_callback:
         options["progress_hooks"] = [progress_callback]
 
