@@ -136,7 +136,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "多事件合集" in prompt
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
-    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v9-optional-logistics-question"
+    assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v10-mixed-scene-repair"
     assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v6"
 
 
@@ -337,6 +337,53 @@ def test_curator_does_not_retry_empty_when_every_window_is_anchor_only(tmp_db, m
     assert hooks == []
     assert len(calls) == 1
     assert meta["empty_result_retry"] is False
+
+
+def test_curator_repairs_deterministic_overlong_candidate_once(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    planner_calls = []
+
+    async def fake_call(*args, **kwargs):
+        if kwargs["prompt_version"] == hotspot_hook_curator.AUDIT_PROMPT_VERSION:
+            return {"content": json.dumps({"accepted": [{"candidate_index": 1, "reason": "画面事实一致"}]}), "cache_hit": False}
+        planner_calls.append(args[2])
+        if len(planner_calls) == 1:
+            return {"content": json.dumps({"hooks": [{
+                "event_identity": "道路现场",
+                "start_segment_index": 0, "end_segment_index": 1,
+                "title_zh": "道路现场", "what_happened": "道路上车辆通行。",
+                "hook_reason": "现场动作清晰。", "logistics_question": "", "confidence": 0.88,
+            }]}), "cache_hit": False}
+        return {"content": json.dumps({"hooks": [{
+            "event_identity": "道路现场",
+            "start_segment_index": 0, "end_segment_index": 0,
+            "title_zh": "道路现场", "what_happened": "道路上车辆通行。",
+            "hook_reason": "现场动作清晰。", "logistics_question": "", "confidence": 0.88,
+        }]}), "cache_hit": False}
+
+    _patch_curator_models(monkeypatch, fake_call)
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "get_route", lambda _role: {"model": "mimo-test"})
+    segments = [
+        {
+            "id": 21, "segment_index": 0, "start_ms": 0, "end_ms": 7_800,
+            "description": "雨天道路上车辆通行", "transcript": "", "ocr_text": "",
+            "tags": [{"dimension": "scene", "value": "道路运输"}],
+        },
+        {
+            "id": 22, "segment_index": 1, "start_ms": 7_800, "end_ms": 15_600,
+            "description": "雨天道路上车辆排队", "transcript": "", "ocr_text": "",
+            "tags": [{"dimension": "object", "value": "卡车"}],
+        },
+    ]
+
+    hooks, meta = hotspot_hook_curator.curate_hook_clips(95, "Traffic update", segments)
+
+    assert len(hooks) == 1
+    assert hooks[0]["end_ms"] == 7_800
+    assert len(planner_calls) == 2
+    assert meta["empty_result_retry"] is True
+    assert "超长范围" in planner_calls[1][-1]["content"]
 
 
 def test_empty_result_repair_still_goes_through_visual_audit(tmp_db, monkeypatch):

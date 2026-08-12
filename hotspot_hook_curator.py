@@ -84,7 +84,7 @@ MAX_HOOKS_PER_SOURCE = 3
 MIN_HOOK_CONFIDENCE = 0.35
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
-PROMPT_VERSION = "hotspot-hook-curation-v9-optional-logistics-question"
+PROMPT_VERSION = "hotspot-hook-curation-v10-mixed-scene-repair"
 AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v6"
 
 _LEISURE_TITLE_MARKERS = ("休闲", "海滨", "海滩", "度假", "观光", "打卡游玩")
@@ -436,9 +436,11 @@ def _has_safe_hook_window(segments: list[dict]) -> bool:
 
 def _empty_result_repair_instruction() -> str:
     return (
-        "上一轮返回了空 hooks，但后端确定性门禁确认至少存在一个连续 4–14 秒、且不是纯主播/标题页/"
-        "地图/Logo 墙的可用画面窗口。请仅重做一次选择：优先从 description、tags、transcript、OCR "
-        "直接支持的可见动作或现场状态中选 1–3 条。若画面不能证明母片标题中的具体结论，"
+        "上一轮返回了空 hooks 或候选未通过后端确定性门禁，但后端确定性检查确认至少存在一个连续 "
+        "4–14 秒、且不是纯主播/标题页/地图/Logo 墙的可用画面窗口。请仅重做一次选择：优先从 "
+        "description、tags、transcript、OCR 直接支持的可见动作或现场状态中选 1–3 条。"
+        "每条候选必须单独满足 4–14 秒；若相邻两段合计超过 14 秒，请只选其中一段，"
+        "不要为了覆盖更多镜头而返回超长范围。若画面不能证明母片标题中的具体结论，"
         "event_identity、title_zh 和 what_happened 必须改写为中性的可见场景事实，不得照抄或扩写"
         "未被画面支持的实体、因果、数量或 Buffalo 服务能力。只有所有候选都确实不满足画面门禁时"
         "才再次返回空数组。logistics_question 仅在画面确实支持物流切入时填写，否则留空。"

@@ -16,6 +16,12 @@ _NON_EVENT_SCENE_MARKERS = (
     "主播", "主持人", "演播室", "播报", "标题页", "片头", "片尾", "地图",
     "信息图", "流程图", "纯文字", "logo墙", "新闻台标",
 )
+_FIELD_ACTIVITY_MARKERS = (
+    "道路", "公路", "卡车", "货车", "货运", "港口", "码头", "集装箱",
+    "边境", "海关", "仓储", "配送", "积雪", "暴雨", "洪水", "拥堵", "起火",
+    "road", "street", "truck", "cargo", "container", "port", "border",
+    "customs", "warehouse", "delivery", "snow", "storm", "flood", "congestion",
+)
 
 
 def policy_contract() -> dict:
@@ -65,9 +71,16 @@ def obvious_rejection_reason(segments: list[dict]) -> str:
     visual_text = " ".join(segment_texts)
     if not visual_text.strip():
         return "镜头缺少可见画面描述"
-    if all(
+    only_non_event = all(
         any(marker.casefold() in segment_text for marker in _NON_EVENT_SCENE_MARKERS)
         for segment_text in segment_texts
-    ):
+    )
+    has_field_activity = any(
+        marker.casefold() in visual_text for marker in _FIELD_ACTIVITY_MARKERS
+    )
+    # 电视分屏/新闻包装可能同时出现主播、字幕和真实道路/港口画面。不能
+    # 因为一个非事件词就把整段送进确定性黑名单；三帧视觉审核仍会拒绝
+    # 实际上只有主播或标题卡的候选。
+    if only_non_event and not has_field_activity:
         return "仅非事件画面不能作为 Hook"
     return ""
