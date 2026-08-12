@@ -109,6 +109,21 @@ def test_hook_visual_critic_route_is_independent_vision_role(tmp_db):
         assert model_router._safe_request_options(model_router.get_route(role)).get("enable_thinking") is False
 
 
+def test_vision_tagger_route_disables_thinking(tmp_db):
+    """视觉标签必须和其他 JSON 敏感角色一样关闭 MiMo thinking。"""
+    import model_router
+
+    route = model_router.get_route("vision_tagger")
+    assert route["model"] == "mimo-v2.5"
+    assert set(route["capabilities"]) == {"text", "vision"}
+    assert model_router._safe_request_options(route) == {
+        "enable_thinking": False, "reasoning_split": True,
+    }
+    assert model_router._provider_request_options(route) == {
+        "thinking": {"type": "disabled"},
+    }
+
+
 
 @pytest.mark.asyncio
 async def test_call_text_does_not_cache_empty_visible_content(tmp_db, monkeypatch):

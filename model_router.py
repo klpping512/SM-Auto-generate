@@ -49,6 +49,10 @@ DEFAULT_ROUTES = {
         "api_key_env": "MIMO_API_KEY", "model": "mimo-v2.5",
         "capabilities": ["text", "vision"], "timeout": 60, "max_tokens": 900,
         "json_mode": False, "cost_profile": "medium", "enabled": True,
+        # MiMo V2.5 defaults thinking ON.  Without the native disabled flag,
+        # the vision tagger can spend the whole visible-output budget on
+        # reasoning and return an empty content field.
+        "request_options": {"reasoning_split": True, "enable_thinking": False},
     },
     "video_evaluator": {
         "role": "video_evaluator", "provider": "mimo",
