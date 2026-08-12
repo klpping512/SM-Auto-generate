@@ -119,6 +119,7 @@ def test_single_video_metadata_read_is_explicitly_no_download(monkeypatch):
             "description": "Footage shows parcel inspection and outbound loading at a warehouse.",
             "tags": ["warehouse", "parcel", "loading"],
             "duration": 243,
+            "upload_date": "20260728",
         }), stderr="")
 
     metadata = hotspot_video_sources.read_youtube_video_metadata(
@@ -128,6 +129,7 @@ def test_single_video_metadata_read_is_explicitly_no_download(monkeypatch):
     assert metadata["title"] == "Warehouse staff inspect parcels before loading"
     assert "parcel inspection" in metadata["summary"]
     assert metadata["duration_seconds"] == 243.0
+    assert metadata["published_at"] == "2026-07-28T00:00:00+00:00"
     command = commands[0]
     assert "--skip-download" in command
     assert "--no-playlist" in command
@@ -163,6 +165,7 @@ def test_authorized_youtube_metadata_is_persisted_for_qwen_intake(tmp_db):
             "title": "Warehouse staff inspect parcels before loading",
             "description": "Staff check parcels, sort orders and load outbound delivery vehicles.",
             "duration": 245,
+            "upload_date": "20260728",
         }), stderr="")
 
     rows, report = hotspot_video_sources.hydrate_youtube_intake_metadata(
@@ -176,6 +179,7 @@ def test_authorized_youtube_metadata_is_persisted_for_qwen_intake(tmp_db):
     persisted = tmp_db.get_hotspot_media(media_id)
     assert persisted["duration_seconds"] == 245.0
     assert persisted["intake_metadata_checked_at"]
+    assert tmp_db.get_hotspot(hotspot_id)["published_at"] == "2026-07-28T00:00:00+00:00"
 
 
 def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):

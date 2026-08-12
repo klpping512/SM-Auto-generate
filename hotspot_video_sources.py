@@ -261,11 +261,13 @@ def read_youtube_video_metadata(
         duration_seconds = float(duration) if duration is not None else None
     except (TypeError, ValueError):
         duration_seconds = None
+    published_at = _published_at(entry)
     return {
         "title": title,
         "summary": "\n".join(summary_parts)[:2000],
         "duration_seconds": duration_seconds,
         "thumbnail_url": _thumbnail(entry),
+        "published_at": published_at,
     }
 
 
@@ -290,10 +292,11 @@ def hydrate_youtube_intake_metadata(
         if item.get("platform") != "youtube":
             hydrated.append(item)
             continue
+        parent = db.get_hotspot(int(item.get("hotspot_id") or 0)) or {}
         if str(item.get("intake_metadata_status") or "") == "ready" and (
             str(item.get("intake_title") or "").strip()
             or str(item.get("intake_summary") or "").strip()
-        ):
+        ) and str(parent.get("published_at") or "").strip():
             report["cached"] += 1
             hydrated.append(item)
             continue
@@ -309,6 +312,10 @@ def hydrate_youtube_intake_metadata(
             if metadata.get("thumbnail_url") and not updated.get("thumbnail_url"):
                 db.upsert_hotspot_media({**updated, "thumbnail_url": metadata["thumbnail_url"]})
                 updated["thumbnail_url"] = metadata["thumbnail_url"]
+            if metadata.get("published_at"):
+                db.update_hotspot_published_at_if_empty(
+                    int(item.get("hotspot_id") or 0), str(metadata["published_at"])
+                )
             hydrated.append(updated)
             report["ready"] += 1
         except Exception as exc:
