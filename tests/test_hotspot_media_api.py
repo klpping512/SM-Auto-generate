@@ -96,7 +96,7 @@ def test_discover_and_filter_hotspot_video_candidates(tmp_db, monkeypatch):
     assert listed.status_code == 200
     assert len(listed.json()) == 2
     assert {item["platform"] for item in listed.json()} == {"direct", "youtube"}
-    assert all(item["rights_tier"] == "yellow" for item in listed.json())
+    assert all(item["authorization_status"] == "authorized" for item in listed.json())
 
 
 def test_attach_single_youtube_video_and_reject_channel(tmp_db, monkeypatch):

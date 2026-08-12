@@ -10,9 +10,9 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "data" / "logiflow.db"
-HOTSPOT_MEDIA_AUTHORIZATION_STATUSES = {"authorized", "pending_review", "blocked"}
-_LEGACY_RIGHTS_TO_AUTHORIZATION = {"green": "authorized", "yellow": "pending_review", "red": "blocked"}
-_AUTHORIZATION_TO_LEGACY_RIGHTS = {value: key for key, value in _LEGACY_RIGHTS_TO_AUTHORIZATION.items()}
+# 批22：信源授权由管理员统一管理，不再使用绿/黄分层或 pending_review
+# 作为自动处理门槛。保留 blocked 供管理员明确停用单条素材。
+HOTSPOT_MEDIA_AUTHORIZATION_STATUSES = {"authorized", "blocked"}
 
 
 @contextmanager
@@ -390,8 +390,8 @@ def init_db():
                 intake_metadata_status TEXT NOT NULL DEFAULT 'pending',
                 intake_metadata_checked_at TEXT,
                 intake_decision_json TEXT,
-                authorization_status TEXT NOT NULL DEFAULT 'pending_review',
-                rights_tier TEXT NOT NULL DEFAULT 'yellow',
+                authorization_status TEXT NOT NULL DEFAULT 'authorized',
+                rights_tier TEXT NOT NULL DEFAULT 'authorized',
                 rights_note TEXT NOT NULL DEFAULT '',
                 license_name TEXT,
                 rights_evidence_url TEXT,
@@ -439,6 +439,7 @@ def init_db():
                 name TEXT NOT NULL,
                 feed_url TEXT NOT NULL UNIQUE,
                 allowed_domains TEXT NOT NULL DEFAULT '[]',
+                source_kind TEXT NOT NULL DEFAULT 'rss',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_by INTEGER,
                 created_at TEXT DEFAULT (datetime('now')),
@@ -967,7 +968,8 @@ def init_db():
         _ensure_column(conn, "hotspot_media", "intake_metadata_status", "TEXT NOT NULL DEFAULT 'pending'")
         _ensure_column(conn, "hotspot_media", "intake_metadata_checked_at", "TEXT")
         _ensure_column(conn, "hotspot_media", "intake_decision_json", "TEXT")
-        _ensure_column(conn, "hotspot_media", "authorization_status", "TEXT NOT NULL DEFAULT 'pending_review'")
+        _ensure_column(conn, "hotspot_media", "authorization_status", "TEXT NOT NULL DEFAULT 'authorized'")
+        _ensure_column(conn, "hotspot_sources", "source_kind", "TEXT NOT NULL DEFAULT 'rss'")
         _ensure_column(conn, "hotspot_media", "materialization_retryable", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "hotspot_media", "retry_after", "TEXT")
         _ensure_column(conn, "hotspot_discovery_requests", "stage", "TEXT")
@@ -976,16 +978,19 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_hotspot_media_authorization "
             "ON hotspot_media(authorization_status,lifecycle_status,created_at)"
         )
-        # Existing rows used red/yellow/green labels.  Migrate their meaning once
-        # into an explicit processing authorization state; the old column remains
-        # only to keep historical exports and old integrations readable.
+        # Existing rows used the retired red/yellow/green labels. All existing
+        # configured media are in the operator-authorized library; only an
+        # explicitly blocked row remains blocked.
         conn.execute(
             """UPDATE hotspot_media
-               SET authorization_status=CASE rights_tier
-                   WHEN 'green' THEN 'authorized'
-                   WHEN 'red' THEN 'blocked'
-                   ELSE 'pending_review' END
-               WHERE authorization_status IS NULL OR authorization_status='' OR authorization_status='pending_review'"""
+               SET authorization_status=CASE
+                   WHEN authorization_status='blocked' OR rights_tier='red' THEN 'blocked'
+                   ELSE 'authorized' END,
+                   rights_tier=CASE
+                   WHEN authorization_status='blocked' OR rights_tier='red' THEN 'blocked'
+                   ELSE 'authorized' END
+               WHERE authorization_status IS NULL OR authorization_status='' OR authorization_status IN ('pending_review','authorized')
+                  OR rights_tier IN ('green','yellow','red')"""
         )
         _ensure_column(conn, "video_render_jobs", "clips", "TEXT DEFAULT '[]'")
         _ensure_column(conn, "video_render_jobs", "quality_report", "TEXT DEFAULT '{}'")
@@ -2363,7 +2368,7 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
         "download_progress", "progress_detail", "materialization_retryable", "retry_after",
     )
     defaults = {
-        "platform": "direct", "publisher": "", "author": "", "authorization_status": "pending_review", "rights_tier": "yellow",
+        "platform": "direct", "publisher": "", "author": "", "authorization_status": "authorized", "rights_tier": "authorized",
         "rights_note": "", "download_status": "discovered", "processing_status": "not_started",
         "lifecycle_status": "active", "download_progress": 0, "intake_title": "",
         "intake_summary": "", "intake_metadata_status": "pending", "intake_decision_json": None,
@@ -2371,9 +2376,10 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
     }
     payload = {**defaults, **data}
     if "authorization_status" not in data:
-        payload["authorization_status"] = _LEGACY_RIGHTS_TO_AUTHORIZATION.get(
-            str(payload.get("rights_tier") or ""), "pending_review"
-        )
+        payload["authorization_status"] = "blocked" if str(payload.get("rights_tier") or "").casefold() in {"red", "blocked"} else "authorized"
+    elif payload.get("authorization_status") not in HOTSPOT_MEDIA_AUTHORIZATION_STATUSES:
+        payload["authorization_status"] = "blocked" if str(payload.get("authorization_status") or "").casefold() == "blocked" or str(payload.get("rights_tier") or "").casefold() in {"red", "blocked"} else "authorized"
+    payload["rights_tier"] = payload["authorization_status"]
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id FROM hotspot_media WHERE hotspot_id=? AND original_media_url=?",
@@ -2474,7 +2480,7 @@ def update_hotspot_media_authorization(
         conn.execute(
             """UPDATE hotspot_media SET authorization_status=?,rights_tier=?,rights_note=?,license_name=?,attribution=?,
                rights_evidence_url=?,confirmed_by=?,confirmed_at=?,updated_at=datetime('now') WHERE id=?""",
-            (authorization_status, _AUTHORIZATION_TO_LEGACY_RIGHTS[authorization_status], rights_note, license_name, attribution, rights_evidence_url,
+            (authorization_status, authorization_status, rights_note, license_name, attribution, rights_evidence_url,
              confirmed_by, confirmed_at, media_id),
         )
 
@@ -2488,16 +2494,12 @@ def update_hotspot_media_rights(
     rights_evidence_url: str | None,
     confirmed_by: int | None,
 ):
-    """Compatibility wrapper for historical callers using red/yellow/green."""
-    authorization_status = _LEGACY_RIGHTS_TO_AUTHORIZATION.get(rights_tier)
-    if not authorization_status:
-        raise ValueError("热点素材授权状态无效")
+    """兼容旧客户端；运行时只保留 authorized / blocked 两种状态。"""
+    authorization_status = "blocked" if rights_tier in {"red", "blocked"} else "authorized"
     result = update_hotspot_media_authorization(
         media_id, authorization_status, rights_note, license_name, attribution, rights_evidence_url, confirmed_by,
     )
-    # Older integrations used yellow as a confirmed, internal-use record.  Keep
-    # its timestamp behavior while new callers use explicit authorization states.
-    if rights_tier in {"green", "yellow"} and confirmed_by is not None:
+    if confirmed_by is not None:
         with get_conn() as conn:
             conn.execute(
                 "UPDATE hotspot_media SET confirmed_at=? WHERE id=?",
@@ -2731,14 +2733,16 @@ def create_hotspot_source(
     allowed_domains: list[str],
     created_by: int,
     enabled: bool = True,
+    source_kind: str = "rss",
 ) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO hotspot_sources (name,feed_url,allowed_domains,enabled,created_by) VALUES (?,?,?,?,?)",
+            "INSERT INTO hotspot_sources (name,feed_url,allowed_domains,source_kind,enabled,created_by) VALUES (?,?,?,?,?,?)",
             (
                 name,
                 feed_url,
                 json.dumps(allowed_domains, ensure_ascii=False),
+                source_kind if source_kind in {"rss", "html_index"} else "rss",
                 1 if enabled else 0,
                 created_by,
             ),
@@ -2746,11 +2750,18 @@ def create_hotspot_source(
         return cur.lastrowid
 
 
-def update_hotspot_source(source_id: int, name: str, feed_url: str, allowed_domains: list[str], enabled: bool):
+def update_hotspot_source(
+    source_id: int,
+    name: str,
+    feed_url: str,
+    allowed_domains: list[str],
+    enabled: bool,
+    source_kind: str = "rss",
+):
     with get_conn() as conn:
         conn.execute(
-            "UPDATE hotspot_sources SET name=?,feed_url=?,allowed_domains=?,enabled=? WHERE id=?",
-            (name, feed_url, json.dumps(allowed_domains, ensure_ascii=False), 1 if enabled else 0, source_id),
+            "UPDATE hotspot_sources SET name=?,feed_url=?,allowed_domains=?,source_kind=?,enabled=? WHERE id=?",
+            (name, feed_url, json.dumps(allowed_domains, ensure_ascii=False), source_kind if source_kind in {"rss", "html_index"} else "rss", 1 if enabled else 0, source_id),
         )
 
 

@@ -11,9 +11,10 @@ import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 
 import database as db
 import media_assets
@@ -29,9 +30,8 @@ KEYWORDS = hotspot_lexicon.FEED_FILTER_PATTERN
 ALLOWED_LICENSE_PREFIXES = ("CC BY", "CC0", "Public domain")
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 DEFAULT_VIDEO_CHANNELS = hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS
-# 允许同时启用的可信源上限：信源扩容后从 5 抬高到 12，
-# 抓取仍是每 6 小时一轮的低成本元数据采集。
-MAX_ENABLED_SOURCES = 12
+# 批22：官方机构、港口/边境页面和可信媒体扩容；每轮仍只读取元数据。
+MAX_ENABLED_SOURCES = 20
 
 
 def configured_video_channels() -> list[dict]:
@@ -40,10 +40,8 @@ def configured_video_channels() -> list[dict]:
 
 
 def configured_source_rights() -> tuple[str, str]:
-    """Configured feeds can be contract-authorized at organization level."""
-    if os.environ.get("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "0") == "1":
-        return "green", "已配置信源已获企业授权，可自动下载分析；仅限已授权使用范围。"
-    return "yellow", "已发现媒体，需确认授权后下载分析。"
+    """管理员已配置的信源直接进入授权库，不再使用绿/黄权限门禁。"""
+    return "authorized", "管理员已将该信源纳入授权范围，可自动下载分析。"
 
 DEFAULT_OFFICIAL_SOURCES = [
     {
@@ -90,6 +88,46 @@ DEFAULT_OFFICIAL_SOURCES = [
         "allowed_domains": ["freightnews.co.za"],
         "purpose": "南非专业货运/进出口门户，垂直物流线索",
     },
+    {
+        "name": "Border Management Authority",
+        "url": "https://www.bma.gov.za/category/latest-news/feed/",
+        "allowed_domains": ["bma.gov.za"],
+        "purpose": "边境口岸、人员与货物流动、口岸运营",
+    },
+    {
+        "name": "SANRAL",
+        "url": "https://www.nra.co.za/media-centre",
+        "allowed_domains": ["nra.co.za", "sanral.co.za"],
+        "purpose": "国家公路、交通中断、道路施工与干线现场",
+        "source_kind": "html_index",
+    },
+    {
+        "name": "Transnet National Ports Authority",
+        "url": "https://www.transnet.net/SubsiteRender.aspx?id=6362826",
+        "allowed_domains": ["transnet.net"],
+        "purpose": "港口、船舶、码头基础设施与港口运营",
+        "source_kind": "html_index",
+    },
+    {
+        "name": "Transnet Port Terminals",
+        "url": "https://www.transnet.net/TransnetPortTerminals",
+        "allowed_domains": ["transnet.net"],
+        "purpose": "集装箱、汽车、散货和农产品码头现场",
+        "source_kind": "html_index",
+    },
+    {
+        "name": "SAMSA",
+        "url": "https://blog.samsa.org.za/feed/",
+        "allowed_domains": ["blog.samsa.org.za", "samsa.org.za"],
+        "purpose": "海事安全、船舶、海运和港口相关现场",
+    },
+    {
+        "name": "SARS Customs Updates",
+        "url": "https://www.sars.gov.za/swp-news/",
+        "allowed_domains": ["sars.gov.za"],
+        "purpose": "海关、边境申报、货物查验和跨境贸易",
+        "source_kind": "html_index",
+    },
 ]
 
 
@@ -107,6 +145,7 @@ def seed_default_sources(created_by: int | None = None) -> int:
             transport["url"],
             transport["allowed_domains"],
             legacy_stats["enabled"],
+            transport.get("source_kind", "rss"),
         )
         existing = db.list_hotspot_sources()
     existing_urls = {item["feed_url"] for item in existing}
@@ -122,6 +161,7 @@ def seed_default_sources(created_by: int | None = None) -> int:
             source["allowed_domains"],
             created_by,
             enabled,
+            source.get("source_kind", "rss"),
         )
         inserted += 1
         if enabled:
@@ -138,7 +178,12 @@ def configured_feeds() -> list[dict]:
     env_feeds = [item for item in feeds if isinstance(item, dict) and item.get("name") and item.get("url")]
     if env_feeds:
         return env_feeds
-    return [{"name": item["name"], "url": item["feed_url"], "allowed_domains": item["allowed_domains"]} for item in db.list_hotspot_sources(enabled_only=True)]
+    return [{
+        "name": item["name"],
+        "url": item["feed_url"],
+        "allowed_domains": item["allowed_domains"],
+        "source_kind": item.get("source_kind", "rss"),
+    } for item in db.list_hotspot_sources(enabled_only=True)]
 
 
 def _domain_allowed(url: str, allowed_domains: list[str]) -> bool:
@@ -186,6 +231,53 @@ def parse_feed(xml_text: str, feed: dict) -> list[dict]:
         if link and KEYWORDS.search(f"{title} {plain_summary}"):
             items.append({"title": title[:300], "summary": re.sub(r"\s+", " ", plain_summary).strip()[:2000], "source_url": link, "publisher": feed["name"], "published_at": published[:100]})
     return items
+
+
+def parse_html_index(html_text: str, feed: dict) -> list[dict]:
+    """Parse official media-centre pages that do not expose RSS/Atom."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    allowed_domains = feed.get("allowed_domains") or [urlparse(feed["url"]).hostname]
+    results: list[dict] = []
+    seen: set[str] = set()
+    for anchor in soup.select("article a[href], main a[href], .content a[href], a[href]"):
+        title = " ".join(anchor.get_text(" ", strip=True).split())
+        href = str(anchor.get("href") or "").strip()
+        if len(title) < 12 or not href:
+            continue
+        source_url = urljoin(feed["url"], href)
+        if not source_url.startswith("https://") or not _domain_allowed(source_url, allowed_domains):
+            continue
+        if source_url.rstrip("/") == str(feed["url"]).rstrip("/") or source_url in seen:
+            continue
+        parent_text = " ".join(anchor.parent.get_text(" ", strip=True).split())[:2000]
+        if not KEYWORDS.search(f"{title} {parent_text}"):
+            continue
+        published_at = ""
+        date_match = re.search(
+            r"\b(?:\d{1,2}\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}\b"
+            r"|\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b",
+            parent_text,
+            re.I,
+        )
+        if date_match:
+            raw_date = re.sub(r"\s+", " ", date_match.group(0).replace(",", "")).strip()
+            for date_format in ("%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"):
+                try:
+                    published_at = datetime.strptime(raw_date, date_format).replace(tzinfo=timezone.utc).isoformat()
+                    break
+                except ValueError:
+                    continue
+        seen.add(source_url)
+        results.append({
+            "title": title[:300],
+            "summary": parent_text,
+            "source_url": source_url,
+            "publisher": feed["name"],
+            "published_at": published_at,
+        })
+        if len(results) >= 60:
+            break
+    return results
 
 
 def _og_image(page_html: str) -> str | None:
@@ -240,7 +332,7 @@ async def fetch_hotspots(
             health = {"name": feed.get("name", "unknown"), "status": "ok", "items": 0, "error": ""}
             try:
                 feed_response = await client.get(feed["url"]); feed_response.raise_for_status()
-                feed_items = parse_feed(feed_response.text, feed)
+                feed_items = parse_html_index(feed_response.text, feed) if feed.get("source_kind") == "html_index" else parse_feed(feed_response.text, feed)
                 health["items"] = len(feed_items)
                 for item in feed_items:
                     if not _domain_allowed(item["source_url"], allowed_domains):
@@ -273,16 +365,13 @@ async def fetch_hotspots(
                         })
                     media_rights_tier, media_rights_note = configured_source_rights()
                     for candidate in hotspot_media.discover_media_candidates(article_response.text, final_url):
-                        if candidate.get("media_kind") == "image":
-                            # 批16：RSS 自动灌入不再落图片行（新闻配图噪音，永不用于成片）。
-                            # og:image 已单独存 hotspots.image_candidate_url 供卡片缩略图，此处跳过无副作用。
-                            continue
                         db.upsert_hotspot_media({
                             **candidate,
                             "hotspot_id": hotspot_id,
                             "publisher": item["publisher"],
                             "author": item["publisher"],
                             "published_at": item.get("published_at"),
+                            "authorization_status": media_rights_tier,
                             "rights_tier": media_rights_tier,
                             "rights_note": media_rights_note,
                             "download_status": "metadata_ready",
@@ -354,7 +443,8 @@ async def fetch_hotspots(
                                 "publisher": "Wikimedia Commons",
                                 "author": licensed["attribution"],
                                 "mime_type": licensed["mime"],
-                                "rights_tier": "green",
+                                "authorization_status": "authorized",
+                                "rights_tier": "authorized",
                                 "rights_note": "开放许可补充图，不自动视为新闻现场",
                                 "license_name": licensed["license"],
                                 "rights_evidence_url": licensed["description_url"],

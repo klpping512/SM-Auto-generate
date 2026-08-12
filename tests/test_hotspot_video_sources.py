@@ -28,6 +28,11 @@ def test_default_youtube_sources_are_the_approved_channels():
         "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ",
         "https://www.youtube.com/@BusinessDayTelevision",
         "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw",
+        "https://www.youtube.com/@SANRALCorporate",
+        "https://www.youtube.com/user/ParliamentofRSA",
+        "https://www.youtube.com/user/JusticeGOVZA",
+        "https://www.youtube.com/user/GovernmentZA",
+        "https://www.youtube.com/c/sabcdigitalnews",
     ]
     assert [item["name"] for item in hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS] == [
         "eNCA",
@@ -35,8 +40,13 @@ def test_default_youtube_sources_are_the_approved_channels():
         "CNBC Africa",
         "BusinessDayTV",
         "Transnet NPA",
+        "SANRAL Corporate",
+        "Parliament of RSA",
+        "JusticeGOVZA",
+        "GovernmentZA",
+        "SABC News",
     ]
-    transnet = hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS[-1]
+    transnet = next(item for item in hotspot_video_sources.DEFAULT_YOUTUBE_CHANNELS if item["name"] == "Transnet NPA")
     assert transnet["evergreen"] is True
     assert int(transnet["min_downloadable"]) == 10
     assert int(transnet["playlist_scan_cap"]) == 20
@@ -204,7 +214,7 @@ def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):
     assert len(signals) == 5
     assert {signal["source_type"] for signal in signals} == {"youtube"}
     assert all(item["platform"] == "youtube" for item in media)
-    assert all(item["rights_tier"] == "yellow" for item in media)
+    assert all(item["authorization_status"] == "authorized" for item in media)
     assert all(item["download_status"] == "metadata_ready" for item in media)
 
 

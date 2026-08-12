@@ -42,7 +42,7 @@ def test_hotspot_media_cards_show_dates_freshness_and_return_link():
 def test_hotspot_video_card_exposes_one_click_download_and_processing_states():
     page = PAGE.read_text(encoding="utf-8")
 
-    for text in ("仅链接", "待确认授权", "不可处理", "下载中", "分析中", "可匹配"):
+    for text in ("已授权链接", "已停用", "下载中", "分析中", "可匹配"):
         assert text in page
     assert "duration_seconds" in page
     assert "processing_status" in page

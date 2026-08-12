@@ -242,9 +242,9 @@ class HotspotMediaAttachRequest(BaseModel):
 
 
 class HotspotMediaRightsRequest(BaseModel):
-    authorization_status: str = Field(default="pending_review", pattern=r"^(authorized|pending_review|blocked)$")
-    # 兼容旧客户端；新界面和接口文档只使用 authorization_status。
-    rights_tier: str | None = Field(default=None, pattern=r"^(green|yellow|red)$")
+    authorization_status: str = Field(default="authorized", pattern=r"^(authorized|blocked)$")
+    # 旧客户端仍可提交该字段，但不会再形成绿/黄分层；任何非 red 值都按 authorized 处理。
+    rights_tier: str | None = Field(default=None, pattern=r"^(authorized|blocked|green|yellow|red)$")
     rights_note: str = Field(default="", max_length=2_000)
     license_name: str = Field(default="", max_length=300)
     attribution: str = Field(default="", max_length=500)
@@ -252,10 +252,11 @@ class HotspotMediaRightsRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_evidence_for_usable_media(self):
-        legacy = {"green": "authorized", "yellow": "pending_review", "red": "blocked"}
-        if self.rights_tier and self.authorization_status == "pending_review":
-            self.authorization_status = legacy[self.rights_tier]
-        if self.authorization_status == "authorized" or self.rights_tier in {"green", "yellow"}:
+        if self.rights_tier == "red":
+            self.authorization_status = "blocked"
+        elif self.rights_tier in {"authorized", "green", "yellow"}:
+            self.authorization_status = "authorized"
+        if self.authorization_status == "authorized":
             values = (
                 self.rights_note.strip(), self.license_name.strip(), self.attribution.strip(),
                 self.rights_evidence_url.strip(),

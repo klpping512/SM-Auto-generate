@@ -70,7 +70,7 @@ def test_materialization_guard_accepts_explicit_confirmation_and_blocks_red(tmp_
     validate_materialization(tmp_db.get_hotspot_media(yellow_id), "admin", True)
     with pytest.raises(ValueError, match="人工确认"):
         validate_materialization(tmp_db.get_hotspot_media(yellow_id), "admin", False)
-    with pytest.raises(ValueError, match="禁止"):
+    with pytest.raises(ValueError, match="停用"):
         validate_materialization(tmp_db.get_hotspot_media(red_id), "admin", True)
 
 

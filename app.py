@@ -134,9 +134,7 @@ def _ensure_bootstrap_admin() -> dict | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # The organization confirmed that its configured feeds and channel links
-    # are authorized.  Environment values still override these project defaults.
-    os.environ.setdefault("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "1")
+    # 批22：管理员配置即进入授权库；旧的全局绿/黄开关不再参与服务启动。
     os.environ.setdefault("HOTSPOT_PREWARM_ENABLED", "1")
     db.init_db()
     repaired_manual_categories = db.sync_assets_to_manual_segment_categories()
@@ -1672,7 +1670,7 @@ def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
         if score:
             facts.append({"evidence_type": "fact", "source_id": hotspot["id"], "content_role": "fact_context", "relevance_score": score * 20, "match_reason": "主题词与热点事实相符", "rights_status": "traceable"})
     for item in db.list_hotspot_media(lifecycle_status="active"):
-        if str(item.get("authorization_status") or "pending_review") not in {"authorized", "pending_review"}:
+        if str(item.get("authorization_status") or "authorized") == "blocked":
             continue
         text = " ".join(str(item.get(key) or "") for key in ("publisher", "source_page_url", "platform", "rights_note")).casefold()
         score = sum(1 for term in terms if term.casefold() in text)
@@ -3295,7 +3293,7 @@ async def list_hotspot_media(
 ):
     if media_kind and media_kind not in {"image", "video_link", "video_file"}:
         raise HTTPException(400, "热点素材类型无效")
-    if authorization_status and authorization_status not in {"authorized", "pending_review", "blocked"}:
+    if authorization_status and authorization_status not in {"authorized", "blocked"}:
         raise HTTPException(400, "热点素材授权状态无效")
     items = db.list_hotspot_media(
         hotspot_id=hotspot_id,
@@ -3469,7 +3467,7 @@ async def discover_hotspot_media(
             "publisher": hotspot.get("publisher") or "",
             "author": hotspot.get("publisher") or "",
             "published_at": hotspot.get("published_at"),
-            "authorization_status": "pending_review",
+            "authorization_status": "authorized",
             "download_status": "metadata_ready",
             "processing_status": "not_started",
         })
@@ -3517,7 +3515,7 @@ async def attach_hotspot_video(
         "publisher": metadata.get("author") or hotspot.get("publisher") or "",
         "author": metadata.get("author") or "",
         "published_at": hotspot.get("published_at"),
-        "authorization_status": "pending_review",
+        "authorization_status": "authorized",
         "download_status": "metadata_ready",
         "processing_status": "not_started",
     })
@@ -4098,7 +4096,7 @@ async def fetch_hotspots_now(user=Depends(require_role(UserRole.ADMIN))):
         raise HTTPException(502, "热点抓取失败，请查看信源状态后重试") from exc
 
 
-def _validate_hotspot_source(body: dict) -> tuple[str, str, list[str], bool]:
+def _validate_hotspot_source(body: dict) -> tuple[str, str, list[str], bool, str]:
     from urllib.parse import urlparse
     import ipaddress
     name = str(body.get("name") or "").strip()
@@ -4118,7 +4116,10 @@ def _validate_hotspot_source(body: dict) -> tuple[str, str, list[str], bool]:
     domains = sorted({str(value).strip().lower().lstrip(".") for value in domains if str(value).strip()}) or [host]
     if any("/" in domain or ":" in domain or domain == "localhost" or domain.endswith(".local") for domain in domains):
         raise HTTPException(400, "允许域名格式不正确")
-    return name[:100], feed_url, domains, bool(body.get("enabled", True))
+    source_kind = str(body.get("source_kind") or "rss").strip().casefold()
+    if source_kind not in {"rss", "html_index"}:
+        raise HTTPException(400, "可信源类型只支持 rss 或 html_index")
+    return name[:100], feed_url, domains, bool(body.get("enabled", True)), source_kind
 
 
 @app.get("/api/hotspot-sources")
@@ -4128,11 +4129,11 @@ async def list_hotspot_sources(user=Depends(require_role(UserRole.ADMIN))):
 
 @app.post("/api/hotspot-sources", status_code=201)
 async def create_hotspot_source(body: dict, user=Depends(require_role(UserRole.ADMIN))):
-    name, feed_url, domains, enabled = _validate_hotspot_source(body)
+    name, feed_url, domains, enabled, source_kind = _validate_hotspot_source(body)
     if enabled and len(db.list_hotspot_sources(enabled_only=True)) >= hotspot_fetcher.MAX_ENABLED_SOURCES:
         raise HTTPException(409, f"最多启用 {hotspot_fetcher.MAX_ENABLED_SOURCES} 个可信源，请先停用一个现有信源")
     try:
-        source_id = db.create_hotspot_source(name, feed_url, domains, user["id"], enabled)
+        source_id = db.create_hotspot_source(name, feed_url, domains, user["id"], enabled, source_kind)
     except Exception as exc:
         raise HTTPException(400, "该 Feed URL 已存在") from exc
     return {"id": source_id, "status": "ok"}
@@ -4140,13 +4141,13 @@ async def create_hotspot_source(body: dict, user=Depends(require_role(UserRole.A
 
 @app.put("/api/hotspot-sources/{source_id}")
 async def update_hotspot_source(source_id: int, body: dict, user=Depends(require_role(UserRole.ADMIN))):
-    name, feed_url, domains, enabled = _validate_hotspot_source(body)
+    name, feed_url, domains, enabled, source_kind = _validate_hotspot_source(body)
     current = next((item for item in db.list_hotspot_sources() if item["id"] == source_id), None)
     if not current:
         raise HTTPException(404, "可信源不存在")
     if enabled and not current["enabled"] and len(db.list_hotspot_sources(enabled_only=True)) >= hotspot_fetcher.MAX_ENABLED_SOURCES:
         raise HTTPException(409, f"最多启用 {hotspot_fetcher.MAX_ENABLED_SOURCES} 个可信源，请先停用一个现有信源")
-    db.update_hotspot_source(source_id, name, feed_url, domains, enabled)
+    db.update_hotspot_source(source_id, name, feed_url, domains, enabled, source_kind)
     return {"status": "ok"}
 
 

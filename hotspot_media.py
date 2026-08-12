@@ -380,8 +380,8 @@ def validate_materialization(item: dict, role: str, confirmed: bool) -> None:
         raise PermissionError("仅管理员可将热点媒体转为本地素材")
     if not confirmed:
         raise ValueError("必须完成人工确认后才能下载热点媒体")
-    if item.get("rights_tier") == "red":
-        raise ValueError("该热点媒体已被标记为禁止使用")
+    if item.get("authorization_status") == "blocked":
+        raise ValueError("该热点媒体已被管理员停用")
     if item.get("media_kind") not in {"video_link", "image"}:
         raise ValueError("只有尚未素材化的热点图片或单条视频链接可以下载")
 

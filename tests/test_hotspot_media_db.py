@@ -92,7 +92,7 @@ def test_hotspot_media_round_trip_deduplicates_by_hotspot_and_url(tmp_db):
     item = tmp_db.get_hotspot_media(media_id)
     assert item["media_kind"] == "video_link"
     assert item["platform"] == "youtube"
-    assert item["rights_tier"] == "yellow"
+    assert item["authorization_status"] == "authorized"
     assert tmp_db.list_hotspot_media(hotspot_id=hotspot_id, media_kind="video_link") == [item]
 
 
@@ -120,6 +120,7 @@ def test_hotspot_media_rights_confirmation_is_independent_from_download(tmp_db):
     item = tmp_db.get_hotspot_media(media_id)
     assert item["confirmed_by"] == 7
     assert item["confirmed_at"]
+    assert item["authorization_status"] == "authorized"
     assert item["download_status"] == "discovered"
 
 

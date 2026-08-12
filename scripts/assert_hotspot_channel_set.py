@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""铁律 C：断言当前生效 YouTube 频道清单 == 定稿 7 台（2026-08-06 回纳 SA Today/South Africa Now）。回落默认表则非 0 退出。"""
+"""批22：断言当前生效 YouTube 频道清单包含官方机构、港口/道路和可信新闻源。"""
 from __future__ import annotations
 
 import json
@@ -24,6 +24,11 @@ EXPECTED = [
     {"name": "Transnet NPA", "url": "https://www.youtube.com/channel/UCxTpqUzbY43I6g7U9ExpAlw"},
     {"name": "SA Today", "url": "https://www.youtube.com/@SAtoday"},
     {"name": "South Africa Now", "url": "https://www.youtube.com/@SouthAfricaNow1"},
+    {"name": "SANRAL Corporate", "url": "https://www.youtube.com/@SANRALCorporate"},
+    {"name": "Parliament of RSA", "url": "https://www.youtube.com/user/ParliamentofRSA"},
+    {"name": "JusticeGOVZA", "url": "https://www.youtube.com/user/JusticeGOVZA"},
+    {"name": "GovernmentZA", "url": "https://www.youtube.com/user/GovernmentZA"},
+    {"name": "SABC News", "url": "https://www.youtube.com/c/sabcdigitalnews"},
 ]
 
 FORBIDDEN_NAMES = {"SABC Digital News", "Moneyweb", "SABC"}
@@ -66,9 +71,9 @@ def main() -> int:
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if not ok:
-        print("ASSERT FAIL: configured_channels() != 定稿 7 台（或仍 default_fallback / 含禁入台）", file=sys.stderr)
+        print("ASSERT FAIL: configured_channels() != 批22频道清单（或仍 default_fallback / 含禁入台）", file=sys.stderr)
         return 2
-    print("ASSERT OK: YouTube env_override == 定稿 7 台")
+    print("ASSERT OK: YouTube env_override == 批22频道清单")
     return 0
 
 

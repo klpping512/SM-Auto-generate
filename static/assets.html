@@ -147,7 +147,7 @@ function renderHotspotLibrary(){
 }
 function renderInspirations(){viewMode='hotspot';hotspotSubView='inspirations';renderHotspotLibrary();}
 function hotspotHasCuratedHooks(item){const detail=String(item.progress_detail||'');return item.processing_status==='ready'&&/筛出\s*\d+\s*条/.test(detail);}
-function hotspotStatusLabel(item){if(item.authorization_status==='blocked')return '不可处理';if(['pending','downloading'].includes(item.download_status))return '下载中';if(item.processing_status==='processing')return '分析中';if(item.processing_status==='ready'){const detail=String(item.progress_detail||'');if(detail.includes('未筛出'))return '已分析无 Hook';if(hotspotHasCuratedHooks(item))return 'Hook 已分析';return '已分析';}if(item.download_status==='download_failed'||item.processing_status==='processing_failed')return '处理失败';if(item.authorization_status==='pending_review')return '待确认授权';return '仅链接';}
+function hotspotStatusLabel(item){if(item.authorization_status==='blocked')return '已停用';if(['pending','downloading'].includes(item.download_status))return '下载中';if(item.processing_status==='processing')return '分析中';if(item.processing_status==='ready'){const detail=String(item.progress_detail||'');if(detail.includes('未筛出'))return '已分析无 Hook';if(hotspotHasCuratedHooks(item))return 'Hook 已分析';return '已分析';}if(item.download_status==='download_failed'||item.processing_status==='processing_failed')return '处理失败';return '已授权链接';}
 function hotspotMediaProgress(item){
   if(item.download_status==='download_failed'||item.processing_status==='processing_failed')return {pct:100,label:'处理失败',detail:item.error_message||'可稍后重试'};
   if(item.processing_status==='ready')return {pct:100,label:'已完成',detail:item.progress_detail||'已进入原本素材库，可用于成片'};

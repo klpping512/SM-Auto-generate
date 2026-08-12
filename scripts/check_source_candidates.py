@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 0 信源连通性探针：YouTube 母片层 + RSS 线索层。纯探测，不写库、不改配置、不翻授权。"""
+"""信源连通性探针：YouTube 母片层 + RSS/HTML 线索层。纯探测，不写库、不改配置。"""
 from __future__ import annotations
 
 import argparse
@@ -353,7 +353,7 @@ def main() -> int:
 
     proxy = _proxy()
     print(f"proxy={_mask_proxy(proxy)}")
-    print(f"AUTHORIZED_FLAG={os.environ.get('HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED', '(unset)')}  # Step0 禁止翻闸")
+    print("AUTHORIZED_FLAG=retired  # 批22 不再使用全局绿/黄授权闸")
 
     if args.expected_channels_json.strip():
         expected = json.loads(args.expected_channels_json)
@@ -463,7 +463,7 @@ def main() -> int:
     print("YouTube alive:", ", ".join(f"{r['name']}(Y-hit {r['filter_hits']}/{r['count']})" for r in yt_alive) or "(none)")
     print("RSS alive:", ", ".join(f"{r['name']}→{r['hit_url']}" for r in rss_alive) or "(none)")
     print()
-    print("铁律 D 提醒：定稿频道集 + 停用死源 + 启用集断言通过之前，勿设 HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED=1。")
+    print("批22 提醒：管理员新增信源后仍需检查来源健康、许可证和真实画面，不再翻全局授权闸。")
     print("铁律 E 提醒：日后 H-hit 须把 budget/JSON/server-disconnect 技术失败从分母剔除并单列。")
 
     summary = {

@@ -14,7 +14,7 @@ import hotspot_topic_packages
 
 
 DEFAULT_YOUTUBE_CHANNELS = [
-    # 2026-08-05 定稿：综合走量骨架 + 商业/港口垂直。不含 SA Today / SAN / SABC / Moneyweb YT。
+    # 批22：官方机构、港口/道路和可信新闻视频共同供给；仅读取公开视频元数据。
     {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
     {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV"},
     {"name": "CNBC Africa", "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"},
@@ -27,6 +27,11 @@ DEFAULT_YOUTUBE_CHANNELS = [
         "min_downloadable": 10,
         "playlist_scan_cap": 20,
     },
+    {"name": "SANRAL Corporate", "url": "https://www.youtube.com/@SANRALCorporate"},
+    {"name": "Parliament of RSA", "url": "https://www.youtube.com/user/ParliamentofRSA"},
+    {"name": "JusticeGOVZA", "url": "https://www.youtube.com/user/JusticeGOVZA"},
+    {"name": "GovernmentZA", "url": "https://www.youtube.com/user/GovernmentZA"},
+    {"name": "SABC News", "url": "https://www.youtube.com/c/sabcdigitalnews"},
 ]
 DEFAULT_CHANNEL_VIDEO_LIMIT = 8
 MAX_CHANNEL_VIDEO_LIMIT = 24
@@ -149,9 +154,7 @@ INTAKE_METADATA_LIMIT = 500
 
 
 def _configured_source_authorization() -> tuple[str, str]:
-    if os.environ.get("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "0") == "1":
-        return "authorized", "已配置频道已获企业授权，可自动下载分析；仅限已授权使用范围。"
-    return "pending_review", "公开视频仅作线索，需确认授权后下载分析。"
+    return "authorized", "管理员已将该视频信源纳入授权范围，可自动下载分析。"
 
 
 def _published_at(entry: dict) -> str | None:

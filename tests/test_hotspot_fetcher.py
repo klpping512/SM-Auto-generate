@@ -26,6 +26,41 @@ def test_feed_parser_accepts_whitespace_before_xml_declaration():
     assert len(items) == 1
 
 
+def test_batch22_configured_sources_ignore_legacy_green_yellow_gate(monkeypatch):
+    monkeypatch.setenv("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "0")
+
+    status, note = hotspot_fetcher.configured_source_rights()
+
+    assert status == "authorized"
+    assert "绿" not in note and "黄" not in note
+    assert {item["name"] for item in hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES} >= {
+        "Border Management Authority", "SANRAL", "Transnet National Ports Authority",
+        "Transnet Port Terminals", "SAMSA", "SARS Customs Updates",
+    }
+    assert {item["source_kind"] for item in hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES if "source_kind" in item} == {"html_index"}
+
+
+def test_html_index_parser_extracts_official_logistics_items_and_date():
+    html = """
+    <main>
+      <article><a href="/media/road-closure">Road closure update for N3 freight route</a><span>12 August 2026</span></article>
+      <article><a href="/media/careers">Careers at the agency</a></article>
+      <article><a href="https://evil.example/not-allowed">Durban port operations update</a></article>
+    </main>
+    """
+
+    items = hotspot_fetcher.parse_html_index(html, {
+        "name": "SANRAL",
+        "url": "https://www.nra.co.za/media-centre",
+        "allowed_domains": ["nra.co.za"],
+        "source_kind": "html_index",
+    })
+
+    assert len(items) == 1
+    assert items[0]["source_url"] == "https://www.nra.co.za/media/road-closure"
+    assert items[0]["published_at"].startswith("2026-08-12T00:00:00")
+
+
 @pytest.mark.asyncio
 async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, tmp_path, monkeypatch):
     monkeypatch.setenv("HOTSPOT_COMMONS_IMAGE_ENABLED", "1")
@@ -62,7 +97,7 @@ async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, t
     assert result == {
         "feeds": 1, "new": 1, "updated": 0, "assets": 1, "skipped": 0,
         "errors": [], "media_errors": [],
-        "packages": 1, "signals": 1, "media_candidates": 3,
+        "packages": 1, "signals": 1, "media_candidates": 4,
         "source_health": [{"name": "Official News", "status": "ok", "items": 1, "error": ""}],
     }
     hotspot = tmp_db.list_hotspots()[0]
@@ -83,12 +118,11 @@ async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, t
     assert "不自动视为" in supporting["summary"]
     assert supporting["materialization_status"] == "materialized"
     media = tmp_db.list_hotspot_media(hotspot_id=hotspot["id"])
-    # 批16：RSS 自动灌入不再落 image 行（og:image 仍单独存 hotspots.image_candidate_url）；
-    # video_link 与 Wikimedia Commons 授权配图（独立下载通道）仍正常落库。
+    # 批22：RSS 文章中的视频与图片候选均进入授权库；Commons 配图仍走独立下载通道。
     assert {(item["media_kind"], item["platform"]) for item in media} == {
-        ("video_link", "direct"), ("video_link", "youtube"), ("image", "commons")
+        ("image", "direct"), ("video_link", "direct"), ("video_link", "youtube"), ("image", "commons")
     }
-    assert all(item["rights_tier"] in {"green", "yellow"} for item in media)
+    assert all(item["authorization_status"] == "authorized" for item in media)
     draft = hotspot_content.compose(hotspot)
     assert "【事实速览】" in draft["body"]
     assert "【Buffalo 观点】" in draft["body"]
@@ -238,7 +272,7 @@ def test_reseed_disables_dead_sources_before_enabling_freight(tmp_db):
     spec.loader.exec_module(mod)
     report = mod.reseed(dry_run=False)
     assert report["ok"] is True
-    assert report["enabled_count"] == 7
+    assert report["enabled_count"] == len(hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES)
     assert "Freight News" in report["enabled_names"]
     assert all(name not in report["enabled_names"] for name in (
         "South African Government", "South African Reserve Bank", "BusinessTech", "The Citizen",

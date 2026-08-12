@@ -99,7 +99,7 @@ def test_hotspot_workbench_uses_bilingual_cache_and_links_to_hotspot_library():
     assert "/api/hotspot-media?hotspot_id=" in page
     assert "热点视频候选" in page
     assert "热点图片候选" in page
-    assert "绿色" in page and "黄色" in page and "红色" in page
+    assert "已授权" in page and "已停用" in page
     assert "assets.html?library=hotspot&hotspot_id=" in page
 
 

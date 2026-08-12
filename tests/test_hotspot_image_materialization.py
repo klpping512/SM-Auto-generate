@@ -62,7 +62,7 @@ def test_image_materialization_guard_accepts_one_click_confirmation_and_rejects_
     _, red_id = _image_media(tmp_db, rights_tier="red", confirmed=False)
 
     validate_materialization(tmp_db.get_hotspot_media(allowed_id), "admin", True)
-    with pytest.raises(ValueError, match="禁止"):
+    with pytest.raises(ValueError, match="停用"):
         validate_materialization(tmp_db.get_hotspot_media(red_id), "admin", True)
 
 

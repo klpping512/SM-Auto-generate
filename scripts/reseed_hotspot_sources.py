@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""铁律 A：先停用 RSS 死源腾坑，再启用 Freight News；并断言启用集。
+"""批22：补齐官方、港口/边境、道路和货运信源，并断言启用集。
 
-顺序不可颠倒。纯运维脚本；不翻 HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED。
+只负责补齐数据库中的可信源，不依赖旧的全局授权开关。
 """
 from __future__ import annotations
 
@@ -31,15 +31,7 @@ DISABLE_MATCHERS = (
     ("url_substr", "businesstech.co.za"),
 )
 
-EXPECTED_ENABLED_NAMES = {
-    "SAnews",
-    "SARS",
-    "Department of Transport",
-    "Moneyweb",
-    "Daily Maverick",
-    "The South African",
-    "Freight News",
-}
+EXPECTED_ENABLED_NAMES = {source["name"] for source in hotspot_fetcher.DEFAULT_OFFICIAL_SOURCES}
 
 FREIGHT = {
     "name": "Freight News",
@@ -172,7 +164,7 @@ def main() -> int:
     if not report["ok"]:
         print("ASSERT FAIL: RSS enabled set != expected", file=sys.stderr)
         return 2
-    print("ASSERT OK: RSS enabled set matches expected 7 sources")
+    print("ASSERT OK: enabled set matches batch22 default sources")
     return 0
 
 

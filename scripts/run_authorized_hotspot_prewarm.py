@@ -32,7 +32,6 @@ parser.add_argument(
 args = parser.parse_args()
 if args.channel_video_limit is not None:
     os.environ["HOTSPOT_YOUTUBE_CHANNEL_VIDEO_LIMIT"] = str(max(1, min(12, args.channel_video_limit)))
-os.environ.setdefault("HOTSPOT_CONFIGURED_SOURCES_AUTHORIZED", "1")
 # Explicit operator command: enable sync unless this is a metadata-only fetch.
 # `--fetch-only` must never force the scheduler prewarm gate on.
 if not args.fetch_only:
@@ -52,18 +51,9 @@ async def main() -> int:
     fetched = await hotspot_fetcher.fetch_hotspots(
         PROJECT_ROOT / "static", created_by=admin["id"], video_channels=hotspot_fetcher.configured_video_channels(),
     )
-    # Existing metadata was collected before the organization-level approval
-    # switch existed.  The user confirmed all currently configured sources are
-    # in scope, so promote only their pending records before warming the cache.
+    # Existing metadata is migrated by init_db; batch22 has no green/yellow
+    # approval queue. Keep this summary field for old operators' reports.
     promoted = 0
-    for item in db.list_hotspot_media(lifecycle_status="active", authorization_status="pending_review", limit=500):
-        if item.get("platform") not in {"youtube", "direct", "tiktok"}:
-            continue
-        db.update_hotspot_media_authorization(
-            item["id"], "authorized", "已配置信源已获企业授权，可自动下载分析；仅限已授权使用范围。",
-            item.get("license_name"), item.get("attribution"), item.get("rights_evidence_url"), admin["id"],
-        )
-        promoted += 1
     media_ids = []
     for raw in str(args.media_ids or "").split(","):
         try:

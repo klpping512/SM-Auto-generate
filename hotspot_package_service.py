@@ -159,7 +159,7 @@ def get_package_detail(hotspot_id: int) -> dict | None:
     groups = {"video": [], "image": [], "text": signals}
     for item in media:
         groups[_media_form(item)].append(item)
-    rights = Counter(str(item.get("rights_tier") or "unknown") for item in media)
+    rights = Counter(str(item.get("authorization_status") or "authorized") for item in media)
     event_type = package.get("event_type") or "unknown"
     readiness = derive_hook_readiness(hotspot_id, media=media, clips=clips)
     card = {
@@ -262,8 +262,8 @@ def prepare_media(media_id: int, user: dict) -> dict:
     package = db.get_hotspot_package(int(item["hotspot_id"]))
     if not package or package.get("package_status") != "confirmed":
         raise PermissionError("请先确认热点专题包，再准备单个媒体")
-    if item.get("rights_tier") in {"red", "unknown"}:
-        raise PermissionError("媒体权利状态不允许准备分析")
+    if item.get("authorization_status") == "blocked":
+        raise PermissionError("该媒体已被管理员停用")
     if item.get("download_status") in {"pending", "downloading", "downloaded"}:
         raise RuntimeError("该热点媒体正在下载或已经素材化")
     db.update_hotspot_media_state(
