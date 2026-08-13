@@ -89,6 +89,19 @@ AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v6"
 
 _LEISURE_TITLE_MARKERS = ("休闲", "海滨", "海滩", "度假", "观光", "打卡游玩")
 _EMERGENCY_VISUAL_MARKERS = ("急救", "救护", "燃烧", "浓烟", "火灾", "火光", "事故", "残骸", "车祸")
+_RECALL_MARKERS = (
+    "道路", "公路", "车辆", "汽车", "卡车", "货车", "交通", "排队", "施工", "路面", "坑洞",
+    "港口", "码头", "船", "集装箱", "起重机", "仓库", "配送", "清关", "边境", "检查站",
+    "抗议", "学生", "人群", "游行", "警察", "救援", "火灾", "燃烧", "浓烟", "事故", "残骸",
+    "积雪", "下雪", "暴雨", "雨水", "冰雹", "洪水", "水车", "献花", "纪念", "采访", "户外",
+    "road", "highway", "vehicle", "truck", "traffic", "queue", "construction", "pothole", "port",
+    "ship", "container", "warehouse", "border", "checkpoint", "protest", "student", "crowd",
+    "police", "rescue", "fire", "smoke", "accident", "snow", "rain", "hail", "flood", "outdoor",
+)
+_RECALL_ANCHOR_MARKERS = (
+    "主播", "演播室", "新闻播报", "新闻节目", "标题页", "台标", "字幕", "地图", "图表", "分屏",
+    "anchor", "studio", "news desk", "title card", "logo", "map", "infographic", "split screen",
+)
 
 
 def _title_contradicts_visual(title_zh: str, visual: dict | None) -> bool:
@@ -434,6 +447,44 @@ def _has_safe_hook_window(segments: list[dict]) -> bool:
     return False
 
 
+def _retry_recall_segments(segments: list[dict], max_segments: int = 36) -> list[dict]:
+    """Compress a conservative empty-result retry to high-signal scene windows.
+
+    Long news packages often contain dozens of near-identical anchor/title-card
+    segments. Sending the whole package again makes the model over-apply the
+    rejection rule and miss a short road, protest, rescue, or outdoor window.
+    This helper only changes the retry evidence set; the returned Hook still has
+    to pass the normal parser, visual audit, text audit, and timely-target audit.
+    """
+    ordered = sorted(segments, key=lambda item: int(item.get("segment_index") or 0))
+    if len(ordered) <= max_segments:
+        return ordered
+    ranked: list[tuple[int, int]] = []
+    for position, item in enumerate(ordered):
+        blob = " ".join(
+            [
+                str(item.get("description") or ""),
+                str(item.get("transcript") or ""),
+                str(item.get("ocr_text") or ""),
+                " ".join(str(tag.get("value") or "") for tag in (item.get("tags") or [])),
+            ]
+        ).lower()
+        score = sum(1 for marker in _RECALL_MARKERS if marker.lower() in blob)
+        score -= sum(2 for marker in _RECALL_ANCHOR_MARKERS if marker.lower() in blob)
+        if score > 0:
+            ranked.append((score, position))
+    if not ranked:
+        return ordered[:max_segments]
+
+    selected_positions: set[int] = set()
+    for _score, position in sorted(ranked, reverse=True):
+        selected_positions.update(range(max(0, position - 1), min(len(ordered), position + 2)))
+        if len(selected_positions) >= max_segments:
+            break
+    selected = [item for position, item in enumerate(ordered) if position in selected_positions]
+    return selected[:max_segments]
+
+
 def _empty_result_repair_instruction() -> str:
     return (
         "上一轮返回了空 hooks 或候选未通过后端确定性门禁，但后端确定性检查确认至少存在一个连续 "
@@ -538,7 +589,17 @@ def curate_hook_clips(
         # Spend the workflow's one existing retry on a neutral-scene repair;
         # never retry when all windows are deterministically unusable.
         if not hooks and _has_safe_hook_window(ordered):
-            messages.append({"role": "user", "content": _empty_result_repair_instruction()})
+            retry_segments = _retry_recall_segments(ordered)
+            messages = [
+                {"role": "system", "content": "严格返回 JSON，不要 Markdown，不得补充镜头外事实。"},
+                {
+                    "role": "user",
+                    "content": _prompt(source_title, source_context, retry_segments)
+                    + "\n"
+                    + _empty_result_repair_instruction()
+                    + "注意：只使用上面提供的实际连续 segment_index，不要跨越缺号拼接镜头。",
+                },
+            ]
             result = _call(use_cache=False)
             hooks = _try_parse(result, 2)
             retried_empty = True
