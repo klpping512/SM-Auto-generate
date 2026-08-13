@@ -222,6 +222,15 @@ def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):
     assert all(item["download_status"] == "metadata_ready" for item in media)
 
 
+def test_youtube_precheck_is_opt_in(monkeypatch):
+    import hotspot_video_sources
+
+    monkeypatch.delenv("HOTSPOT_YOUTUBE_PRECHECK", raising=False)
+    assert hotspot_video_sources.youtube_precheck_enabled() is False
+    monkeypatch.setenv("HOTSPOT_YOUTUBE_PRECHECK", "1")
+    assert hotspot_video_sources.youtube_precheck_enabled() is True
+
+
 def test_channel_discovery_allows_a_bounded_admin_backfill_batch(tmp_db):
     import hotspot_video_sources
 
@@ -391,8 +400,10 @@ def test_channel_failure_is_isolated_in_health_result(tmp_db):
 
 
 @pytest.mark.asyncio
-async def test_main_hotspot_fetch_combines_youtube_channel_results(tmp_db, tmp_path):
+async def test_main_hotspot_fetch_combines_youtube_channel_results(tmp_db, tmp_path, monkeypatch):
     import hotspot_fetcher
+
+    monkeypatch.setenv("HOTSPOT_YOUTUBE_PRECHECK", "1")
 
     def runner(command, **kwargs):
         if "-F" in command:

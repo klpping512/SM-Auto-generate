@@ -50,6 +50,13 @@ except ValueError:
     CHANNEL_VIDEO_LIMIT = DEFAULT_CHANNEL_VIDEO_LIMIT
 
 
+def youtube_precheck_enabled() -> bool:
+    """Return whether intake should run a per-video ``yt-dlp -F`` probe."""
+    # A stalled format probe can block an entire channel. Normal intake reads
+    # metadata first and lets the actual downloader record failures per item.
+    return str(os.environ.get("HOTSPOT_YOUTUBE_PRECHECK", "0")).strip() == "1"
+
+
 def _normalize_channel(item: dict, *, inherit: dict | None = None) -> dict | None:
     name = str(item.get("name") or "").strip()
     url = str(item.get("url") or "").strip().rstrip("/")

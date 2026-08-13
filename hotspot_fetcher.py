@@ -484,6 +484,7 @@ async def fetch_hotspots(
                 hotspot_video_sources.fetch_youtube_channel_hotspots,
             video_channels,
             **({"limit": video_limit} if video_limit is not None else {}),
+            precheck=hotspot_video_sources.youtube_precheck_enabled(),
             **kwargs,
             )
             result.update({
