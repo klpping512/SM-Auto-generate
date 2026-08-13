@@ -74,6 +74,18 @@ def test_agriculture_field_payload_is_accepted_and_not_forced_into_port():
     assert flags["scene_type"] == "agriculture"
 
 
+def test_port_label_without_visible_port_evidence_is_normalized_to_other():
+    import hotspot_hook_visual_audit as visual
+
+    ok, flags = visual._decision_from_payload(_port_accept_payload(
+        visible_objects=["人群", "花束", "山脉", "墓碑"],
+        visible_actions=["献花", "站立"],
+        reason="户外纪念活动",
+    ))
+    assert ok is True
+    assert flags["scene_type"] == "other"
+
+
 def test_missing_source_video_rejects_without_confirming(tmp_db, monkeypatch):
     import hotspot_hook_visual_audit as visual
 

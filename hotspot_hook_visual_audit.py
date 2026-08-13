@@ -19,7 +19,7 @@ from typing import Any
 import model_router
 from video_quality.frame_extractor import extract_at_timestamps
 
-VISUAL_AUDIT_PROMPT_VERSION = "hotspot-hook-visual-audit-v2-scene-taxonomy"
+VISUAL_AUDIT_PROMPT_VERSION = "hotspot-hook-visual-audit-v3-scene-grounding"
 SCENE_TYPES = {
     "port", "border", "road", "warehouse", "delivery", "agriculture", "other", "non_event",
 }
@@ -121,6 +121,9 @@ def _visual_prompt(start_ms: int, end_ms: int) -> str:
         "不得参考任何母片标题、新闻摘要或策划文案（本请求也不会提供这些信息）。"
         f"候选时间窗：{start_ms}-{end_ms} 毫秒。"
         "描述你实际看到的对象、动作、场景类型，并判断是否为标题页/Logo/主播/演播室/地图/信息图/空镜。"
+        "场景类型必须由可见物证支持：port 仅限能看到船舶、集装箱、港口吊机、码头或港池；"
+        "border 仅限边检/海关/口岸设施；road 需要道路或车辆；warehouse 需要仓库/货架；"
+        "delivery 需要配送车辆或包裹；agriculture 需要农田/牧场/牲畜。无法对应时用 other。"
         "严格返回单行 JSON："
         '{"accepted":true,"scene_type":"port|border|road|warehouse|delivery|agriculture|other|non_event",'
         '"visible_objects":["仅列实际可见对象"],"visible_actions":["仅列实际可见动作"],'
@@ -182,6 +185,19 @@ def _decision_from_payload(payload: dict) -> tuple[bool, dict]:
         scene_type = "non_event"
     objects = [str(item).strip()[:40] for item in (payload.get("visible_objects") or []) if str(item).strip()][:12]
     actions = [str(item).strip()[:40] for item in (payload.get("visible_actions") or []) if str(item).strip()][:12]
+    visible_text = " ".join(objects + actions).casefold()
+    grounded_markers = {
+        "port": ("船", "集装箱", "吊机", "码头", "港口", "港池", "container", "crane", "ship", "harbour", "harbor"),
+        "border": ("边检", "海关", "口岸", "border", "customs"),
+        "road": ("道路", "公路", "街道", "车辆", "卡车", "road", "street", "vehicle", "truck"),
+        "warehouse": ("仓库", "货架", "warehouse", "shelf"),
+        "delivery": ("配送", "包裹", "delivery", "parcel"),
+        "agriculture": ("农田", "牧场", "牲畜", "牛", "农场", "farm", "field"),
+    }
+    if scene_type in grounded_markers and not any(
+        marker.casefold() in visible_text for marker in grounded_markers[scene_type]
+    ):
+        scene_type = "other"
     flags = {
         "accepted": bool(payload.get("accepted") is True),
         "supports_visible_event": bool(payload.get("supports_visible_event") is True),
