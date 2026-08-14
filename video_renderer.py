@@ -64,6 +64,47 @@ TTS_RETRY_DELAY_SECONDS = 1.0
 PORTRAIT_FRAME_POLICY = "full_bleed_center_crop"
 
 
+def _contains_cjk(text: str) -> bool:
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in str(text or "")
+    )
+
+
+def _subtitle_font_candidates() -> list[str]:
+    configured = str(os.environ.get("SUBTITLE_FONT_PATH") or "").strip()
+    return [item for item in [
+        configured,
+        # macOS development machine
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        # Rocky/RHEL package: google-noto-sans-cjk-ttc-fonts
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-sans-cjk-ttc/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJKsc-Regular.otf",
+    ] if item]
+
+
+def _load_subtitle_font(text: str, font_size: int):
+    """Load a font with CJK glyphs; never silently render Chinese as tofu boxes."""
+    for font_path in _subtitle_font_candidates():
+        if not Path(font_path).exists():
+            continue
+        try:
+            return ImageFont.truetype(font_path, font_size)
+        except Exception:
+            logger.warning("字幕字体无法读取: %s", font_path, exc_info=True)
+    if _contains_cjk(text):
+        raise RuntimeError(
+            "云端未找到支持中文的字幕字体；请安装 Noto CJK，或设置 SUBTITLE_FONT_PATH"
+        )
+    return ImageFont.load_default()
+
+
 def tts_voice_options(*, mimo_available: bool | None = None) -> list[dict]:
     """Return selectable TTS voices (MiMo single track) with availability flags."""
     mimo_ok = bool(os.environ.get("MIMO_API_KEY")) if mimo_available is None else bool(mimo_available)
@@ -587,16 +628,7 @@ def _generate_text_overlay(
     img = Image.new('RGBA', (width, overlay_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    font = None
-    for fp in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]:
-        if Path(fp).exists():
-            try:
-                font = ImageFont.truetype(fp, font_size)
-                break
-            except Exception:
-                pass
-    if not font:
-        font = ImageFont.load_default()
+    font = _load_subtitle_font(text, font_size)
     
     lines, line = [], ""
     for char in text:
@@ -638,15 +670,8 @@ def _generate_watermark(text: str, output: Path, width: int):
     overlay_width = max(320, min(width - 40, 720))
     image = Image.new("RGBA", (overlay_width, 64), (25, 20, 14, 190))
     draw = ImageDraw.Draw(image)
-    font = None
-    for font_path in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]:
-        if Path(font_path).exists():
-            try:
-                font = ImageFont.truetype(font_path, 26)
-                break
-            except Exception:
-                pass
-    draw.text((overlay_width / 2, 32), text, font=font or ImageFont.load_default(), fill="white", anchor="mm")
+    font = _load_subtitle_font(text, 26)
+    draw.text((overlay_width / 2, 32), text, font=font, fill="white", anchor="mm")
     image.save(output)
 
 

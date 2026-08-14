@@ -461,6 +461,34 @@ def test_chat_hook_candidates_do_not_reuse_border_for_cost_risk_when_better_disr
     assert {hook["event_clip_id"] for hook in candidates[-1]["hook_clips"]} == {event["id"] for event in border_events}
 
 
+def test_chat_hook_candidates_bind_exact_audited_logistics_question(tmp_db):
+    import app
+    import database as db
+
+    hotspot_id, event = _create_ready_chat_hook(
+        db,
+        title="林波波省集装箱设施火情",
+        summary="夜间结构燃烧并出现烟雾",
+        event_title="夜间燃烧结构与烟雾",
+        what_happened="夜间一个大型结构持续燃烧，周围可见火光、烟雾和人员查看现场。",
+        logistics_question="集装箱类设施发生火情时，运输或存储环节如何核对安全状态？",
+        snapshot="container-fire-question",
+    )
+
+    candidates, _kb, _rag, _funnel = app._marketing_hook_candidates({
+        "raw_input": "请围绕 集装箱类设施发生火情时，运输或存储环节如何核对安全状态？生成一个视频",
+        "subject": "请围绕 集装箱类设施发生火情时，运输或存储环节如何核对安全状态？生成一个视频",
+        "angle": "从运输或存储环节说明核对安全状态的流程",
+        "goal": "基于已确认热点 Hook 生成 Buffalo 双素材库视频",
+    }, limit=8, hook_kind="timely_event")
+
+    assert candidates
+    assert candidates[0]["hotspot_id"] == hotspot_id
+    assert candidates[0]["hook_clips"][0]["event_clip_id"] == event["id"]
+    assert candidates[0]["hook_type"] == "curated_bridge"
+    assert candidates[0]["marketing_question"] == "集装箱类设施发生火情时，运输或存储环节如何核对安全状态？"
+
+
 def test_chat_video_nodes_include_only_logistics_actions_supported_by_locked_hook_evidence():
     import app
 

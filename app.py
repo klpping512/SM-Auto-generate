@@ -1947,6 +1947,7 @@ def _marketing_hook_candidates(
     terms = _topic_keywords(topic_text)
     specific_terms = [term for term in terms if term.casefold() not in _CHAT_HOOK_BROAD_TERMS]
     topic_profile = _chat_hook_topic_profile(topic_text)
+    compact_topic_text = re.sub(r"[\s，。！？；：、,.!?;:（）()\[\]【】\"'“”‘’]+", "", topic_text).casefold()
     # 服务主题（如“海外仓介绍”）允许由近期道路、边境、天气等真实事件
     # 作上下文开场；只有用户明确点名了事件、道路或事故时才要求事实文本
     # 精确命中，避免把 R60 事故换成另一个不相关热点。
@@ -2023,6 +2024,22 @@ def _marketing_hook_candidates(
             str((event.get("evidence") or {}).get("logistics_question") or "")
             for event in event_clips
         )
+        curated_questions = [
+            str((event.get("evidence") or {}).get("logistics_question") or "").strip()
+            for event in event_clips
+        ]
+        # A user who copies the Hook card's audited “物流切入” question is
+        # explicitly selecting that bridge.  The bridge is not treated as a
+        # visual fact, but it must be strong enough to retrieve the exact Hook;
+        # otherwise a generic evergreen opener wins and the selected real scene
+        # is silently replaced.
+        curated_question_exact = any(
+            question and (
+                re.sub(r"[\s，。！？；：、,.!?;:（）()\[\]【】\"'“”‘’]+", "", question).casefold() in compact_topic_text
+                or compact_topic_text in re.sub(r"[\s，。！？；：、,.!?;:（）()\[\]【】\"'“”‘’]+", "", question).casefold()
+            )
+            for question in curated_questions
+        )
         text = f"{parent_text} {hook_fact_text}".casefold()
         kind = hotspot_logistics_planner.classify_hotspot(hotspot)
         if kind == "unknown" and hook_fact_text:
@@ -2052,13 +2069,13 @@ def _marketing_hook_candidates(
                     )
                 )
         profile_overlap = len(topic_profile & event_profile)
-        if require_scene_overlap and topic_profile and not profile_overlap:
+        if require_scene_overlap and topic_profile and not profile_overlap and not curated_question_exact:
             funnel["scene_mismatch"] += 1
             continue
         # Broad-only topics (南非/物流 with no logistics category profile) must
         # not hit random accident Hooks. Topics that already resolved to a
         # category (cost_risk, warehouse, …) may still use intent_bridge below.
-        if not allow_broad_match and not topic_profile and not specific_terms:
+        if not allow_broad_match and not topic_profile and not specific_terms and not curated_question_exact:
             funnel["scene_mismatch"] += 1
             continue
         intent_bridge = 0
@@ -2066,7 +2083,7 @@ def _marketing_hook_candidates(
             intent_bridge = 12
         if "warehouse" in topic_profile and "border" in event_profile:
             intent_bridge = max(intent_bridge, 12)
-        if strict_terms and not specific_direct:
+        if strict_terms and not specific_direct and not curated_question_exact:
             funnel["relevance_low"] += 1
             continue
         # A hotspot's coarse type classification alone (kind_in_topics) is
@@ -2075,7 +2092,7 @@ def _marketing_hook_candidates(
         # "kind", which used to let unrelated events into every topic's
         # candidate set. It still contributes a small tie-break score below
         # once a candidate already qualifies on a real signal.
-        if not allow_broad_match and not direct and not profile_overlap and not intent_bridge:
+        if not allow_broad_match and not direct and not profile_overlap and not intent_bridge and not curated_question_exact:
             funnel["relevance_low"] += 1
             continue
         event_fit = 1 if kind_in_topics else 0
@@ -2083,7 +2100,10 @@ def _marketing_hook_candidates(
         if not hooks:
             funnel["relevance_low"] += 1
             continue
-        if kind == "strike":
+        selected_curated_question = next((question for question in curated_questions if question), "")
+        if selected_curated_question and curated_question_exact:
+            question = selected_curated_question
+        elif kind == "strike":
             question = "路线出现变化时，卖家应先核对哪些履约节点？"
         elif kind == "risk":
             question = "当地风险变化时，末端异常如何被提前识别和沟通？"
@@ -2139,13 +2159,14 @@ def _marketing_hook_candidates(
             "summary": (str(hotspot.get("summary_zh") or hotspot.get("summary") or "") + " " + hook_context_text)[:500],
             "source_url": hotspot.get("source_url"), "published_at": hotspot.get("published_at"),
             "published_ts": published_ts,
-            "hook_type": "direct" if direct else "contextual", "logistics_signal": kind,
+            "hook_type": "direct" if direct else ("curated_bridge" if curated_question_exact else "contextual"), "logistics_signal": kind,
             "logistics_scenes": sorted(event_profile),
             "relevance": {
-                "level": "strong_direct" if direct else "strong_logistics_context",
+                "level": "strong_direct" if direct or curated_question_exact else "strong_logistics_context",
                 "reason": (
                     "热点事实与用户问题存在直接物流节点重合。"
-                    if direct else
+                    if direct else "用户主题与该 Hook 已审计的物流切入问题一致。"
+                    if curated_question_exact else
                     "热点现场可直接解释当前物流节点的上游风险或准备动作。"
                 ),
             },
@@ -2156,6 +2177,7 @@ def _marketing_hook_candidates(
                 + profile_overlap * 16
                 + event_fit * 5
                 + intent_bridge
+                + (120 if curated_question_exact else 0)
                 + reuse_bias
                 - mismatch_penalty
                 + freshness_bonus
