@@ -268,11 +268,12 @@ def test_formal_scene_copy_contract_downgrades_last_mile_claim_on_warehouse_foot
         [{
             "scene_role": "owned_proof",
             "primary_category": "warehouse",
+            "duration_ms": 6_792,
             "copy_anchor": "工作人员正在逐件核对包裹。",
         }],
     )
 
-    assert repaired["scenes"][0]["voiceover"] == "工作人员正在逐件核对包裹。"
+    assert repaired["scenes"][0]["voiceover"] == "工作人员正在仓内逐件核对包裹。"
 
 
 def test_formal_planner_compacts_an_overlong_model_clause_without_another_model_call():

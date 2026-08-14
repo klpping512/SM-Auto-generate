@@ -1845,6 +1845,24 @@ def _enforce_formal_scene_copy_contract(generated: dict, scenes: list[dict]) -> 
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     if len(repaired["scenes"]) != len(scenes):
         raise ValueError("内容规划模型返回的分镜数量无法进行画面文案校验")
+
+    def visible_anchor(scene: dict) -> str:
+        anchor = str(scene.get("copy_anchor") or "镜头中的仓内作业。")
+        minimum = _scene_voiceover_min_chars(scene)
+        maximum = _scene_voiceover_max_chars(scene)
+        candidates = (
+            anchor,
+            "工作人员正在仓内逐件核对包裹。",
+            "工作人员正在逐件核对每件包裹。",
+            "仓内工作人员核对包裹。",
+            "工作人员核对包裹。",
+        )
+        for candidate in candidates:
+            length = len("".join(candidate.split()))
+            if (minimum is None or length >= minimum) and (maximum is None or length <= maximum):
+                return candidate
+        return anchor
+
     for item, scene in zip(repaired["scenes"], scenes):
         role = str(scene.get("scene_role") or "")
         voiceover = str(item.get("voiceover") or "").strip()
@@ -1852,7 +1870,7 @@ def _enforce_formal_scene_copy_contract(generated: dict, scenes: list[dict]) -> 
             # The planner is already constrained to this reviewed action. Do
             # not replace SOP-aware copy with a catalog label: that turned
             # every video into the same warehouse narration.
-            anchor = str(scene.get("copy_anchor") or "镜头中的仓内作业。")
+            anchor = visible_anchor(scene)
             item["voiceover"] = anchor
             item["text_overlay"] = anchor.rstrip("。")[:24]
         elif (
@@ -1863,7 +1881,7 @@ def _enforce_formal_scene_copy_contract(generated: dict, scenes: list[dict]) -> 
             # A warehouse/staff/facility frame cannot prove that a parcel was
             # handed to last-mile delivery. Keep the topic's safety context,
             # but make the line describe only the reviewed visible action.
-            anchor = str(scene.get("copy_anchor") or "镜头中的仓内作业。")
+            anchor = visible_anchor(scene)
             item["voiceover"] = anchor
             item["text_overlay"] = anchor.rstrip("。")[:24]
         elif role == "hotspot_evidence" and any(
