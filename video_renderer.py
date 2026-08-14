@@ -1137,7 +1137,11 @@ def _align_cues_to_silence(
     cues = []
     for i, part in enumerate(parts):
         start = sec_to_real(boundaries_sec[i])
-        end = sec_to_real(boundaries_sec[i + 1]) if i + 1 < len(parts) else speech[-1][1]
+        # Cover the complete measured audio window, including a natural
+        # trailing silence. Otherwise valid TTS files with a short tail are
+        # rejected by subtitle_sync_report even though no subtitle starts
+        # early or runs beyond the audio.
+        end = sec_to_real(boundaries_sec[i + 1]) if i + 1 < len(parts) else total_duration
         cues.append({
             "start": round(max(start, 0.0), 3),
             "end": round(min(max(end, start + 0.05), total_duration), 3),

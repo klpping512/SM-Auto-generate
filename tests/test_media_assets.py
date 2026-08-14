@@ -108,6 +108,14 @@ def test_tts_selection_inherits_minimax_environment_default(monkeypatch):
     assert voice == video_renderer.MINIMAX_TTS_VOICE
 
 
+def test_subtitle_alignment_covers_trailing_audio_silence():
+    cues = video_renderer._align_cues_to_silence(
+        ["现场核对完成。"], 4.0, [(2.0, 4.0)],
+    )
+    assert cues[-1]["end"] == 4.0
+    assert video_renderer.subtitle_sync_report(cues, 4.0)["passed"] is True
+
+
 def test_resolve_tts_selection_normalizes_retired_providers_to_mimo():
     # 历史项目存了已下线的 provider/音色，重渲染必须静默归一到 MiMo，不抛错。
     for provider, voice in (("qwen", "Cherry"), ("qwen", ""), ("mimo", "Cherry"), ("dashscope", "Cherry")):
