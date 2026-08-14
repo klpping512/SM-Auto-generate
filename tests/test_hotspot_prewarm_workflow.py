@@ -120,6 +120,94 @@ async def test_prewarm_never_calls_qwen_or_download_when_video_facts_cannot_be_r
 
 
 @pytest.mark.asyncio
+async def test_targeted_prewarm_retries_legacy_prefiltered_media(tmp_db, monkeypatch):
+    import app
+    import scheduler
+
+    admin_id, _hotspot_id, media_id = _candidate(tmp_db)
+    tmp_db.update_hotspot_media_state(
+        media_id,
+        download_status="prefiltered_skip",
+        processing_status="not_started",
+        progress_detail="prefilter skip: noise_topic_blocklist:trial",
+    )
+    monkeypatch.setenv("HOTSPOT_HOOK_SYNC_ENABLED", "1")
+
+    def hydrate(rows, **_kwargs):
+        assert [item["id"] for item in rows] == [media_id]
+        return [{**rows[0], "intake_metadata_status": "ready"}], {
+            "requested": 0, "ready": 0, "cached": 1, "failed": [],
+        }
+
+    seen = []
+
+    async def materialize(media_id_arg, created_by):
+        seen.append((media_id_arg, created_by))
+
+    monkeypatch.setattr(scheduler.hotspot_video_sources, "hydrate_youtube_intake_metadata", hydrate)
+    monkeypatch.setattr(scheduler.model_router, "key_is_available", lambda _route: True)
+    monkeypatch.setattr(app, "_run_hotspot_media_materialization", materialize)
+
+    report = await scheduler.prewarm_authorized_hotspot_media(media_ids=[media_id])
+
+    assert seen == [(media_id, admin_id)]
+    assert report["selected_media_ids"] == [media_id]
+
+
+@pytest.mark.asyncio
+async def test_targeted_prewarm_recurates_downloaded_mother_without_hooks(tmp_db, monkeypatch):
+    import app
+    import scheduler
+
+    admin_id, _hotspot_id, media_id = _candidate(tmp_db)
+    asset_id = tmp_db.create_asset({
+        "name": "已分析但未产出 Hook 的母片",
+        "filepath": "assets/library/video/targeted-recuration.mp4",
+        "file_type": "video",
+        "category": "other",
+        "duration": 240,
+        "width": 1920,
+        "height": 1080,
+        "size": 100,
+        "thumbnail": "assets/thumbnails/targeted-recuration.jpg",
+        "sha256": "8" * 64,
+        "source": "youtube",
+        "status": "active",
+        "created_by": None,
+    })
+    tmp_db.update_hotspot_media_state(
+        media_id,
+        asset_id=asset_id,
+        download_status="downloaded",
+        processing_status="ready",
+        progress_detail="镜头已分析，但内置模型未筛出可复用 Hook",
+    )
+    monkeypatch.setenv("HOTSPOT_HOOK_SYNC_ENABLED", "1")
+    seen = []
+
+    def hydrate(rows, **_kwargs):
+        assert [item["id"] for item in rows] == [media_id]
+        return [{
+            **rows[0],
+            "intake_title": "Freight update",
+            "intake_summary": "Truck queue update.",
+            "intake_metadata_status": "ready",
+        }], {"requested": 0, "ready": 0, "cached": 1, "failed": []}
+
+    async def materialize(media_id_arg, created_by):
+        seen.append((media_id_arg, created_by, tmp_db.get_hotspot_media(media_id_arg)["asset_id"]))
+
+    monkeypatch.setattr(scheduler.hotspot_video_sources, "hydrate_youtube_intake_metadata", hydrate)
+    monkeypatch.setattr(scheduler.model_router, "key_is_available", lambda _route: True)
+    monkeypatch.setattr(app, "_run_hotspot_media_materialization", materialize)
+
+    report = await scheduler.prewarm_authorized_hotspot_media(media_ids=[media_id])
+
+    assert seen == [(media_id, admin_id, asset_id)]
+    assert report["selected_media_ids"] == [media_id]
+
+
+@pytest.mark.asyncio
 async def test_prewarm_defaults_to_every_authorized_video_without_duration_filter(tmp_db, monkeypatch):
     import app
     import scheduler
@@ -375,3 +463,13 @@ def test_manual_prewarm_script_enables_the_current_scheduler_gate():
     prewarm_idx = source.index("await scheduler.prewarm_authorized_hotspot_media")
     assert fetch_only_idx < prewarm_idx
     assert "if not args.fetch_only:" in source
+    assert "--refresh-sources" in source
+    assert "if media_ids and not args.refresh_sources:" in source
+    assert "skipped_for_media_ids" in source
+
+
+def test_manual_prewarm_does_not_reintroduce_topic_prefilter_gate():
+    source = (Path(__file__).parents[1] / "hotspot_media.py").read_text(encoding="utf-8")
+
+    assert "PREFILTER_NOISE_TOPIC_BLOCKLIST" not in source
+    assert "noise_topic_blocklist" not in source

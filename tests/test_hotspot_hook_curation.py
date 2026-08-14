@@ -137,7 +137,7 @@ def test_hook_curation_context_is_part_of_prompt_and_cache_identity():
     assert "优先物流向" in prompt
     assert "buffalo-hotspot-hook-selection" in prompt
     assert hotspot_hook_curator.PROMPT_VERSION == "hotspot-hook-curation-v10-mixed-scene-repair"
-    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v6"
+    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v7-overlay-neutral-facts"
 
 
 def test_hook_curator_rejects_an_obvious_anchor_only_segment_before_model_audit():
@@ -380,10 +380,10 @@ def test_curator_repairs_deterministic_overlong_candidate_once(tmp_db, monkeypat
     hooks, meta = hotspot_hook_curator.curate_hook_clips(95, "Traffic update", segments)
 
     assert len(hooks) == 1
-    assert hooks[0]["end_ms"] == 7_800
-    assert len(planner_calls) == 2
-    assert meta["empty_result_retry"] is True
-    assert "超长范围" in planner_calls[1][-1]["content"]
+    assert hooks[0]["start_ms"] == 7_800
+    assert hooks[0]["end_ms"] == 15_600
+    assert len(planner_calls) == 1
+    assert meta["empty_result_retry"] is False
 
 
 def test_empty_result_repair_still_goes_through_visual_audit(tmp_db, monkeypatch):

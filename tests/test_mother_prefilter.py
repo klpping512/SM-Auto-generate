@@ -52,7 +52,7 @@ def test_prefilter_keeps_noise_headline_when_it_also_has_field_activity():
     assert reason == ""
 
 
-def test_prefilter_still_skips_studio_court_headline_without_field_clue():
+def test_prefilter_allows_court_headline_for_visual_audit():
     import hotspot_media
 
     ok, reason = hotspot_media.prefilter_mother_candidate({
@@ -61,5 +61,5 @@ def test_prefilter_still_skips_studio_court_headline_without_field_clue():
         "publisher": "eNCA",
     })
 
-    assert ok is False
-    assert "noise_topic_blocklist:court" in reason
+    assert ok is True
+    assert reason == ""

@@ -22,6 +22,31 @@ def test_public_hotspot_asset_is_labeled_as_hotspot_source(tmp_db):
     assert public["source_label"] == "热点素材"
 
 
+def test_invalid_hi_res_range_is_rejected_before_preview_encoding(tmp_path, monkeypatch):
+    import hotspot_event_media
+
+    invalid = tmp_path / "hires-placeholder.mp4"
+    invalid.write_bytes(b"\x00" * 262)
+    monkeypatch.setattr(
+        hotspot_event_media.inspiration_assets,
+        "download_hi_res_range",
+        lambda *_args, **_kwargs: invalid,
+    )
+
+    result = hotspot_event_media._try_hi_res_clip(
+        tmp_path,
+        {
+            "id": 99,
+            "original_media_url": "https://www.youtube.com/watch?v=test",
+            "platform": "youtube",
+        },
+        {"id": 58, "start_ms": 5_600, "end_ms": 18_200},
+    )
+
+    assert result is None
+    assert not invalid.exists()
+
+
 def test_owned_asset_is_labeled_as_buffalo_source(tmp_db):
     import media_assets
 

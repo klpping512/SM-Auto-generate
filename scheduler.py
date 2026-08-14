@@ -148,7 +148,48 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
     ]
     requested_media_ids = {int(value) for value in (media_ids or []) if str(value).strip().isdigit()}
     if requested_media_ids:
-        metadata_candidates = [item for item in metadata_candidates if int(item.get("id") or 0) in requested_media_ids]
+        # Explicit operator retries may target a legacy ``prefiltered_skip``
+        # row. Re-admit only the requested authorised rows; the normal full
+        # cycle still leaves those rows untouched until a later review.
+        requested_rows = {
+            int(item.get("id") or 0): item
+            for item in db.list_hotspot_media(lifecycle_status="active", limit=500)
+            if int(item.get("id") or 0) in requested_media_ids
+            and item.get("media_kind") in {"video_link", "video_file"}
+            and item.get("authorization_status") == "authorized"
+            and item.get("download_status") == "prefiltered_skip"
+        }
+        for item in requested_rows.values():
+            item["download_status"] = "metadata_ready"
+            item["processing_status"] = "not_started"
+            item["error_message"] = None
+            item["progress_detail"] = "受控重试：重新进入视觉分析，不沿用历史题材预筛结果"
+        metadata_candidates.extend(requested_rows.values())
+        # A mother that already completed ASR/OCR/vision analysis but produced
+        # zero Hooks must also be eligible for an explicit operator re-curation.
+        # The normal three-day intake intentionally does not loop over these
+        # terminal rows, while a targeted retry must not silently report
+        # ``no_candidates`` and leave a possible planner miss unexamined.
+        requested_ready_rows = {
+            int(item.get("id") or 0): item
+            for item in db.list_hotspot_media(lifecycle_status="active", limit=500)
+            if int(item.get("id") or 0) in requested_media_ids
+            and item.get("media_kind") in {"video", "video_link", "video_file"}
+            and item.get("authorization_status") == "authorized"
+            and item.get("download_status") == "downloaded"
+            and item.get("processing_status") == "ready"
+            and item.get("asset_id")
+            and not db.list_hotspot_event_clips(asset_id=int(item["asset_id"]))
+        }
+        for item in requested_ready_rows.values():
+            item["processing_status"] = "not_started"
+            item["error_message"] = None
+            item["progress_detail"] = "受控重策展：复用已分析母片，重新执行 Hook 策展与事实核验"
+        metadata_candidates.extend(requested_ready_rows.values())
+        metadata_candidates = [
+            item for item in metadata_candidates
+            if int(item.get("id") or 0) in requested_media_ids
+        ]
     if not metadata_candidates:
         logger.info("热点预热：没有符合授权、时长和状态条件的长视频")
         return {

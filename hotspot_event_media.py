@@ -6,6 +6,7 @@ from the original URL so analysis-stage 480p multi-window samples never enter th
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
@@ -15,6 +16,31 @@ import database as db
 import inspiration_assets
 
 logger = logging.getLogger(__name__)
+
+
+def _is_playable_video(path: Path) -> bool:
+    """Reject zero-duration/placeholder range downloads before preview encoding."""
+    if not path.is_file() or path.stat().st_size < 1_024:
+        return False
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return True
+    probe = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name:format=duration",
+            "-of", "json", str(path),
+        ],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if probe.returncode != 0:
+        return False
+    try:
+        payload = json.loads(probe.stdout or "{}")
+        duration = float((payload.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return duration > 0 and bool((payload.get("streams") or []))
 
 
 def remove_materialized_event_clips(static_dir: Path, asset_id: int) -> None:
@@ -102,7 +128,7 @@ def _try_hi_res_clip(
     if source_type not in {"youtube", "tiktok"}:
         source_type = "other_link"
     try:
-        return inspiration_assets.download_hi_res_range(
+        downloaded = inspiration_assets.download_hi_res_range(
             {
                 "canonical_url": url,
                 "source_type": source_type,
@@ -111,6 +137,17 @@ def _try_hi_res_clip(
             start_ms / 1000.0,
             end_ms / 1000.0,
         )
+        if not _is_playable_video(downloaded):
+            logger.warning(
+                "confirmed hook hi-res range is not playable event=%s; fallback to analysis mother",
+                event.get("id"),
+            )
+            try:
+                downloaded.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+        return downloaded
     except Exception as exc:
         logger.warning(
             "confirmed hook hi-res download failed event=%s reason=%s; fallback to analysis mother",

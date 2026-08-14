@@ -208,6 +208,36 @@ def test_process_asset_job_reuses_existing_thumbnails_without_ffmpeg(tmp_db, tmp
     assert {tag["value"] for tag in segments[0]["tags"]} >= {"仓库作业", "货架", "分拣"}
 
 
+def test_video_reuse_rejects_one_shared_mother_thumbnail(tmp_db, tmp_path):
+    import asset_processing
+
+    static_dir = tmp_path / "static"
+    source = static_dir / "assets/library/video/shared-thumb.mp4"
+    shared_thumb = static_dir / "assets/thumbnails/shared-thumb.jpg"
+    source.parent.mkdir(parents=True)
+    shared_thumb.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    shared_thumb.write_bytes(b"jpeg")
+    asset_id = tmp_db.create_asset({
+        "name": "共享首帧母片", "filepath": "assets/library/video/shared-thumb.mp4", "file_type": "video",
+        "category": "other", "duration": 12, "width": 1080, "height": 1920,
+        "size": 5, "thumbnail": "assets/thumbnails/shared-thumb.jpg", "sha256": "shared-thumb-video",
+        "source": "youtube", "status": "active",
+    })
+    for index in range(2):
+        tmp_db.create_asset_segment({
+            "asset_id": asset_id, "segment_index": index, "start_ms": index * 6_000,
+            "end_ms": (index + 1) * 6_000, "preview_path": None,
+            "thumbnail_path": "assets/thumbnails/shared-thumb.jpg", "transcript": "",
+            "ocr_text": "", "description": "母片占位描述", "primary_category": "other",
+            "status": "active", "processing_version": "semantic-v3",
+        })
+
+    assert asset_processing.load_reusable_segment_plan(
+        tmp_db.get_asset(asset_id), static_dir,
+    ) is None
+
+
 def test_visual_segment_indexes_cover_both_ends_without_exceeding_remote_budget():
     from asset_processing import visual_segment_indexes
 

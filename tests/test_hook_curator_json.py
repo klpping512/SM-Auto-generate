@@ -71,12 +71,136 @@ def test_parse_still_rejects_non_json():
         hotspot_hook_curator._parse("这不是 JSON，也没有大括号对象", _segments())
 
 
+def test_parse_clips_overlong_two_segment_candidate_to_complete_first_segment():
+    import hotspot_hook_curator
+
+    segments = [
+        {"segment_index": 0, "start_ms": 0, "end_ms": 7_900,
+         "description": "卡车在道路上设置路障", "transcript": "", "ocr_text": "", "tags": []},
+        {"segment_index": 1, "start_ms": 7_900, "end_ms": 15_800,
+         "description": "道路因抗议活动封闭", "transcript": "", "ocr_text": "", "tags": []},
+    ]
+    payload = {"hooks": [{
+        "event_identity": "卡车封路", "start_segment_index": 0, "end_segment_index": 1,
+        "title_zh": "卡车封锁道路", "what_happened": "卡车在道路上设置路障。",
+        "hook_reason": "现场动作清晰。", "logistics_question": "", "confidence": 0.9,
+    }]}
+
+    hooks = hotspot_hook_curator._parse(json.dumps(payload, ensure_ascii=False), segments)
+    assert len(hooks) == 1
+    assert hooks[0]["start_ms"] == 0
+    assert hooks[0]["end_ms"] == 7_900
+    assert hooks[0]["evidence"]["selected_segment_indexes"] == [0]
+
+
+def test_parse_clips_overlong_candidate_to_strongest_complete_segment():
+    import hotspot_hook_curator
+
+    segments = [
+        {"segment_index": 0, "start_ms": 0, "end_ms": 7_900,
+         "description": "主播播报交通信息", "transcript": "", "ocr_text": "", "tags": []},
+        {"segment_index": 1, "start_ms": 7_900, "end_ms": 15_800,
+         "description": "夜间道路上卡车燃烧并冒出浓烟", "transcript": "", "ocr_text": "", "tags": []},
+    ]
+    payload = {"hooks": [{
+        "event_identity": "卡车起火", "start_segment_index": 0, "end_segment_index": 1,
+        "title_zh": "卡车燃烧", "what_happened": "道路上的卡车燃烧并冒出浓烟。",
+        "hook_reason": "现场动作清晰。", "logistics_question": "", "confidence": 0.9,
+    }]}
+
+    hooks = hotspot_hook_curator._parse(json.dumps(payload, ensure_ascii=False), segments)
+    assert len(hooks) == 1
+    assert hooks[0]["start_ms"] == 7_900
+    assert hooks[0]["end_ms"] == 15_800
+    assert hooks[0]["evidence"]["selected_segment_indexes"] == [1]
+
+
 def test_extract_json_used_by_audit_path():
     import hotspot_hook_curator
 
     dirty = '<think>核对中</think>\n{"accepted":[{"candidate_index":1,"reason":"画面一致"}]}'
     payload = hotspot_hook_curator._extract_json(dirty)
     assert payload == {"accepted": [{"candidate_index": 1, "reason": "画面一致"}]}
+
+
+def test_audit_uses_json_mode_and_retries_invalid_protocol_once(tmp_db, monkeypatch):
+    import hotspot_hook_curator
+
+    calls = []
+    hook = {
+        "event_index": 1,
+        "title_zh": "港口入口卡车排队",
+        "segments": _segments(),
+        "evidence": {
+            "what_happened": "多辆卡车在港口入口排队。",
+            "hook_reason": "现场排队动作清晰。",
+            "visual_audit": {
+                "scene_type": "port",
+                "visible_objects": ["卡车"],
+                "visible_actions": ["排队"],
+            },
+        },
+    }
+
+    async def fake_call(*_args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"content": "说明文字，不是 JSON", "cache_hit": True}
+        return {
+            "content": json.dumps({"accepted": [{"candidate_index": 1, "reason": "画面一致"}]}),
+            "cache_hit": False,
+        }
+
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "call_text", fake_call)
+    monkeypatch.setattr(
+        hotspot_hook_curator.model_router,
+        "get_route",
+        lambda _role: {"model": "critic-test"},
+    )
+    monkeypatch.setattr(hotspot_hook_curator.model_router, "create_budget", lambda *_a, **_k: None)
+
+    accepted, meta = hotspot_hook_curator._audit_hooks(91, "港口入口现场", "", [hook])
+
+    assert len(accepted) == 1
+    assert meta["status"] == "verified"
+    assert calls[0]["json_mode"] is True
+    assert calls[1]["json_mode"] is True
+    assert calls[1]["use_cache"] is False
+    rows = tmp_db.list_hook_curation_diagnostics(asset_id=91)
+    assert len(rows) == 1
+    assert rows[0]["error"] == "grounding_audit_invalid_json"
+
+
+def test_grounding_prompt_allows_news_overlay_when_underlying_scene_is_verified():
+    import hotspot_hook_curator
+
+    prompt = hotspot_hook_curator._audit_prompt(
+        "Five hikers safe after dramatic mountain rescue",
+        "",
+        [{
+            "event_index": 1,
+            "title_zh": "夜间积雪环境中的车辆行驶",
+            "evidence": {
+                "what_happened": "夜间积雪环境中，一辆车辆正在行驶。",
+                "hook_reason": "车辆在积雪中的行驶画面清晰。",
+                "visual_audit": {
+                    "is_title_or_logo_card": False,
+                    "is_anchor_or_studio": False,
+                    "is_map_or_infographic": False,
+                    "visible_objects": ["车辆", "积雪地面", "新闻字幕条"],
+                    "visible_actions": ["车辆行驶"],
+                    "scene_type": "other",
+                },
+            },
+            "segments": [{
+                "segment_index": 4, "start_ms": 0, "end_ms": 5241,
+                "description": "夜间积雪环境中车辆行驶。",
+            }],
+        }],
+    )
+
+    assert "新闻字幕条或频道台标作为叠加层，不能单独构成拒绝理由" in prompt
+    assert "收窄为中性可见事实" in prompt
 
 
 def _pass_visual(hooks):
@@ -138,6 +262,7 @@ def test_curate_retries_once_on_json_parse_failure_then_succeeds(tmp_db, monkeyp
     planner_calls = [c for c in calls if c.get("prompt_version") == hotspot_hook_curator.PROMPT_VERSION]
     assert len(planner_calls) == 2
     assert planner_calls[1].get("use_cache") is False
+    assert planner_calls[1].get("json_mode") is True
     assert len(hooks) == 1
     assert meta["status"] == "curated"
 
@@ -200,5 +325,5 @@ def test_curate_budget_allows_two_calls(tmp_db, monkeypatch):
     # 第一条是策展 budget（max_calls=2）；后续 critic audit 仍保持 max_calls=1。
     assert budgets[0].get("max_calls") == 2
     assert budgets[0].get("max_input_tokens") == 28_000
-    assert budgets[0].get("max_output_tokens") == 2_000
+    assert budgets[0].get("max_output_tokens") == 3_200
     assert budgets[0].get("reset") is True

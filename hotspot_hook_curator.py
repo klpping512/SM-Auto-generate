@@ -82,10 +82,12 @@ MIN_HOOK_MS = 4_000
 MAX_HOOK_MS = 14_000
 MAX_HOOKS_PER_SOURCE = 3
 MIN_HOOK_CONFIDENCE = 0.35
+CURATION_OUTPUT_TOKENS = 1_600
+AUDIT_OUTPUT_TOKENS = 600
 # 全量镜头分析可以覆盖长母片；策展提示词则必须把每段证据压缩到模型预算内，
 # 否则“已分析”会在生成标题与事件说明前被输入门禁拦下。
 PROMPT_VERSION = "hotspot-hook-curation-v10-mixed-scene-repair"
-AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v6"
+AUDIT_PROMPT_VERSION = "hotspot-hook-grounding-audit-v7-overlay-neutral-facts"
 
 _LEISURE_TITLE_MARKERS = ("休闲", "海滨", "海滩", "度假", "观光", "打卡游玩")
 _EMERGENCY_VISUAL_MARKERS = ("急救", "救护", "燃烧", "浓烟", "火灾", "火光", "事故", "残骸", "车祸")
@@ -253,7 +255,11 @@ def _audit_prompt(source_title: str, source_context: str, hooks: list[dict]) -> 
         "（2）title_zh 必须与画面可见事实一致；若画面是公路事故/燃烧车辆/急救车，标题不得写成海滨休闲、度假或无关日常；"
         "（3）来源事件身份与画面可见事实不矛盾，但不能仅靠标题补足画面缺失的地点或动作；"
         "（4）没有把垃圾、普通袋子、路人或未知物品臆断为包裹、货物、订单或物流作业；"
-        "（5）不是主播/字幕/标题页/Logo 卡。若视觉审核已标明标题卡或主播，必须拒绝。"
+        "（5）不是主播/标题页/Logo 卡。新闻字幕条或频道台标作为叠加层，不能单独构成拒绝理由；"
+        "只要视觉审核明确 is_title_or_logo_card=false、is_anchor_or_studio=false、"
+        "is_map_or_infographic=false，且底层现场画面可见，就按现场事实核验。"
+        "若来源事件的具体主体或动作没有在画面中可确认，候选标题和 what_happened 必须收窄为中性可见事实，"
+        "例如把‘救援车辆’收窄为‘夜间积雪环境中的车辆行驶’，不能把来源标题中的救援结论当作画面动作。"
         "社会、体育、政务等非物流现场只要画面可核验且标题如实描述画面也可接受，不要仅因缺少物流视觉就拒绝。"
         "新闻合集允许不同独立事件各保留一条。不确定、矛盾、依赖猜测的候选必须拒绝。"
         "严格返回单行 JSON：{\"accepted\":[{\"candidate_index\":1,\"reason\":\"不超过80字\"}]}。"
@@ -269,28 +275,56 @@ def _audit_hooks(asset_id: int, source_title: str, source_context: str, hooks: l
     job_id = model_router.route_scoped_job_id(_audit_job_id(asset_id, source_title, source_context, hooks), "critic")
     # reset=True: same mother re-curation reuses a deterministic job_id; sticky
     # INSERT OR IGNORE would otherwise keep exhausted calls_used and block retry.
+    # 事实核验同样是结构化协议：没有 json_mode 时，模型可能在完成候选判断
+    # 后附带解释文字，导致整条母片被误判为 processing_failed。给它一次
+    # 不读缓存的协议重试，但不改变任何视觉/文本事实门禁。
     model_router.create_budget(
-        job_id, max_calls=1, max_input_tokens=10_000,
-        max_output_tokens=model_router.required_output_budget("critic", 400),
+        job_id, max_calls=2, max_input_tokens=10_000,
+        max_output_tokens=model_router.required_output_budget("critic", AUDIT_OUTPUT_TOKENS) * 2,
         reset=True,
     )
-    result = asyncio.run(model_router.call_text(
-        job_id,
-        "critic",
-        [
-            {
-                "role": "system",
-                "content": "严格返回 JSON。拒绝臆断与无画面支撑的候选，但接受与标题一致的非物流现场。",
-            },
-            {"role": "user", "content": _audit_prompt(source_title, source_context, hooks)},
-        ],
-        prompt_version=AUDIT_PROMPT_VERSION,
-        max_output_tokens=400,
-    ))
+    messages = [
+        {
+            "role": "system",
+            "content": "严格返回 JSON。拒绝臆断与无画面支撑的候选，但接受与标题一致的非物流现场。",
+        },
+        {"role": "user", "content": _audit_prompt(source_title, source_context, hooks)},
+    ]
+
+    def _call(**overrides):
+        options = {
+            "max_output_tokens": AUDIT_OUTPUT_TOKENS,
+            "json_mode": True,
+        }
+        options.update(overrides)
+        return asyncio.run(model_router.call_text(
+            job_id,
+            "critic",
+            messages,
+            prompt_version=AUDIT_PROMPT_VERSION,
+            **options,
+        ))
+
+    result = _call()
+
+    def _parse_audit(result: dict, attempt: int) -> Any:
+        try:
+            return _extract_json(str(result.get("content") or ""))
+        except ValueError as exc:
+            add_hook_curation_diagnostic(
+                int(asset_id), attempt, AUDIT_PROMPT_VERSION,
+                model=model_router.get_route("critic").get("model"),
+                cache_hit=bool(result.get("cache_hit")),
+                error="grounding_audit_invalid_json",
+                raw_content=result.get("content") or "",
+            )
+            raise ValueError("Hook 事实核验模型未返回合法 JSON") from exc
+
     try:
-        payload = _extract_json(str(result.get("content") or ""))
-    except ValueError as exc:
-        raise ValueError("Hook 事实核验模型未返回合法 JSON") from exc
+        payload = _parse_audit(result, 1)
+    except ValueError:
+        result = _call(use_cache=False)
+        payload = _parse_audit(result, 2)
     if isinstance(payload, dict):
         accepted_rows = payload.get("accepted") or []
     elif isinstance(payload, list):
@@ -370,7 +404,25 @@ def _parse(content: str, segments: list[dict]) -> list[dict]:
             continue
         indexes = list(range(start_index, end_index + 1))
         selected = [by_index.get(index) for index in indexes]
-        if not indexes or any(item is None for item in selected) or occupied.intersection(indexes):
+        if not indexes or any(item is None for item in selected):
+            continue
+        raw_duration_ms = int(selected[-1].get("end_ms") or 0) - int(selected[0].get("start_ms") or 0)
+        # 模型有时会把两个 7–8 秒镜头合并成 15–16 秒候选。若首段本身
+        # 已是完整 4–14 秒现场，只裁回首段再交给同一套视觉/文字门禁，
+        # 避免格式错误吞掉真实画面；绝不把短于 4 秒的片段放行。
+        if raw_duration_ms > MAX_HOOK_MS:
+            first_duration_ms = int(selected[0].get("end_ms") or 0) - int(selected[0].get("start_ms") or 0)
+            viable = [
+                item for item in selected
+                if MIN_HOOK_MS <= int(item.get("end_ms") or 0) - int(item.get("start_ms") or 0) <= MAX_HOOK_MS
+            ]
+            if viable:
+                best = max(viable, key=_single_segment_signal)
+                indexes = [int(best.get("segment_index") or start_index)]
+                selected = [best]
+            else:
+                continue
+        if occupied.intersection(indexes):
             continue
         if hotspot_hook_selection_sop.obvious_rejection_reason(selected):
             continue
@@ -485,6 +537,21 @@ def _retry_recall_segments(segments: list[dict], max_segments: int = 36) -> list
     return selected[:max_segments]
 
 
+def _single_segment_signal(segment: dict) -> int:
+    """Rank a single candidate segment without treating the score as evidence."""
+    blob = " ".join(
+        [
+            str(segment.get("description") or ""),
+            str(segment.get("transcript") or ""),
+            str(segment.get("ocr_text") or ""),
+            " ".join(str(tag.get("value") or "") for tag in (segment.get("tags") or [])),
+        ]
+    ).lower()
+    return sum(1 for marker in _RECALL_MARKERS if marker.lower() in blob) - sum(
+        2 for marker in _RECALL_ANCHOR_MARKERS if marker.lower() in blob
+    )
+
+
 def _empty_result_repair_instruction() -> str:
     return (
         "上一轮返回了空 hooks 或候选未通过后端确定性门禁，但后端确定性检查确认至少存在一个连续 "
@@ -536,7 +603,7 @@ def curate_hook_clips(
     )
     # max_calls=2 = 1 次初始策展 + 1 次坏 JSON 或过度保守空结果修复（同一策展尝试内）。
     # reset=True 保持"每次重跑=1 次完整尝试"语义；不得再往上放。
-    per_call_output_budget = model_router.required_output_budget("planner_text", 1_000)
+    per_call_output_budget = model_router.required_output_budget("planner_text", CURATION_OUTPUT_TOKENS)
     model_router.create_budget(
         job_id, max_calls=2,
         # The router enforces cumulative job budgets.  Both the original call
@@ -552,11 +619,12 @@ def curate_hook_clips(
     route_model = (model_router.get_route("planner_text") or {}).get("model") or ""
 
     def _call(**overrides):
+        options = {"max_output_tokens": CURATION_OUTPUT_TOKENS}
+        options.update(overrides)
         return asyncio.run(model_router.call_text(
             job_id, "planner_text", messages,
             prompt_version=PROMPT_VERSION,
-            max_output_tokens=1_000,
-            **overrides,
+            **options,
         ))
 
     def _try_parse(result: dict, attempt: int) -> list[dict]:
@@ -580,7 +648,7 @@ def curate_hook_clips(
     except ValueError:
         # 一次性重试：必须绕过缓存，避免第一次坏返回原样复现。
         # 命中缓存时 budget 已记 1 次调用，max_calls=2 恰好容纳这次真调。
-        result = _call(use_cache=False)
+        result = _call(use_cache=False, json_mode=True)
         hooks = _try_parse(result, 2)
     else:
         # A valid empty array is normally a legitimate rejection.  MiMo may,
@@ -600,7 +668,7 @@ def curate_hook_clips(
                     + "注意：只使用上面提供的实际连续 segment_index，不要跨越缺号拼接镜头。",
                 },
             ]
-            result = _call(use_cache=False)
+            result = _call(use_cache=False, json_mode=True)
             hooks = _try_parse(result, 2)
             retried_empty = True
     if not hooks:

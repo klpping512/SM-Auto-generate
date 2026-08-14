@@ -29,6 +29,11 @@ parser.add_argument(
     action="store_true",
     help="只抓取元数据并同步授权状态，绝不下载、分析或策展 Hook",
 )
+parser.add_argument(
+    "--refresh-sources",
+    action="store_true",
+    help="即使指定 --media-ids，也先刷新全部已配置视频信源；默认受控媒体处理跳过全量刷新",
+)
 args = parser.parse_args()
 if args.channel_video_limit is not None:
     os.environ["HOTSPOT_YOUTUBE_CHANNEL_VIDEO_LIMIT"] = str(max(1, min(12, args.channel_video_limit)))
@@ -48,18 +53,29 @@ async def main() -> int:
     admin = db.get_user_by_username("admin")
     if not admin:
         raise SystemExit("缺少 admin 用户，无法记录热点预热")
-    fetched = await hotspot_fetcher.fetch_hotspots(
-        PROJECT_ROOT / "static", created_by=admin["id"], video_channels=hotspot_fetcher.configured_video_channels(),
-    )
-    # Existing metadata is migrated by init_db; batch22 has no green/yellow
-    # approval queue. Keep this summary field for old operators' reports.
-    promoted = 0
     media_ids = []
     for raw in str(args.media_ids or "").split(","):
         try:
             media_ids.append(int(raw.strip()))
         except ValueError:
             continue
+    # A controlled media run must not wait for every configured channel.  The
+    # old order refreshed all YouTube sources first, so one slow channel could
+    # delay the requested download/analyse/audit work by several minutes.
+    # Operators can still opt into a full source refresh explicitly.
+    if media_ids and not args.refresh_sources:
+        fetched = {
+            "status": "skipped_for_media_ids",
+            "reason": "受控媒体处理默认跳过全量信源刷新",
+            "requested_media_ids": sorted(set(media_ids)),
+        }
+    else:
+        fetched = await hotspot_fetcher.fetch_hotspots(
+            PROJECT_ROOT / "static", created_by=admin["id"], video_channels=hotspot_fetcher.configured_video_channels(),
+        )
+    # Existing metadata is migrated by init_db; batch22 has no green/yellow
+    # approval queue. Keep this summary field for old operators' reports.
+    promoted = 0
     if args.fetch_only:
         prewarm = {
             "status": "skipped_fetch_only",

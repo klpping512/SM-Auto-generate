@@ -86,6 +86,22 @@ def load_reusable_segment_plan(asset: dict, static_dir: Path) -> list[dict] | No
                 "ocr_text": item.get("ocr_text") or "",
             })
         else:
+            # A video-level thumbnail is often copied onto every placeholder
+            # segment when a hotspot mother is admitted before semantic
+            # processing.  Reusing that plan would send the same first frame
+            # to the vision model for every time window, then falsely mark the
+            # asset as analysed while Hook curation sees no usable evidence.
+            # Video reuse is safe only when every segment has its own
+            # thumbnail.  A single-segment video is the only legitimate case
+            # where sharing the asset thumbnail is harmless.
+            if asset.get("file_type") == "video" and len(reusable) > 1:
+                thumbnail_paths = [str(item.get("thumbnail_path") or "") for item in reusable]
+                asset_thumbnail = str(asset.get("thumbnail") or "")
+                if (
+                    any(not path or path == asset_thumbnail for path in thumbnail_paths)
+                    or len(set(thumbnail_paths)) != len(thumbnail_paths)
+                ):
+                    continue
             if len(reusable) > best_score:
                 best = reusable
                 best_score = len(reusable)
