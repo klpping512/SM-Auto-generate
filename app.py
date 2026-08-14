@@ -2025,7 +2025,7 @@ def _marketing_hook_candidates(
             for event in event_clips
         )
         curated_questions = [
-            str((event.get("evidence") or {}).get("logistics_question") or "").strip()
+            (int(event.get("id") or 0), str((event.get("evidence") or {}).get("logistics_question") or "").strip())
             for event in event_clips
         ]
         # A user who copies the Hook card's audited “物流切入” question is
@@ -2033,13 +2033,14 @@ def _marketing_hook_candidates(
         # visual fact, but it must be strong enough to retrieve the exact Hook;
         # otherwise a generic evergreen opener wins and the selected real scene
         # is silently replaced.
-        curated_question_exact = any(
-            question and (
+        curated_question_event_ids = {
+            event_id for event_id, question in curated_questions
+            if question and (
                 re.sub(r"[\s，。！？；：、,.!?;:（）()\[\]【】\"'“”‘’]+", "", question).casefold() in compact_topic_text
                 or compact_topic_text in re.sub(r"[\s，。！？；：、,.!?;:（）()\[\]【】\"'“”‘’]+", "", question).casefold()
             )
-            for question in curated_questions
-        )
+        }
+        curated_question_exact = bool(curated_question_event_ids)
         text = f"{parent_text} {hook_fact_text}".casefold()
         kind = hotspot_logistics_planner.classify_hotspot(hotspot)
         if kind == "unknown" and hook_fact_text:
@@ -2097,10 +2098,21 @@ def _marketing_hook_candidates(
             continue
         event_fit = 1 if kind_in_topics else 0
         hooks = hotspot_hook_selector.rank_hook_clips(event_clips)
+        if curated_question_event_ids:
+            # Question matches are event-specific.  Do not let a higher-scoring
+            # sibling clip from the same parent replace the exact Hook the user
+            # copied from the card (e.g. snow-road clip 79 replacing fire clip 78).
+            hooks = [
+                hook for hook in hooks
+                if int(hook.get("event_clip_id") or 0) in curated_question_event_ids
+            ][:3]
         if not hooks:
             funnel["relevance_low"] += 1
             continue
-        selected_curated_question = next((question for question in curated_questions if question), "")
+        selected_curated_question = next(
+            (question for event_id, question in curated_questions if event_id in curated_question_event_ids and question),
+            "",
+        )
         if selected_curated_question and curated_question_exact:
             question = selected_curated_question
         elif kind == "strike":

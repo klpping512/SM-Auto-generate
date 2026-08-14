@@ -474,6 +474,32 @@ def test_chat_hook_candidates_bind_exact_audited_logistics_question(tmp_db):
         logistics_question="集装箱类设施发生火情时，运输或存储环节如何核对安全状态？",
         snapshot="container-fire-question",
     )
+    events = db.replace_hotspot_event_clips(event["asset_id"], hotspot_id, [
+        {
+            "event_index": 1, "start_ms": 0, "end_ms": 8_000,
+            "title_zh": "积雪山区公路上车辆行驶", "title_en": "Snowy road traffic",
+            "confidence": .95, "review_status": "confirmed", "segments": [],
+            "evidence": {
+                "what_happened": "积雪山区公路上车辆行驶。", "hook_reason": "道路与车辆动作清晰可见。",
+                "logistics_question": "山区积雪和湿滑路况下，货物运输如何核对路线与安全状态？",
+                "event_identity": "雪天道路现场",
+            },
+        },
+        {
+            "event_index": 2, "start_ms": 8_000, "end_ms": 16_000,
+            "title_zh": "夜间燃烧结构与烟雾", "title_en": "Burning structure at night",
+            "confidence": .95, "review_status": "confirmed", "segments": [],
+            "evidence": {
+                "what_happened": "夜间一个大型结构持续燃烧，周围可见火光、烟雾和人员查看现场。",
+                "hook_reason": "燃烧结构、火光、烟雾和现场人员在连续画面中直接可见。",
+                "logistics_question": "集装箱类设施发生火情时，运输或存储环节如何核对安全状态？",
+                "event_identity": "集装箱设施火情",
+            },
+        },
+    ])
+    for item in events:
+        db.update_hotspot_event_clip_media(item["id"], f"assets/hotspot-events/{item['id']}/event.mp4", None, "ready")
+    event = events[1]
 
     candidates, _kb, _rag, _funnel = app._marketing_hook_candidates({
         "raw_input": "请围绕 集装箱类设施发生火情时，运输或存储环节如何核对安全状态？生成一个视频",
