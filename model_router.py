@@ -151,9 +151,18 @@ def _provider_request_options(route: dict) -> dict:
             }
         return body
     if provider == "minimax_openai":
-        # MiniMax's OpenAI-compatible endpoint uses reasoning_split.  Do not
-        # forward the MiMo-only enable_thinking flag to it.
-        return {"reasoning_split": options["reasoning_split"]} if "reasoning_split" in options else {}
+        # MiniMax M3 exposes the native thinking switch on its
+        # OpenAI-compatible endpoint.  Keeping thinking disabled for JSON
+        # planning/critique prevents a long reasoning trace from consuming the
+        # visible-output budget and returning an empty content field.
+        body = {}
+        if "reasoning_split" in options:
+            body["reasoning_split"] = options["reasoning_split"]
+        if "enable_thinking" in options:
+            body["thinking"] = {
+                "type": "enabled" if options["enable_thinking"] else "disabled",
+            }
+        return body
     return options
 
 

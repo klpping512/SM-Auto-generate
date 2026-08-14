@@ -2599,13 +2599,18 @@ async def _generate_topic_brief_video(
     job_id = model_router.route_scoped_job_id(
         f"topic-plan-{brief_id[:12]}-{_uuid4().hex[:12]}", "planner_text"
     )
+    planner_output_budget = min(
+        1_800,
+        max(1, int(model_router.get_route("planner_text").get("max_tokens") or 1_800)),
+    )
     model_router.create_budget(
         job_id, max_calls=3, max_input_tokens=15_000,
-        max_output_tokens=3 * model_router.required_output_budget("planner_text", 1_000),
+        max_output_tokens=3 * model_router.required_output_budget("planner_text", planner_output_budget),
     )
     try:
         result = await model_router.call_text(
-            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v10", max_output_tokens=1_000,
+            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v10",
+            max_output_tokens=planner_output_budget,
         )
         voiceover_limits = [_scene_voiceover_max_chars(scene) for scene in scenes]
         voiceover_minimums = [_scene_voiceover_min_chars(scene) for scene in scenes]
@@ -2672,7 +2677,7 @@ async def _generate_topic_brief_video(
                 }, ensure_ascii=False)
                 repair_result = await model_router.call_text(
                     job_id, "planner_text", repair_messages,
-                    prompt_version="topic-brief-video-plan-v10-repair", max_output_tokens=1_000,
+                    prompt_version="topic-brief-video-plan-v10-repair", max_output_tokens=planner_output_budget,
                 )
                 try:
                     repaired_candidate = _planner_json(

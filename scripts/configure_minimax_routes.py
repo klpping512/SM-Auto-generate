@@ -42,7 +42,7 @@ def route_matrix() -> list[dict]:
             "timeout": 120 if role != "chat_text" else 90,
             "max_tokens": max_tokens,
             "cost_profile": cost,
-            "request_options": {"reasoning_split": True},
+            "request_options": {"reasoning_split": True, "enable_thinking": False},
             "enabled": True,
         })
     for role, timeout, max_tokens in (

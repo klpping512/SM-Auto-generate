@@ -43,7 +43,7 @@ def test_reasoning_split_is_sent_for_compatible_text_route(tmp_db):
 
 
 @pytest.mark.asyncio
-async def test_minimax_openai_text_route_uses_bearer_and_reasoning_split(tmp_db, monkeypatch):
+async def test_minimax_openai_text_route_uses_bearer_and_disables_thinking(tmp_db, monkeypatch):
     import model_router
 
     monkeypatch.setenv("MINIMAX_TOKEN_PLAN_KEY", "test-minimax-key")
@@ -51,7 +51,8 @@ async def test_minimax_openai_text_route_uses_bearer_and_reasoning_split(tmp_db,
         "provider": "minimax_openai", "base_url": model_router.MINIMAX_OPENAI_BASE_URL,
         "api_key_env": "MINIMAX_TOKEN_PLAN_KEY", "model": "MiniMax-M3",
         "capabilities": ["text"], "timeout": 60, "max_tokens": 1200,
-        "cost_profile": "high", "request_options": {"reasoning_split": True}, "enabled": True,
+        "cost_profile": "high",
+        "request_options": {"reasoning_split": True, "enable_thinking": False}, "enabled": True,
     })
     requests = []
 
@@ -76,6 +77,7 @@ async def test_minimax_openai_text_route_uses_bearer_and_reasoning_split(tmp_db,
     assert requests[0].headers["authorization"] == "Bearer test-minimax-key"
     assert body["model"] == "MiniMax-M3"
     assert body["reasoning_split"] is True
+    assert body["thinking"] == {"type": "disabled"}
     assert result["content"] == '{"ok":true}'
 
 
