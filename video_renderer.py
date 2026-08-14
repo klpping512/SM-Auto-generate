@@ -33,6 +33,7 @@ from video_composition_policy import (
 from video_duration_budget import rebalance_scenes_to_budget, platform_budget_ms
 
 MIMO_TTS_VOICE = "mimo_default"
+MINIMAX_TTS_VOICE = "male-qn-qingse"
 # 正式成片编码档位（仅非-fast 路径生效；preview/fast 路径仍走 ultrafast+crf28 保持快）
 # 原则：中间过渡片近视觉无损，只让"交付段"做真正压缩，减少三段重编码的代际损失。
 RENDER_FINAL_PRESET = os.environ.get("RENDER_PRESET", "medium")          # was veryfast — 同 crf 下压缩更充分=更锐
@@ -106,9 +107,10 @@ def _load_subtitle_font(text: str, font_size: int):
 
 
 def tts_voice_options(*, mimo_available: bool | None = None) -> list[dict]:
-    """Return selectable TTS voices (MiMo single track) with availability flags."""
+    """Return selectable TTS voices with provider availability flags."""
     mimo_ok = bool(os.environ.get("MIMO_API_KEY")) if mimo_available is None else bool(mimo_available)
-    return [
+    minimax_ok = bool(os.environ.get("MINIMAX_TOKEN_PLAN_KEY"))
+    options = [
         {
             "provider": "mimo",
             "id": MIMO_TTS_VOICE,
@@ -117,7 +119,18 @@ def tts_voice_options(*, mimo_available: bool | None = None) -> list[dict]:
             "disabled_reason": "" if mimo_ok else "未配置 MIMO_API_KEY",
             "preview_supported": True,
         },
+        {
+            "provider": "minimax",
+            "id": MINIMAX_TTS_VOICE,
+            "label": "MiniMax Speech 2.8 Turbo",
+            "available": minimax_ok,
+            "disabled_reason": "未配置 MINIMAX_TOKEN_PLAN_KEY" if not minimax_ok else "",
+            "preview_supported": True,
+        },
     ]
+    if (os.environ.get("TTS_PROVIDER") or "mimo").strip().lower() == "minimax":
+        return [options[1], options[0]]
+    return options
 
 
 def synthesize_tts_preview(
@@ -138,7 +151,10 @@ def synthesize_tts_preview(
     root.mkdir(parents=True, exist_ok=True)
     stamp = uuid.uuid4().hex[:12]
     output = root / f"preview-{provider}-{stamp}.wav"
-    synthesize_mimo_tts(cleaned, resolved_voice, output)
+    if provider == "minimax":
+        synthesize_minimax_tts(cleaned, resolved_voice, output)
+    else:
+        synthesize_mimo_tts(cleaned, resolved_voice, output)
     rel = f"uploads/tts-previews/{output.name}"
     return {
         "audio_path": rel,
@@ -167,6 +183,11 @@ def resolve_tts_selection(
             # 历史遗留音色（如 Cherry）统一回落默认，不抛错
             return "mimo", MIMO_TTS_VOICE
         return "mimo", candidate or MIMO_TTS_VOICE
+    if normalized_provider == "minimax":
+        allowed = {MINIMAX_TTS_VOICE, "minimax_default", ""}
+        if candidate and candidate not in allowed:
+            return "minimax", MINIMAX_TTS_VOICE
+        return "minimax", candidate or os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE)
     if strict:
         raise ValueError(f"未知 TTS 服务商：{normalized_provider}")
     return "mimo", MIMO_TTS_VOICE
@@ -459,6 +480,7 @@ def normalize_script(
 
 
 MIMO_TTS_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MINIMAX_TTS_BASE_URL = "https://api.minimaxi.com/v1"
 # MiMo v2.5-tts 允许在 user 消息里用自然语言描述语气/语速，这条默认风格
 # 只是让旁白读起来像真人口语播报，不是台词内容，不会进入成片文本。
 MIMO_TTS_DEFAULT_STYLE = "播报语气自然亲切、像真人口语跟卖家说话，语速适中偏快，不要机械平铺直叙。"
@@ -504,6 +526,67 @@ def synthesize_mimo_tts(text: str, voice: str, output: Path, api_key: str | None
     raise RuntimeError(f"MiMo TTS 请求或音频解码失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
 
 
+def synthesize_minimax_tts(
+    text: str,
+    voice: str,
+    output: Path,
+    api_key: str | None = None,
+    model: str | None = None,
+):
+    """Use MiniMax Speech 2.8 to synthesize a WAV narration.
+
+    The Token Plan T2A endpoint returns hexadecimal audio bytes rather than a
+    URL.  Request WAV because the renderer's historical contract is a local
+    single-track WAV file.
+    """
+    key = api_key or os.environ.get("MINIMAX_TOKEN_PLAN_KEY", "")
+    if not key:
+        raise RuntimeError("未配置 MINIMAX_TOKEN_PLAN_KEY")
+    payload = {
+        "model": model or os.environ.get("MINIMAX_TTS_MODEL", "speech-2.8-turbo"),
+        "text": str(text or ""),
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice or os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE),
+            "speed": 1,
+            "vol": 1,
+            "pitch": 0,
+        },
+        "audio_setting": {
+            "sample_rate": 24000,
+            "bitrate": 128000,
+            "format": "wav",
+            "channel": 1,
+        },
+        "subtitle_enable": False,
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
+        try:
+            with httpx.Client(timeout=90, trust_env=False) as client:
+                response = client.post(
+                    f"{os.environ.get('MINIMAX_TTS_BASE_URL', MINIMAX_TTS_BASE_URL).rstrip('/')}/t2a_v2",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+            status = (body.get("base_resp") or {}).get("status_code")
+            if status not in (None, 0):
+                raise RuntimeError((body.get("base_resp") or {}).get("status_msg") or "MiniMax TTS 返回失败")
+            audio_hex = str((body.get("data") or {}).get("audio") or "")
+            if not audio_hex:
+                raise RuntimeError("MiniMax TTS 未返回音频数据")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(bytes.fromhex(audio_hex))
+            return
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+            last_error = exc
+            if attempt < TTS_MAX_ATTEMPTS:
+                time.sleep(TTS_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError(f"MiniMax TTS 请求或音频解码失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
+
+
 def synthesize_local_macos(text: str, output: Path, voice: str = "Tingting"):
     """使用 macOS 内置语音生成内部预览，不发送任何文本到外部服务。"""
     say = shutil.which("say")
@@ -544,11 +627,15 @@ def synthesize_scene_voiceover(
     import hashlib
 
     provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
-    if provider not in {"mimo", "local_macos"}:
+    if provider not in {"mimo", "minimax", "local_macos"}:
         # 历史项目可能存了已下线的 TTS 服务商，统一归一到 MiMo 单轨。
         provider = "mimo"
-    mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
-    mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
+    if provider == "minimax":
+        mimo_model = os.environ.get("MINIMAX_TTS_MODEL", "speech-2.8-turbo")
+        mimo_voice = voice or os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE)
+    else:
+        mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+        mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
     style = style_instruction or MIMO_TTS_DEFAULT_STYLE
     meta = {
         "provider": provider,
@@ -592,7 +679,10 @@ def synthesize_scene_voiceover(
         return meta
 
     meta["attempts"] += 1
-    synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
+    if provider == "minimax":
+        synthesize_minimax_tts(text, mimo_voice, output, model=mimo_model)
+    else:
+        synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
     _store_cache()
     meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return meta

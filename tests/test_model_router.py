@@ -42,6 +42,95 @@ def test_reasoning_split_is_sent_for_compatible_text_route(tmp_db):
     assert model_router._safe_request_options(model_router.get_route("planner_text")) == {"reasoning_split": True}
 
 
+@pytest.mark.asyncio
+async def test_minimax_openai_text_route_uses_bearer_and_reasoning_split(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MINIMAX_TOKEN_PLAN_KEY", "test-minimax-key")
+    model_router.save_route("planner_text", {
+        "provider": "minimax_openai", "base_url": model_router.MINIMAX_OPENAI_BASE_URL,
+        "api_key_env": "MINIMAX_TOKEN_PLAN_KEY", "model": "MiniMax-M3",
+        "capabilities": ["text"], "timeout": 60, "max_tokens": 1200,
+        "cost_profile": "high", "request_options": {"reasoning_split": True}, "enabled": True,
+    })
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": "{\"ok\":true}"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await model_router.call_text(
+            "minimax-openai-text", "planner_text", [{"role": "user", "content": "返回 JSON"}],
+            prompt_version="minimax-openai-text-v1", json_mode=True, client=client,
+        )
+    finally:
+        await client.aclose()
+
+    body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/chat/completions"
+    assert requests[0].headers["authorization"] == "Bearer test-minimax-key"
+    assert body["model"] == "MiniMax-M3"
+    assert body["reasoning_split"] is True
+    assert result["content"] == '{"ok":true}'
+
+
+@pytest.mark.asyncio
+async def test_minimax_anthropic_multimodal_route_converts_image_blocks(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MINIMAX_TOKEN_PLAN_KEY", "test-minimax-key")
+    model_router.save_route("video_evaluator", {
+        "provider": "minimax_anthropic", "base_url": model_router.MINIMAX_ANTHROPIC_BASE_URL,
+        "api_key_env": "MINIMAX_TOKEN_PLAN_KEY", "model": "MiniMax-M3",
+        "capabilities": ["text", "vision"], "timeout": 60, "max_tokens": 900,
+        "cost_profile": "medium", "json_mode": False,
+        "request_options": {"enable_thinking": False}, "enabled": True,
+    })
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={
+            "content": [
+                {"type": "thinking", "thinking": "hidden"},
+                {"type": "text", "text": "{\"relevant\":true}"},
+            ],
+            "usage": {"input_tokens": 40, "output_tokens": 12},
+        })
+
+    messages = [
+        {"role": "system", "content": "只返回 JSON"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "判断画面"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,eA=="}},
+        ]},
+    ]
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await model_router.call_multimodal_json(
+            "minimax-anthropic-vision", "video_evaluator", messages,
+            prompt_version="minimax-anthropic-vision-v1", client=client,
+        )
+    finally:
+        await client.aclose()
+
+    body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/anthropic/v1/messages"
+    assert requests[0].headers["x-api-key"] == "test-minimax-key"
+    assert body["system"] == "只返回 JSON"
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["messages"][0]["content"][1] == {
+        "type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "eA=="},
+    }
+    assert "response_format" not in body
+    assert result["content"] == '{"relevant":true}'
+
+
 def test_visible_text_content_removes_only_leading_legacy_thinking_block():
     import model_router
 

@@ -21,6 +21,8 @@ ROLES = {
 }
 
 MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MINIMAX_OPENAI_BASE_URL = "https://api.minimaxi.com/v1"
+MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
 
 DEFAULT_ROUTES = {
     # Decision / Hook / script planning — smarter Pro model.
@@ -141,6 +143,17 @@ def _provider_request_options(route: dict) -> dict:
                 "type": "enabled" if options["enable_thinking"] else "disabled",
             }
         return body
+    if provider == "minimax_anthropic":
+        body = {}
+        if "enable_thinking" in options:
+            body["thinking"] = {
+                "type": "adaptive" if options["enable_thinking"] else "disabled",
+            }
+        return body
+    if provider == "minimax_openai":
+        # MiniMax's OpenAI-compatible endpoint uses reasoning_split.  Do not
+        # forward the MiMo-only enable_thinking flag to it.
+        return {"reasoning_split": options["reasoning_split"]} if "reasoning_split" in options else {}
     return options
 
 
@@ -269,6 +282,8 @@ def make_cache_key(role: str, payload: dict, prompt_version: str) -> str:
     raw = json.dumps(
         {
             "role": role,
+            "provider": route.get("provider"),
+            "base_url": route.get("base_url"),
             "model": route["model"],
             "prompt_version": prompt_version,
             "request_options": _safe_request_options(route),
@@ -295,12 +310,83 @@ def _visible_text_content(payload: dict) -> str:
     thinking controls are ignored. Strip those blocks before downstream JSON
     parsers see the text. Never promote `reasoning_content` into the answer.
     """
-    content = str(
-        (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-    ).strip()
+    choices = payload.get("choices") or []
+    if choices:
+        content_value = ((choices[0].get("message") or {}).get("content") or "")
+    else:
+        # MiniMax's Anthropic-compatible response stores visible text in
+        # content blocks and keeps thinking blocks separate.
+        content_value = payload.get("content") or ""
+    if isinstance(content_value, list):
+        content = "\n".join(
+            str(block.get("text") or "")
+            for block in content_value
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    else:
+        content = str(content_value).strip()
     if "<think>" in content.lower() or "</think>" in content.lower():
         content = _THINK_BLOCK_RE.sub("", content).strip()
     return content
+
+
+def _anthropic_source(url: str, media_type: str) -> dict:
+    """Convert an OpenAI data/remote URL into an Anthropic media source."""
+    if str(url).startswith("data:"):
+        header, _, data = str(url).partition(",")
+        detected_type = header[5:].split(";", 1)[0] or media_type
+        return {"type": "base64", "media_type": detected_type, "data": data}
+    return {"type": "url", "url": str(url)}
+
+
+def _anthropic_content(content: object) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    blocks: list[dict] = []
+    for item in content if isinstance(content, list) else []:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "text":
+            blocks.append({"type": "text", "text": str(item.get("text") or "")})
+        elif item_type == "image_url":
+            url = (item.get("image_url") or {}).get("url")
+            if url:
+                blocks.append({"type": "image", "source": _anthropic_source(url, "image/jpeg")})
+        elif item_type in {"video_url", "video"}:
+            video = item.get("video_url") or item.get("source") or {}
+            url = video.get("url") if isinstance(video, dict) else video
+            if url:
+                blocks.append({"type": "video", "source": _anthropic_source(url, "video/mp4")})
+    return blocks or [{"type": "text", "text": ""}]
+
+
+def _anthropic_payload(route: dict, messages: list[dict], max_tokens: int) -> dict:
+    system_parts: list[str] = []
+    converted: list[dict] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        if role == "system":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                system_parts.append(content.strip())
+            continue
+        converted.append({
+            "role": role if role in {"user", "assistant"} else "user",
+            "content": _anthropic_content(message.get("content")),
+        })
+    body = {"model": route["model"], "messages": converted, "max_tokens": max_tokens}
+    if system_parts:
+        body["system"] = "\n\n".join(system_parts)
+    body.update(_provider_request_options(route))
+    return body
+
+
+def _usage_tokens(payload: dict, estimated_input: int, content: str) -> tuple[int, int]:
+    usage = payload.get("usage") or {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or estimated_input)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or max(1, len(content) // 4))
+    return input_tokens, output_tokens
 
 
 async def call_text(
@@ -351,24 +437,32 @@ async def call_text(
     headers = {"Content-Type": "application/json"}
     if route["provider"] == "mimo":
         headers["api-key"] = api_key
+    elif route["provider"] == "minimax_anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
     else:
         headers["Authorization"] = f"Bearer {api_key}"
+    anthropic = route["provider"] == "minimax_anthropic"
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=float(route["timeout"]))
     response_payload: dict | None = None
     try:
         for attempt in range(max(1, max_attempts)):
             try:
-                request_body = {
-                    "model": route["model"],
-                    "messages": messages,
-                    "max_tokens": visible_output,
-                    **_provider_request_options(route),
-                }
-                if json_mode:
+                request_body = (
+                    _anthropic_payload(route, messages, visible_output)
+                    if anthropic
+                    else {
+                        "model": route["model"],
+                        "messages": messages,
+                        "max_tokens": visible_output,
+                        **_provider_request_options(route),
+                    }
+                )
+                if json_mode and not anthropic:
                     request_body["response_format"] = {"type": "json_object"}
                 response = await client.post(
-                    route["base_url"].rstrip("/") + "/chat/completions",
+                    route["base_url"].rstrip("/") + ("/v1/messages" if anthropic else "/chat/completions"),
                     headers=headers,
                     json=request_body,
                 )
@@ -411,9 +505,7 @@ async def call_text(
         # Thinking-on-by-default models can exhaust the output budget and leave
         # an empty answer; never cache that poison for Hook JSON consumers.
         raise RuntimeError("模型未返回可见文本内容")
-    usage = response_payload.get("usage") or {}
-    input_tokens = int(usage.get("prompt_tokens") or estimated_input)
-    output_tokens = int(usage.get("completion_tokens") or max(1, len(content) // 4))
+    input_tokens, output_tokens = _usage_tokens(response_payload, estimated_input, content)
     stored = record_call(
         job_id,
         role,
@@ -432,6 +524,7 @@ async def call_text(
 def _estimate_multimodal_tokens(messages: list[dict]) -> int:
     text_chars = 0
     image_count = 0
+    video_count = 0
     for message in messages:
         content = message.get("content")
         if isinstance(content, str):
@@ -442,10 +535,12 @@ def _estimate_multimodal_tokens(messages: list[dict]) -> int:
                 text_chars += len(str(item.get("text") or ""))
             elif item.get("type") == "image_url":
                 image_count += 1
+            elif item.get("type") in {"video_url", "video"}:
+                video_count += 1
     # MiMo 视觉模型（mimo-v2.5）的图片 token 会在响应里返回；请求前按保守上限预留，且不把 Base64
     # 字节当作文本 token 计算。
     # bytes as text tokens.
-    return max(1, text_chars // 4 + image_count * 400)
+    return max(1, text_chars // 4 + image_count * 400 + video_count * 1_200)
 
 
 async def call_multimodal_json(
@@ -500,27 +595,35 @@ async def call_multimodal_json(
     headers = {"Content-Type": "application/json"}
     if route["provider"] == "mimo":
         headers["api-key"] = api_key
+    elif route["provider"] == "minimax_anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
     else:
         headers["Authorization"] = f"Bearer {api_key}"
+    anthropic = route["provider"] == "minimax_anthropic"
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=float(route["timeout"]))
     response_payload: dict | None = None
     try:
         for attempt in range(max(1, max_attempts)):
             try:
-                payload = {
-                    "model": route["model"],
-                    "messages": messages,
-                    # 百炼 OpenAI 兼容接口只定义 `max_tokens`；发送
-                    # `max_completion_tokens` 会被网关忽略并回落到服务端默认值，
-                    # 在长 JSON 时留下不完整尾部。
-                    "max_tokens": route["max_tokens"],
-                }
-                payload.update(_provider_request_options(route))
-                if route.get("json_mode", True):
+                payload = (
+                    _anthropic_payload(route, messages, int(route["max_tokens"]))
+                    if anthropic
+                    else {
+                        "model": route["model"],
+                        "messages": messages,
+                        # 百炼 OpenAI 兼容接口只定义 `max_tokens`；发送
+                        # `max_completion_tokens` 会被网关忽略并回落到服务端默认值，
+                        # 在长 JSON 时留下不完整尾部。
+                        "max_tokens": route["max_tokens"],
+                        **_provider_request_options(route),
+                    }
+                )
+                if route.get("json_mode", True) and not anthropic:
                     payload["response_format"] = {"type": "json_object"}
                 response = await client.post(
-                    route["base_url"].rstrip("/") + "/chat/completions",
+                    route["base_url"].rstrip("/") + ("/v1/messages" if anthropic else "/chat/completions"),
                     headers=headers,
                     json=payload,
                 )
@@ -549,9 +652,7 @@ async def call_multimodal_json(
     content = _visible_text_content(response_payload)
     if not content:
         raise RuntimeError("多模态模型返回了空内容")
-    usage = response_payload.get("usage") or {}
-    input_tokens = int(usage.get("prompt_tokens") or estimated_input)
-    output_tokens = int(usage.get("completion_tokens") or max(1, len(content) // 4))
+    input_tokens, output_tokens = _usage_tokens(response_payload, estimated_input, content)
     stored = record_call(
         job_id,
         role,

@@ -85,7 +85,7 @@ def _format_asset_catalog(assets: list[dict]) -> str:
     return "\n".join(lines)
 
 def chat_model_available() -> bool:
-    """True when MiMo chat_text can serve copy generation."""
+    """True when the configured chat_text route can serve copy generation."""
     try:
         import model_router
         if model_router.key_is_available("chat_text"):
@@ -107,7 +107,7 @@ async def _complete_json_messages(
     import model_router
 
     if not model_router.key_is_available("chat_text"):
-        raise RuntimeError("聊天模型未配置：请设置 MIMO_API_KEY")
+        raise RuntimeError("聊天模型未配置：请设置当前 chat_text 路由对应的 API Key")
     job_id = model_router.route_scoped_job_id(
         f"ai-chat-{uuid.uuid4().hex[:12]}", "chat_text"
     )

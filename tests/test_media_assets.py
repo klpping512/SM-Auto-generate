@@ -75,17 +75,30 @@ def test_douyin_script_removes_unknown_asset_ids():
     assert 25 <= sum(s["duration"] for s in normalized["scenes"]) <= 35
 
 
-def test_tts_voice_options_only_offer_mimo_default():
+def test_tts_voice_options_expose_mimo_and_minimax_defaults(monkeypatch):
+    monkeypatch.delenv("MINIMAX_TOKEN_PLAN_KEY", raising=False)
     options = video_renderer.tts_voice_options(mimo_available=True)
-    assert len(options) == 1
+    assert len(options) == 2
     mimo = options[0]
     assert mimo["provider"] == "mimo" and mimo["id"] == "mimo_default"
     assert mimo["label"] == "MiMo 默认"
     assert mimo["available"] is True
     assert mimo["preview_supported"] is True
+    minimax = options[1]
+    assert minimax["provider"] == "minimax"
+    assert minimax["available"] is False
+    assert "MINIMAX_TOKEN_PLAN_KEY" in minimax["disabled_reason"]
     disabled = video_renderer.tts_voice_options(mimo_available=False)
     assert disabled[0]["available"] is False
     assert "MIMO_API_KEY" in disabled[0]["disabled_reason"]
+
+
+def test_minimax_tts_selection_uses_configured_voice(monkeypatch):
+    monkeypatch.setenv("TTS_PROVIDER", "minimax")
+    monkeypatch.setenv("MINIMAX_TTS_VOICE", "male-qn-qingse")
+    provider, voice = video_renderer.resolve_tts_selection(None, None, strict=True)
+    assert provider == "minimax"
+    assert voice == "male-qn-qingse"
 
 
 def test_resolve_tts_selection_normalizes_retired_providers_to_mimo():

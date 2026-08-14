@@ -147,13 +147,16 @@ async def lifespan(app: FastAPI):
     seeded_sources = hotspot_fetcher.seed_default_sources(admin_user["id"] if admin_user else None)
     if seeded_sources:
         logger.info("已补齐 %s 个南非官方热点信源", seeded_sources)
-    # TTS 单轨：旁白合成仅走 MiMo。
+    # TTS 单轨：按 TTS_PROVIDER 选择 MiMo 或 MiniMax；ASR 保留独立路由。
     os.environ.setdefault("TTS_PROVIDER", "mimo")
     mimo_key = os.environ.get("MIMO_API_KEY", "")
-    if mimo_key:
-        logger.info("MiMo API key 已加载（chat/planner/vision/tts）")
+    minimax_key = os.environ.get("MINIMAX_TOKEN_PLAN_KEY", "")
+    if mimo_key or minimax_key:
+        logger.info("模型密钥已加载：active_routes=%s", [
+            role for role in model_router.ROLES if model_router.key_is_available(role)
+        ])
     else:
-        logger.warning("未配置 MIMO_API_KEY：聊天与规划将不可用")
+        logger.warning("未配置可用模型密钥：聊天与规划将不可用")
     # 清理卡住的渲染任务（启动时自动清理超时任务）
     video_renderer.cleanup_stale_jobs()
     recovered_asset_jobs = db.recover_interrupted_asset_processing_jobs()
@@ -2551,7 +2554,7 @@ async def _generate_topic_brief_video(
             "next_action": "补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
         })
     if not model_router.key_is_available("planner_text"):
-        raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请配置 MIMO_API_KEY 后重试。")
+        raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请先配置当前模型路由对应的 API Key。")
     context = _compact_topic_evidence(brief, event, scenes)
     if chain_mode == "owned_only":
         hotspot_story_contract = (
@@ -4563,15 +4566,19 @@ async def delete_media_asset(asset_id: int, user=Depends(require_role(UserRole.A
 async def media_capabilities(user=Depends(get_current_user)):
     result = media_assets.capabilities()
     result["mimo_api_key"] = bool(os.environ.get("MIMO_API_KEY"))
+    result["minimax_token_plan_key"] = bool(os.environ.get("MINIMAX_TOKEN_PLAN_KEY"))
     result["tts_provider"] = os.environ.get("TTS_PROVIDER", "mimo")
     result["mimo_tts_model"] = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
     result["mimo_tts_voice"] = os.environ.get("MIMO_TTS_VOICE", video_renderer.MIMO_TTS_VOICE)
     result["chat_model"] = (model_router.get_route("chat_text") or {}).get("model") or "mimo-v2.5"
     result["planner_model"] = (model_router.get_route("planner_text") or {}).get("model") or "mimo-v2.5-pro"
     result["vision_model"] = (model_router.get_route("vision_tagger") or {}).get("model") or "mimo-v2.5"
-    # Ready for formal video: FFmpeg + MiMo TTS key.
+    # Ready for formal video: FFmpeg + active TTS provider key.
     media_ok = bool(result.get("ffmpeg") and result.get("ffprobe"))
-    tts_ok = bool(result["mimo_api_key"])
+    active_tts = str(result["tts_provider"] or "mimo").strip().lower()
+    tts_ok = bool(
+        result["mimo_api_key"] if active_tts == "mimo" else result["minimax_token_plan_key"]
+    )
     result["ready"] = media_ok and tts_ok
     result["voice_options"] = video_renderer.tts_voice_options(
         mimo_available=result["mimo_api_key"],
