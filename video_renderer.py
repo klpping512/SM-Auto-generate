@@ -1305,7 +1305,7 @@ def _quality_report(
 
 
 # 渲染任务超时时间（秒）
-RENDER_TIMEOUT = 300  # 5 分钟
+RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT_SECONDS", "900"))
 
 
 def cleanup_stale_jobs():
