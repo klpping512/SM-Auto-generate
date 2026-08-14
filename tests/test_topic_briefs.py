@@ -218,9 +218,9 @@ def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
     ]}
 
     fixed = app._repair_formal_narrative_bridge(generated, scenes)
-    assert fixed["scenes"][1]["voiceover"] == "异常后，Buffalo核对仓内分拣。"
+    assert fixed["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo把仓内核对做稳。"
     compacted = app._compact_long_formal_voiceovers(fixed, [None, 22])
-    assert compacted["scenes"][1]["voiceover"] == "异常后，Buffalo核对仓内分拣。"
+    assert compacted["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo把仓内核对做稳。"
 
 
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():

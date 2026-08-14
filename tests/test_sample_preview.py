@@ -61,7 +61,7 @@ def test_preview_subtitles_scale_to_preview_canvas(tmp_path):
     )
 
     # 所有来源使用统一全宽字幕带，并留出移动端底部安全区。
-    assert Image.open(tmp_path / "subtitle-0-0.png").size == (540, 173)
+    assert Image.open(tmp_path / "subtitle-0-0.png").size == (540, 86)
     assert "overlay=0:H-h-72" in " ".join(command)
 
 
@@ -88,7 +88,7 @@ def test_hotspot_news_subtitles_use_the_same_mask_as_owned_video(tmp_path):
 
     subtitle = Image.open(tmp_path / "subtitle-0-0.png")
     # 热点和自有素材必须使用同一全宽字幕带，不能再切换第二种遮罩。
-    assert subtitle.size == (540, 173)
+    assert subtitle.size == (540, 86)
     assert subtitle.getpixel((20, 20))[3] > 0
 
 

@@ -146,7 +146,7 @@ def test_clip_source_command_preserves_real_scene_audio_for_narration_gaps(tmp_p
     assert "-an" not in command
 
 
-def test_scene_command_normalizes_landscape_source_to_full_bleed_portrait(tmp_path, monkeypatch):
+def test_scene_command_fits_landscape_source_without_losing_edge_information(tmp_path, monkeypatch):
     import video_renderer
 
     source = tmp_path / "source.mp4"; source.touch()
@@ -160,10 +160,10 @@ def test_scene_command_normalizes_landscape_source_to_full_bleed_portrait(tmp_pa
     filters = command[command.index("-filter_complex") + 1]
     assert "scale=540:960:force_original_aspect_ratio=increase" in filters
     assert "crop=540:960:exact=1" in filters
+    assert "force_original_aspect_ratio=decrease" in filters
+    assert "boxblur=20:1" in filters
+    assert "overlay=(W-w)/2:(H-h)/2" in filters
     assert "setsar=1" in filters
-    assert "boxblur=" not in filters
-    assert "force_original_aspect_ratio=decrease" not in filters
-    assert "overlay=(W-w)/2:(H-h)/2" not in filters
 
 
 def test_only_standard_nine_by_sixteen_sizes_are_renderable():
@@ -174,10 +174,10 @@ def test_only_standard_nine_by_sixteen_sizes_are_renderable():
     assert not video_renderer.is_standard_portrait_size((1280, 720))
 
 
-def test_portrait_frame_policy_keeps_sources_full_bleed_and_subtitles_out_of_the_bottom_edge():
+def test_portrait_frame_policy_preserves_source_content_and_keeps_subtitles_low():
     import video_renderer
 
-    assert video_renderer.PORTRAIT_FRAME_POLICY == "full_bleed_center_crop"
+    assert video_renderer.PORTRAIT_FRAME_POLICY == "fit_with_consistent_background"
     assert video_renderer._subtitle_safe_bottom_margin(960) == 72
     assert video_renderer._subtitle_safe_bottom_margin(1920) == 144
     assert video_renderer._subtitle_safe_bottom_margin(960, "hotspot_news") == 72
@@ -193,7 +193,7 @@ def test_all_subtitle_masks_use_the_same_full_width_safe_band(tmp_path):
     )
 
     from PIL import Image
-    assert Image.open(overlay).size == (540, 173)
+    assert Image.open(overlay).size == (540, 86)
 
 
 def test_transition_concat_resets_timestamps_and_crossfades_audio_video(tmp_path):
@@ -508,20 +508,23 @@ def _scene_filter(monkeypatch, tmp_path, dims):
     return command[command.index("-filter_complex") + 1]
 
 
-def test_scene_command_landscape_source_uses_the_same_full_bleed_policy(monkeypatch, tmp_path):
-    # 横屏源和竖屏源都必须满版裁切到统一 9:16，不再生成第二套模糊背景模板。
+def test_scene_command_landscape_source_uses_the_same_content_preserving_policy(monkeypatch, tmp_path):
+    # 横屏源和竖屏源都使用同一套完整缩放 + 统一背景画布规则。
     fc = _scene_filter(monkeypatch, tmp_path, (1920, 1080))
     assert "split=2" not in fc
-    assert "boxblur" not in fc
-    assert "force_original_aspect_ratio=decrease" not in fc
+    assert "boxblur=20:1" in fc
+    assert "force_original_aspect_ratio=decrease" in fc
+    assert "overlay=(W-w)/2:(H-h)/2" in fc
     assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
     assert "crop=1080:1920:exact=1" in fc
 
 
-def test_scene_command_portrait_source_keeps_full_bleed(monkeypatch, tmp_path):
-    # 批13 C：竖屏源维持满版 increase+crop，无模糊背景
+def test_scene_command_portrait_source_uses_the_same_content_preserving_policy(monkeypatch, tmp_path):
+    # 竖屏源也走同一套背景 + 完整缩放规则，保证不同源方向视觉一致。
     fc = _scene_filter(monkeypatch, tmp_path, (1080, 1920))
-    assert "boxblur" not in fc
+    assert "boxblur=20:1" in fc
     assert "split=2" not in fc
+    assert "force_original_aspect_ratio=decrease" in fc
+    assert "overlay=(W-w)/2:(H-h)/2" in fc
     assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
     assert "crop=1080:1920:exact=1" in fc

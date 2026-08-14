@@ -57,12 +57,11 @@ MIN_FOOTAGE_TO_NARRATION_RATIO = 0.5
 MAX_TRAILING_NARRATION_GAP_SECONDS = 0.75
 TTS_MAX_ATTEMPTS = 3
 TTS_RETRY_DELAY_SECONDS = 1.0
-# A short video must read as one native mobile format.  Showing a complete
-# landscape source inside a blurred portrait shell technically keeps 9:16
-# output, but viewers still experience it as a horizontal card between vertical
-# scenes.  Every production beat therefore fills one portrait frame; source
-# edges may be cropped, never letterboxed or inset.
-PORTRAIT_FRAME_POLICY = "full_bleed_center_crop"
+# A short video must read as one native mobile format without throwing away
+# information from a landscape source. Every production beat uses the same
+# 9:16 canvas: the complete source is fitted inside it, while a low-contrast
+# version of that source fills the remaining area as a consistent backdrop.
+PORTRAIT_FRAME_POLICY = "fit_with_consistent_background"
 
 
 def _contains_cjk(text: str) -> bool:
@@ -705,11 +704,11 @@ def _generate_text_overlay(
     # A 16:9 output is wide but short.  Width-only scaling made its subtitles
     # much larger than vertical subtitles.  The short edge is the safe scale.
     scale = min(width / 1080, (height or 1920) / 1920)
-    # One full-width 18% band is used for every source type. It is large enough
-    # to cover source tickers after the 7.5% bottom safe area, but compact enough
-    # not to bury the actual footage.
-    overlay_height = max(round((height or 1920) * 0.18), round(120 * scale))
-    font_size = max(20, round(34 * scale))
+    # One compact full-width 9% band is used for every source type. The previous
+    # 18% slab covered too much of the footage and made the subtitle feel like
+    # a second card rather than a caption.
+    overlay_height = max(round((height or 1920) * 0.09), round(86 * scale))
+    font_size = max(20, round(32 * scale))
     stroke_width = max(2, round(3 * scale))
     img = Image.new('RGBA', (width, overlay_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -729,8 +728,9 @@ def _generate_text_overlay(
     line_height = max(28, round(50 * scale))
     y0 = overlay_height / 2 - (len(lines) - 1) * line_height / 2
     for y in range(overlay_height):
-        # 顶部较透、底部加深，覆盖原片 ticker，同时保留画面层次。
-        alpha = int(150 + 72 * (y / max(1, overlay_height - 1)))
+        # Keep the source visible while still separating Chinese captions from
+        # source tickers and bright warehouse footage.
+        alpha = int(105 + 60 * (y / max(1, overlay_height - 1)))
         draw.line((0, y, width, y), fill=(7, 11, 10, alpha))
     for line_index, value in enumerate(lines):
         y = y0 + line_index * line_height
@@ -808,13 +808,15 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
         command += ["-loop", "1", "-i", str(overlay)]
     audio_index = len(overlays) + 1
     command += ["-i", str(wav), "-t", str(duration)]
-    # All source orientations use the same full-bleed center crop. A blurred
-    # landscape shell beside a full portrait source made the production feel
-    # like two different templates; content selection must handle the crop,
-    # while the renderer keeps one stable canvas rule.
+    # All source orientations use one content-preserving 9:16 canvas. The
+    # complete source is fitted inside a low-contrast backdrop, so a landscape
+    # clip does not lose edge information while portrait clips remain full
+    # height. This is one frame policy, not separate landscape/portrait modes.
     filters = [
         f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={width}:{height}:exact=1,setsar=1[portrait]",
+        f"crop={width}:{height}:exact=1,boxblur=20:1[backdrop];"
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[content];"
+        f"[backdrop][content]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1[portrait]",
     ]
     if animate_image and not is_video:
         # 自有上下文图片是短暂的真实证据，不应在 9:16 画面中显得像一张突然插入的卡片。
@@ -1706,7 +1708,7 @@ def render_job(
         report["frame_policy"] = {
             "id": PORTRAIT_FRAME_POLICY,
             "canvas": f"{output_size[0]}x{output_size[1]}",
-            "description": "每个镜头满版居中裁切到统一 9:16，禁止横向插卡或信箱边框",
+            "description": "每个镜头完整缩放到统一 9:16 画布，余量使用统一低干扰背景，保留横屏画面边缘信息",
         }
         report["audio_sync"] = {
             "passed": all(item["passed"] for item in subtitle_sync_reports),

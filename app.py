@@ -1729,14 +1729,22 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
 def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict:
     """Deterministically repair only the first Hook-to-owned bridge beat."""
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    first_voiceover = str(repaired["scenes"][0].get("voiceover") or "") if repaired["scenes"] else ""
+    if any(term in first_voiceover for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾")):
+        contrast_lead = "火情提醒风险"
+    elif any(term in first_voiceover for term in ("拥堵", "排队", "滞留")):
+        contrast_lead = "拥堵提醒风险"
+    elif any(term in first_voiceover for term in ("侧翻", "事故", "碰撞")):
+        contrast_lead = "事故提醒风险"
+    else:
+        contrast_lead = "现场提醒风险"
     labels = {
-        # Keep the deterministic bridge inside the shortest real-video beat.
-        # The previous longer sentence was trimmed after repair and could
-        # leave a broken fragment such as “分拣和”。
-        "warehouse": "核对仓内分拣",
-        "staff": "核对分拣检查",
-        "facility": "核对现场设施",
-        "delivery": "核对发运交接",
+        # Keep the contrast line inside the shortest real-video beat while
+        # making the brand response visible and stable, not causal.
+        "warehouse": "仓内核对",
+        "staff": "分拣检查",
+        "facility": "现场核对",
+        "delivery": "发运交接",
     }
     for index, scene in enumerate(scenes):
         if index >= len(repaired["scenes"]):
@@ -1750,7 +1758,7 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
         if not (empty_transition or not valid_relation or not valid_action):
             continue
         category = str(scene.get("primary_category") or "").casefold()
-        replacement = f"异常后，Buffalo{labels.get(category, '核对仓配动作')}。"
+        replacement = f"{contrast_lead}，Buffalo把{labels.get(category, '仓配核对')}做稳。"
         repaired["scenes"][index]["voiceover"] = replacement
         repaired["scenes"][index]["text_overlay"] = replacement.rstrip("。")[:24]
     return repaired
