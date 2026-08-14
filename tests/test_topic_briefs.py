@@ -165,6 +165,45 @@ def test_formal_planner_context_exposes_narration_lower_and_upper_bounds():
     assert context["allowed_scenes"][0]["voiceover_max_chars"] == 24
 
 
+def test_formal_planner_context_preserves_hook_facts_and_narrative_contract():
+    import app
+
+    context = app._compact_topic_evidence(
+        {"subject": "运输安全"},
+        {
+            "title_zh": "夜间燃烧结构与烟雾",
+            "evidence": {
+                "what_happened": "大型结构持续燃烧，现场出现火光和浓烟。",
+                "hook_reason": "燃烧、火光和烟雾连续可见。",
+                "logistics_question": "运输或存储环节如何核对安全状态？",
+                "visual_audit": {"visible_objects": ["火焰"], "visible_actions": ["燃烧"]},
+            },
+        },
+        [{"scene": 1, "scene_role": "hotspot_evidence", "duration_ms": 6_800, "visual": "现场"}],
+    )
+
+    assert context["facts"][0]["what_happened"].startswith("大型结构持续燃烧")
+    assert context["facts"][0]["visible_actions"] == ["燃烧"]
+    assert "beat_2" in context["narrative_contract"]
+
+
+def test_formal_narrative_rejects_a_hook_that_jumps_to_warehouse_without_bridge():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "大型结构持续燃烧，现场有火光和浓烟。"},
+        {"voiceover": "镜头转到仓内，分拣线先把动线理出来。"},
+    ]}
+    event = {"evidence": {"what_happened": "大型结构持续燃烧，现场出现火光和浓烟。"}}
+
+    with pytest.raises(ValueError, match="自有镜头不能只做无意义转场"):
+        app._validate_formal_narrative(generated, scenes, event)
+
+
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
     import app
 
@@ -290,14 +329,14 @@ def test_generate_topic_brief_uses_one_model_plan_for_a_verified_sixty_second_pr
 
     assert response.status_code == 200, response.json()
     payload = response.json()
-    assert payload["coverage"] == {"hotspot_video": 2, "owned_video": 5, "image": 0, "duration_ms": 52000}
+    assert payload["coverage"] == {"hotspot_video": 2, "owned_video": 5, "za_stock": 0, "image": 0, "duration_ms": 52000}
     revision = payload["project"]["current_revision"]
     assert len(revision["payload"]["scenes"]) == 8
     assert revision["payload"]["scenes"][0]["voiceover"].startswith("第1段")
     assert captured["prompt_version"] == "topic-brief-video-plan-v10"
     assert "一线物流同行" in captured["messages"][0]["content"]
     assert json.loads(payload["project"]["source_snapshot"])["copywriting_sop"] == {
-        "id": "south-africa-logistics-douyin-copy-style", "version": "v2",
+        "id": "south-africa-logistics-douyin-copy-style", "version": "v3",
     }
 
 

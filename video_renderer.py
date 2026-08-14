@@ -696,23 +696,19 @@ def _generate_text_overlay(
     height: int | None = None,
     mask_source_lower_third: bool = False,
 ):
-    """生成下方安全区字幕图；不依赖 FFmpeg 的可选 libass/drawtext 编译能力。
+    """生成全片统一的底部字幕遮罩；不依赖 FFmpeg 的可选 libass/drawtext。
 
-    热点新闻母片常自带底部新闻条。此时用半透明的整条底栏覆盖原新闻条，
-    只保留系统字幕，避免两层字幕同时争抢画面；自有素材仍使用紧凑字幕条。
+    热点和 Buffalo 自有素材使用同一条全宽渐变底栏、同一字号和同一安全区，
+    既压住母片自带的英文 ticker，也避免素材切换时字幕样式跳变。
+    ``mask_source_lower_third`` 保留为兼容参数，但不再切换第二套视觉规范。
     """
     # A 16:9 output is wide but short.  Width-only scaling made its subtitles
     # much larger than vertical subtitles.  The short edge is the safe scale.
     scale = min(width / 1080, (height or 1920) / 1920)
-    # News clips frequently carry their own large lower-third captions.  A
-    # compact system subtitle strip leaves both layers readable only in theory:
-    # on a phone they collide.  Cover that complete source area and place our
-    # caption at the top of the mask, above the original text.
-    overlay_height = (
-        max(round((height or 1920) * 0.36), round(180 * scale))
-        if mask_source_lower_third
-        else max(70, round(92 * scale))
-    )
+    # One full-width 18% band is used for every source type. It is large enough
+    # to cover source tickers after the 7.5% bottom safe area, but compact enough
+    # not to bury the actual footage.
+    overlay_height = max(round((height or 1920) * 0.18), round(120 * scale))
     font_size = max(20, round(34 * scale))
     stroke_width = max(2, round(3 * scale))
     img = Image.new('RGBA', (width, overlay_height), (0, 0, 0, 0))
@@ -731,24 +727,11 @@ def _generate_text_overlay(
         lines.append(line)
     lines = lines[:2]
     line_height = max(28, round(50 * scale))
-    y0 = (
-        max(round(64 * scale), round(overlay_height * 0.14))
-        if mask_source_lower_third
-        else overlay_height / 2 - (len(lines) - 1) * line_height / 2
-    )
-    # 先画底板：自有素材使用窄字幕条，新闻热点则覆盖整条原始新闻下三分之一。
-    text_block_top = max(8, int(y0 - line_height / 2 - 12 * scale))
-    text_block_bottom = min(overlay_height - 8, int(y0 + (len(lines) - 1) * line_height + line_height / 2 + 12 * scale))
-    if mask_source_lower_third:
-        for y in range(overlay_height):
-            # 顶部较透、底部加深，完整压住原片 ticker，但不做纯黑硬切。
-            alpha = int(132 + 102 * (y / max(1, overlay_height - 1)))
-            draw.line((0, y, width, y), fill=(7, 11, 10, alpha))
-    else:
-        draw.rounded_rectangle(
-            (int(width * 0.11), text_block_top, int(width * 0.89), text_block_bottom),
-            radius=max(12, round(16 * scale)), fill=(7, 11, 10, 160),
-        )
+    y0 = overlay_height / 2 - (len(lines) - 1) * line_height / 2
+    for y in range(overlay_height):
+        # 顶部较透、底部加深，覆盖原片 ticker，同时保留画面层次。
+        alpha = int(150 + 72 * (y / max(1, overlay_height - 1)))
+        draw.line((0, y, width, y), fill=(7, 11, 10, alpha))
     for line_index, value in enumerate(lines):
         y = y0 + line_index * line_height
         draw.text((width / 2, y), value, font=font, fill="white", stroke_width=stroke_width,
@@ -774,8 +757,6 @@ def _subtitle_safe_bottom_margin(height: int, subtitle_layout: str = "standard")
     clips use a full lower-third mask, so that mask must reach the bottom edge
     while its caption sits near the top of the mask.
     """
-    if subtitle_layout == "hotspot_news":
-        return 0
     return max(48, round(max(1, int(height)) * 0.075))
 
 
@@ -827,23 +808,14 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
         command += ["-loop", "1", "-i", str(overlay)]
     audio_index = len(overlays) + 1
     command += ["-i", str(wav), "-t", str(duration)]
-    # 所有镜头统一为 9:16 竖屏。批13 拍板：横屏源不再居中裁切（会丢约 68% 横向
-    # 信息），改为“模糊背景 + 完整画面”；竖屏/方形源维持满版（increase+crop 正好铺满）。
-    src_w, src_h = _probe_dimensions(ffprobe, source)
-    landscape_source = bool(src_w and src_h and src_w > src_h)
-    if landscape_source:
-        filters = [
-            "[0:v]split=2[bg_src][fg_src]",
-            f"[bg_src]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={width}:{height}:exact=1,boxblur=luma_radius=25:luma_power=3[bg]",
-            f"[fg_src]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[fg]",
-            "[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2,setsar=1[portrait]",
-        ]
-    else:
-        filters = [
-            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={width}:{height}:exact=1,setsar=1[portrait]",
-        ]
+    # All source orientations use the same full-bleed center crop. A blurred
+    # landscape shell beside a full portrait source made the production feel
+    # like two different templates; content selection must handle the crop,
+    # while the renderer keeps one stable canvas rule.
+    filters = [
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={width}:{height}:exact=1,setsar=1[portrait]",
+    ]
     if animate_image and not is_video:
         # 自有上下文图片是短暂的真实证据，不应在 9:16 画面中显得像一张突然插入的卡片。
         # 仅做 3.5% 的居中推进；品牌 CTA 则保持稳定，便于识别并避免过度装饰。
@@ -855,8 +827,8 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
     else:
         filters.append("[portrait]fps=30,setsar=1[v0]")
     current = "v0"
-    # 自有素材字幕位于移动端底部安全区之上；热点新闻则覆盖原片下三分之一，
-    # 系统字幕上移到遮罩上沿，避免与原片英文新闻条叠字。
+    # 所有来源字幕都位于同一移动端底部安全区之上；统一遮罩负责压住
+    # 热点母片自带的英文新闻条，避免素材来源切换时字幕动线跳变。
     subtitle_bottom_margin = _subtitle_safe_bottom_margin(height, subtitle_layout)
     for cue_index, cue in enumerate(cues):
         next_label = f"v{cue_index + 1}"

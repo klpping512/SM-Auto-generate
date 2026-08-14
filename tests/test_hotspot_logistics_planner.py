@@ -375,3 +375,23 @@ def test_user_selected_hook_is_first_hotspot_scene():
 
     hotspot_scenes = [scene for scene in scenes if scene["evidence_type"] == "hotspot_video"]
     assert hotspot_scenes[0]["event_clip_id"] == 3
+
+
+def test_first_owned_scene_bridges_hook_to_buffalo_visible_action():
+    from hotspot_video_planner import plan_followup_scenes
+
+    scenes = plan_followup_scenes(
+        {"hotspot_title": "集装箱设施起火", "hotspot_type": "risk", "logistics_topic": "运输安全",
+         "approved_hook_event_ids": [78]},
+        [{"id": 78, "asset_id": 691, "hotspot_id": 700, "title_zh": "夜间燃烧结构与烟雾",
+          "clip_status": "ready", "start_ms": 0, "end_ms": 12_800}],
+        [{"id": 269, "asset_id": 211, "asset_file_type": "video", "primary_category": "warehouse",
+          "asset_name": "Buffalo 分拣线", "description": "分拣线作业", "start_ms": 0, "end_ms": 6_800,
+          "quality_score": 0.8, "tags": []}],
+        target_duration_ms=50_000,
+    )
+
+    owned = next(scene for scene in scenes if scene["scene_role"] == "owned_proof")
+    assert owned["flow_role"] == "post_hook_bridge"
+    assert "Buffalo" in owned["voiceover"]
+    assert "镜头转到仓内" not in owned["voiceover"]

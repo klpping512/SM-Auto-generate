@@ -700,6 +700,8 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
         return "热点不是 Buffalo 的服务证明；真正该问的是，异常出现时，谁在提前调整路线和沟通？"
     if role == "owned_proof":
         labels = {"warehouse": "仓储和备货", "staff": "分拣与检查", "facility": "现场设施", "delivery": "运输与交付"}
+        if flow_role == "post_hook_bridge":
+            return f"这类异常之后，Buffalo先把{labels.get(category, '仓配动作')}理清。"
         openings = (
             "先看执行现场：", "再往下拆一层：", "真正影响客户体验的是：",
             "从仓内细节看：", "换到另一处动作：", "再补一个核对节点：",
@@ -927,6 +929,8 @@ def plan_followup_scenes(
         slots.append(("image", context_images[image_index]))
         image_index += 1
 
+    hotspot_seen = False
+    bridge_assigned = False
     for position, (kind, payload) in enumerate(slots, 1):
         if kind == "hotspot":
             _, event, reasons = payload
@@ -951,6 +955,7 @@ def plan_followup_scenes(
                 "asset_start_ms": asset_start_ms, "asset_end_ms": asset_end_ms,
                 "match_reasons": (reasons or ["热点来源画面"]) + ([f"优先现场子片段：{visual_description}"] if visual_description else []),
             })
+            hotspot_seen = True
             continue
         if kind == "owned":
             segment = payload
@@ -962,11 +967,13 @@ def plan_followup_scenes(
             ]
             description = str(segment.get("description") or "").strip()
             visual = description or str(segment.get("asset_name") or "Buffalo 履约现场")
+            flow_role = "post_hook_bridge" if hotspot_seen and not bridge_assigned else "proof"
+            bridge_assigned = bridge_assigned or flow_role == "post_hook_bridge"
             scenes.append({
                 "scene": position, "scene_role": "owned_proof", "evidence_type": "owned_video",
                 "duration_ms": duration_ms, "duration": duration_ms / 1000,
                 "visual": visual,
-                "voiceover": _voiceover(brief, "owned_proof", position, "", category),
+                "voiceover": _voiceover(brief, "owned_proof", position, "", category, flow_role=flow_role),
                 "text_overlay": f"{brief.get('logistics_topic', '物流体验')}｜{category or '履约现场'}"[:24],
                 "asset_id": segment.get("asset_id"), "asset_segment_id": segment.get("id"),
                 # 文案门禁需要按镜头主分类精准拦截过度宣称。
@@ -978,6 +985,7 @@ def plan_followup_scenes(
                 "asset_start_ms": segment.get("start_ms", 0), "asset_end_ms": segment.get("end_ms", 0),
                 "copy_anchor": _owned_copy_anchor(segment),
                 "action_key": _owned_action_key(segment),
+                "flow_role": flow_role,
                 "match_reasons": [f"素材分类匹配：{category or '已审核视频'}"]
                     + ([f"可见品牌露出：{'、'.join(visible_brands)}"] if visible_brands else [])
                     + ["仅作为可见执行动作证据，不替代不可见服务承诺"],

@@ -60,8 +60,8 @@ def test_preview_subtitles_scale_to_preview_canvas(tmp_path):
         output_size=(540, 960),
     )
 
-    # 字幕上移至移动端底部安全区，且新版用短边缩放，不会贴住手势条。
-    assert Image.open(tmp_path / "subtitle-0-0.png").size == (540, 70)
+    # 所有来源使用统一全宽字幕带，并留出移动端底部安全区。
+    assert Image.open(tmp_path / "subtitle-0-0.png").size == (540, 173)
     assert "overlay=0:H-h-72" in " ".join(command)
 
 
@@ -73,7 +73,7 @@ def test_subtitle_safe_bottom_margin_scales_with_preview_and_final_height():
     assert video_renderer._subtitle_safe_bottom_margin(720) == 54
 
 
-def test_hotspot_news_subtitles_use_compact_source_mask(tmp_path):
+def test_hotspot_news_subtitles_use_the_same_mask_as_owned_video(tmp_path):
     import video_renderer
     from PIL import Image
 
@@ -83,14 +83,12 @@ def test_hotspot_news_subtitles_use_compact_source_mask(tmp_path):
         "ffmpeg", "ffprobe", source, True, wav,
         [{"text": "热点事实说明。", "start": 0, "end": 2}],
         3.0, tmp_path / "preview.mp4", tmp_path, 0,
-        output_size=(1280, 720), subtitle_layout="hotspot_news",
+        output_size=(540, 960), subtitle_layout="hotspot_news",
     )
 
     subtitle = Image.open(tmp_path / "subtitle-0-0.png")
-    # 热点新闻要完整遮住母片下三分之一的旧新闻条，系统字幕位于遮罩上沿；
-    # 不能退回 70px 窄条，否则原片字幕会与系统字幕重叠。
-    assert subtitle.size == (1280, 259)
-    # 新闻热点专用底栏仍必须是可见遮罩，避免系统字幕和原片文字完全重叠。
+    # 热点和自有素材必须使用同一全宽字幕带，不能再切换第二种遮罩。
+    assert subtitle.size == (540, 173)
     assert subtitle.getpixel((20, 20))[3] > 0
 
 

@@ -180,10 +180,10 @@ def test_portrait_frame_policy_keeps_sources_full_bleed_and_subtitles_out_of_the
     assert video_renderer.PORTRAIT_FRAME_POLICY == "full_bleed_center_crop"
     assert video_renderer._subtitle_safe_bottom_margin(960) == 72
     assert video_renderer._subtitle_safe_bottom_margin(1920) == 144
-    assert video_renderer._subtitle_safe_bottom_margin(960, "hotspot_news") == 0
+    assert video_renderer._subtitle_safe_bottom_margin(960, "hotspot_news") == 72
 
 
-def test_hotspot_news_subtitle_mask_uses_the_full_lower_third_and_moves_text_up(tmp_path):
+def test_all_subtitle_masks_use_the_same_full_width_safe_band(tmp_path):
     import video_renderer
 
     overlay = tmp_path / "news-subtitle.png"
@@ -193,7 +193,7 @@ def test_hotspot_news_subtitle_mask_uses_the_full_lower_third_and_moves_text_up(
     )
 
     from PIL import Image
-    assert Image.open(overlay).size == (540, 346)
+    assert Image.open(overlay).size == (540, 173)
 
 
 def test_transition_concat_resets_timestamps_and_crossfades_audio_video(tmp_path):
@@ -508,13 +508,14 @@ def _scene_filter(monkeypatch, tmp_path, dims):
     return command[command.index("-filter_complex") + 1]
 
 
-def test_scene_command_landscape_source_uses_blur_background(monkeypatch, tmp_path):
-    # 批13 C：横屏源 → 模糊背景 + 完整画面，不再居中裁切
+def test_scene_command_landscape_source_uses_the_same_full_bleed_policy(monkeypatch, tmp_path):
+    # 横屏源和竖屏源都必须满版裁切到统一 9:16，不再生成第二套模糊背景模板。
     fc = _scene_filter(monkeypatch, tmp_path, (1920, 1080))
-    assert "split=2" in fc
-    assert "boxblur" in fc
-    assert "overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2" in fc
-    assert "force_original_aspect_ratio=decrease" in fc
+    assert "split=2" not in fc
+    assert "boxblur" not in fc
+    assert "force_original_aspect_ratio=decrease" not in fc
+    assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
+    assert "crop=1080:1920:exact=1" in fc
 
 
 def test_scene_command_portrait_source_keeps_full_bleed(monkeypatch, tmp_path):

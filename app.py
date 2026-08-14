@@ -1688,6 +1688,41 @@ def _validate_formal_copy_specificity(generated: dict) -> None:
             raise ValueError(f"内容规划模型第 {index} 个分镜使用了“请核对”模板句")
 
 
+_EMPTY_HOOK_TRANSITIONS = ("镜头转到仓内", "先看执行现场", "问题摆在这里")
+_HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "火情", "火灾", "核对")
+
+
+def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict | None) -> None:
+    """Reject a fluent script that skips the Hook-to-brand narrative bridge."""
+    if not event or not any(scene.get("evidence_type") == "hotspot_video" for scene in scenes):
+        return
+    evidence = event.get("evidence") or {}
+    what_happened = str(evidence.get("what_happened") or "").strip()
+    if not what_happened:
+        return
+    generated_scenes = list(generated.get("scenes") or [])
+    if not generated_scenes:
+        raise ValueError("热点成片缺少开场事实分镜")
+    first = str(generated_scenes[0].get("voiceover") or "")
+    if any(phrase in first for phrase in _EMPTY_HOOK_TRANSITIONS):
+        raise ValueError("热点开场不能使用空转场句")
+    fact_terms = [
+        term for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "结构", "卡车", "排队", "拥堵", "侧翻", "人员")
+        if term in what_happened
+    ]
+    if fact_terms and sum(term in first for term in fact_terms) < min(2, len(fact_terms)):
+        raise ValueError("热点开场没有明确说明 Hook 发生了什么")
+    for index, scene in enumerate(scenes[1:], 1):
+        if scene.get("scene_role") != "owned_proof":
+            continue
+        bridge = str(generated_scenes[index].get("voiceover") or "") if index < len(generated_scenes) else ""
+        if any(phrase in bridge for phrase in _EMPTY_HOOK_TRANSITIONS):
+            raise ValueError("热点后的第一个自有镜头不能只做无意义转场")
+        if not any(term in bridge for term in _HOOK_BRIDGE_TERMS):
+            raise ValueError("热点后的第一个自有镜头没有说明物流安全承接关系")
+        break
+
+
 def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
     """Return bounded, role-separated candidates.  This only stores references, never copies media."""
     terms = _topic_keywords(" ".join([brief.get("raw_input", ""), brief.get("subject", ""), brief.get("angle", "")]))
@@ -1892,11 +1927,18 @@ def _compact_long_formal_voiceovers(generated: dict, voiceover_limits: list[int 
 
 def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict]) -> dict:
     """Only send selected, short evidence summaries to the remote planner."""
+    evidence = (event or {}).get("evidence") or {}
+    visual_audit = evidence.get("visual_audit") or {}
     facts = [{
         "title": str(event.get("title_zh") or event.get("title_en") or "")[:160],
         "summary": str(event.get("summary_zh") or event.get("summary") or "")[:400],
         "location": str(event.get("location") or "")[:80],
         "published_at": str(event.get("published_at") or "")[:40],
+        "what_happened": str(evidence.get("what_happened") or "")[:300],
+        "hook_reason": str(evidence.get("hook_reason") or "")[:300],
+        "logistics_question": str(evidence.get("logistics_question") or "")[:240],
+        "visible_objects": list(visual_audit.get("visible_objects") or [])[:12],
+        "visible_actions": list(visual_audit.get("visible_actions") or [])[:8],
     }] if event else []
     allowed_scenes = [{
         "scene": item["scene"], "role": item["scene_role"],
@@ -1913,6 +1955,12 @@ def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict])
             ),
         },
         "facts": facts,
+        "narrative_contract": {
+            "beat_1": "明确说出 Hook 发生了什么，不能只说‘现场’或复述标题。",
+            "beat_2": "解释这个事实为什么会影响运输、存储或配送安全。",
+            "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接；安全性必须用动作表现，不能只喊口号。",
+            "beat_4": "每个后续镜头只讲一个可见动作，最后再用统一 CTA 收束。",
+        },
         "allowed_scenes": allowed_scenes,
     }
 
@@ -2564,16 +2612,17 @@ async def _generate_topic_brief_video(
         hotspot_quota_line = "无热点 Hook；全片使用自有镜头。"
     elif hotspot_count == 1:
         hotspot_story_contract = (
-            "叙事开场只有第1段热点 Hook：前两秒给出强现场事实和一个与卖家有关的问题。"
-            "第1段只能描述允许 Hook 中可见或已给出的热点事实，不得写卖家已经采取了什么动作。"
-            "第2段开头必须用一句简短的剪辑衔接（如‘镜头转到仓内’），随后只描述 Buffalo 镜头可见动作。"
+            "叙事开场只有第1段热点 Hook：必须用允许 Hook 的 what_happened 明确说明发生了什么，"
+            "不能只说‘现场正在发生’、只复述标题或只抛一个问题。第1段只能描述允许 Hook 中可见或已给出的热点事实。"
+            "第1个自有镜头不是无意义转场，必须承担桥接：先说明该事实为什么会影响运输、存储或配送安全，"
+            "再把 Buffalo 镜头里的一个可见动作接上；禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     else:
         hotspot_story_contract = (
             "前两段是同一事件的热点事实：第1段前两秒给出强现场事实和卖家问题，第2段只补充同一现场可见情况。"
             "前两段只能描述允许 Hook 中可见或已给出的热点事实；第2段不得写卖家已经采取了什么动作。"
-            "第3段开头必须用一句简短的剪辑衔接（如‘镜头转到仓内’），随后只描述 Buffalo 镜头可见动作。"
+            "第1个自有镜头必须承担事件到物流安全动作的桥接，禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     scene_count_line = f"必须严格输出 {len(scenes)} 个分镜，分镜条数与 allowed_scenes 完全一致，不得多不得少。"
@@ -2585,7 +2634,9 @@ async def _generate_topic_brief_video(
             + "热点事实不得写‘堵死’、全面瘫痪、完全停摆或全线停摆等原始事实未证实的夸张断言。"
             "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
             "自有镜头旁白只能描述画面可见动作；没有清关、入库前或派送前事实时，不得凭画面推断这些节点已经发生。"
-            "每段必须提供新的具体信息。不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
+            "每段必须提供新的具体信息。第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成‘事件事实→物流安全问题→Buffalo可见动作’的桥接。"
+            "禁止使用‘镜头转到仓内’、‘先看执行现场’、‘问题摆在这里’等空转场句作为整段旁白。"
+            "不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
             + scene_count_line
             + "用户主题是整条视频的标题和叙事主线；热点 Hook 只能作为开场事实或外部背景，绝不能改写、取代或缩窄用户主题。"
             "若 brief.topic_anchor_contract 存在，标题必须命中其 title 任一词，并且 title_all 中的词必须全部出现；旁白必须展开其 narrative 任一词。"
@@ -2634,6 +2685,7 @@ async def _generate_topic_brief_video(
             )
             _validate_formal_copy_specificity(generated)
             _validate_generated_topic_anchor(generated, brief)
+            _validate_formal_narrative(generated, scenes, event)
         except ValueError as initial_error:
             # The planner selected no file references, so one bounded rewrite can
             # safely repair malformed JSON or a short-scene narration overflow
@@ -2647,7 +2699,8 @@ async def _generate_topic_brief_video(
                         + scene_count_line
                         + "不得推荐或选择新素材，不得使用信息图、地图、流程图或文字卡。"
                         "逐段读取 allowed_scenes 的字数上下限。短句必须改成完整、自然且与该镜头可见动作相关的句子；"
-                        "不得保留‘先核对清单’、‘配送节奏要稳’这类脱离画面的短口号，也不得用‘请核对订单信息’补字。"
+                        "第1段必须讲清 facts.what_happened；第1个自有镜头必须完成事件到物流安全动作的桥接。"
+                        "不得保留‘镜头转到仓内’、‘先看执行现场’、‘先核对清单’、‘配送节奏要稳’这类空转场或脱离画面的短口号，也不得用‘请核对订单信息’补字。"
                         + douyin_copywriting_sop.prompt_for_video_planner()
                     ),
                 },
@@ -2692,6 +2745,7 @@ async def _generate_topic_brief_video(
                     )
                     _validate_formal_copy_specificity(generated)
                     _validate_generated_topic_anchor(generated, brief)
+                    _validate_formal_narrative(generated, scenes, event)
                     break
                 except ValueError as exc:
                     repair_error = exc
@@ -2720,6 +2774,7 @@ async def _generate_topic_brief_video(
     try:
         _validate_formal_copy_specificity(generated)
         _validate_generated_topic_anchor(generated, brief)
+        _validate_formal_narrative(generated, scenes, event)
         generated = _planner_json(
             _json.dumps(generated, ensure_ascii=False), len(scenes), voiceover_limits,
             voiceover_minimums, hotspot_scene_count=hotspot_count,
