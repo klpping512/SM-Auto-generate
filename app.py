@@ -1690,6 +1690,7 @@ def _validate_formal_copy_specificity(generated: dict) -> None:
 
 _EMPTY_HOOK_TRANSITIONS = ("镜头转到仓内", "先看执行现场", "问题摆在这里")
 _HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "火情", "火灾", "核对")
+_VISIBLE_ACTION_TERMS = ("Buffalo", "仓", "分拣", "核对", "隔离", "归位", "标签", "封条", "堆位", "包装", "动线")
 
 
 def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict | None) -> None:
@@ -1720,6 +1721,8 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
             raise ValueError("热点后的第一个自有镜头不能只做无意义转场")
         if not any(term in bridge for term in _HOOK_BRIDGE_TERMS):
             raise ValueError("热点后的第一个自有镜头没有说明物流安全承接关系")
+        if not any(term in bridge for term in _VISIBLE_ACTION_TERMS):
+            raise ValueError("热点后的第一个自有镜头没有落到 Buffalo 可见动作")
         break
 
 

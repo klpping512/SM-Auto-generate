@@ -200,7 +200,7 @@ def test_formal_narrative_rejects_a_hook_that_jumps_to_warehouse_without_bridge(
     ]}
     event = {"evidence": {"what_happened": "大型结构持续燃烧，现场出现火光和浓烟。"}}
 
-    with pytest.raises(ValueError, match="自有镜头不能只做无意义转场"):
+    with pytest.raises(ValueError, match="没有说明物流安全承接关系"):
         app._validate_formal_narrative(generated, scenes, event)
 
 
