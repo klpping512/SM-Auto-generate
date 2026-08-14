@@ -1071,7 +1071,7 @@ def _detect_silence_points(
         ]
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=60,
-            stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace",
         )
         stderr = result.stderr or ""
         starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", stderr)]

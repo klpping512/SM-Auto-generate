@@ -636,7 +636,9 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             except json.JSONDecodeError:
                 snapshot = {}
         if not planning_payload.get("tts_provider"):
-            planning_payload["tts_provider"] = snapshot.get("tts_provider") or "mimo"
+            planning_payload["tts_provider"] = (
+                snapshot.get("tts_provider") or os.environ.get("TTS_PROVIDER", "mimo")
+            )
         if not planning_payload.get("voice"):
             planning_payload["voice"] = snapshot.get("voice") or video_renderer.MIMO_TTS_VOICE
         planning_scenes = [dict(scene) for scene in planning_payload.get("scenes") or []]
@@ -986,7 +988,9 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             except json.JSONDecodeError:
                 snapshot = {}
         requested_provider = str(
-            script.get("tts_provider") or snapshot.get("tts_provider") or "mimo"
+            script.get("tts_provider")
+            or snapshot.get("tts_provider")
+            or os.environ.get("TTS_PROVIDER", "mimo")
         )
         requested_voice = str(script.get("voice") or snapshot.get("voice") or "")
         try:
