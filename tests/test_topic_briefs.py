@@ -204,6 +204,23 @@ def test_formal_narrative_rejects_a_hook_that_jumps_to_warehouse_without_bridge(
         app._validate_formal_narrative(generated, scenes, event)
 
 
+def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+         "primary_category": "warehouse"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "大型结构持续燃烧，现场有火光和浓烟。"},
+        {"voiceover": "集装箱起火，邻近货物存在风险。"},
+    ]}
+
+    fixed = app._repair_formal_narrative_bridge(generated, scenes)
+    assert fixed["scenes"][1]["voiceover"] == "这类异常之后，Buffalo先把仓内分拣和核对理清。"
+
+
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
     import app
 

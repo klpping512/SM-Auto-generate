@@ -1726,6 +1726,33 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
         break
 
 
+def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict:
+    """Deterministically repair only the first Hook-to-owned bridge beat."""
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    labels = {
+        "warehouse": "仓内分拣和核对",
+        "staff": "分拣和检查",
+        "facility": "现场设施核对",
+        "delivery": "发运和交接核对",
+    }
+    for index, scene in enumerate(scenes):
+        if index >= len(repaired["scenes"]):
+            break
+        if scene.get("scene_role") != "owned_proof" or scene.get("flow_role") != "post_hook_bridge":
+            continue
+        voiceover = str(repaired["scenes"][index].get("voiceover") or "")
+        valid_relation = any(term in voiceover for term in _HOOK_BRIDGE_TERMS)
+        valid_action = any(term in voiceover for term in _VISIBLE_ACTION_TERMS)
+        empty_transition = any(phrase in voiceover for phrase in _EMPTY_HOOK_TRANSITIONS)
+        if not (empty_transition or not valid_relation or not valid_action):
+            continue
+        category = str(scene.get("primary_category") or "").casefold()
+        replacement = f"这类异常之后，Buffalo先把{labels.get(category, '仓配动作')}理清。"
+        repaired["scenes"][index]["voiceover"] = replacement
+        repaired["scenes"][index]["text_overlay"] = replacement.rstrip("。")[:24]
+    return repaired
+
+
 def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
     """Return bounded, role-separated candidates.  This only stores references, never copies media."""
     terms = _topic_keywords(" ".join([brief.get("raw_input", ""), brief.get("subject", ""), brief.get("angle", "")]))
@@ -2688,6 +2715,7 @@ async def _generate_topic_brief_video(
             )
             _validate_formal_copy_specificity(generated)
             _validate_generated_topic_anchor(generated, brief)
+            generated = _repair_formal_narrative_bridge(generated, scenes)
             _validate_formal_narrative(generated, scenes, event)
         except ValueError as initial_error:
             # The planner selected no file references, so one bounded rewrite can
@@ -2748,6 +2776,7 @@ async def _generate_topic_brief_video(
                     )
                     _validate_formal_copy_specificity(generated)
                     _validate_generated_topic_anchor(generated, brief)
+                    generated = _repair_formal_narrative_bridge(generated, scenes)
                     _validate_formal_narrative(generated, scenes, event)
                     break
                 except ValueError as exc:
@@ -2770,6 +2799,7 @@ async def _generate_topic_brief_video(
         logger.exception("内容规划失败: %s", brief_id)
         raise HTTPException(502, f"内容规划失败：{str(exc)[:160]}") from exc
     generated = _enforce_formal_scene_copy_contract(generated, scenes)
+    generated = _repair_formal_narrative_bridge(generated, scenes)
     generated = _compact_long_formal_voiceovers(generated, voiceover_limits)
     generated = _extend_short_formal_voiceovers(
         generated, scenes, voiceover_minimums, voiceover_limits,
