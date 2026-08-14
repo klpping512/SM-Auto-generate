@@ -1822,6 +1822,12 @@ def _scene_voiceover_min_chars(scene: dict) -> int | None:
 
 _UNSUPPORTED_HOTSPOT_INTENSIFIERS = ("堵死", "全面瘫痪", "完全停摆", "全线停摆")
 _UNSUPPORTED_HOTSPOT_VIEWER_ROUTE_PROMPTS = ("这条线", "这一批", "走到哪段路线", "在不在这一批")
+_UNSUPPORTED_OWNED_ROUTE_CLAIMS = (
+    "记录同步给末端配送",
+    "同步给末端配送",
+    "末端配送，",
+    "派送前再次核对",
+)
 _OCR_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Z][A-Z0-9._-]{2,}")
 
 
@@ -1846,6 +1852,17 @@ def _enforce_formal_scene_copy_contract(generated: dict, scenes: list[dict]) -> 
             # The planner is already constrained to this reviewed action. Do
             # not replace SOP-aware copy with a catalog label: that turned
             # every video into the same warehouse narration.
+            anchor = str(scene.get("copy_anchor") or "镜头中的仓内作业。")
+            item["voiceover"] = anchor
+            item["text_overlay"] = anchor.rstrip("。")[:24]
+        elif (
+            role == "owned_proof"
+            and str(scene.get("primary_category") or "").casefold() in {"warehouse", "staff", "facility"}
+            and any(phrase in voiceover for phrase in _UNSUPPORTED_OWNED_ROUTE_CLAIMS)
+        ):
+            # A warehouse/staff/facility frame cannot prove that a parcel was
+            # handed to last-mile delivery. Keep the topic's safety context,
+            # but make the line describe only the reviewed visible action.
             anchor = str(scene.get("copy_anchor") or "镜头中的仓内作业。")
             item["voiceover"] = anchor
             item["text_overlay"] = anchor.rstrip("。")[:24]

@@ -258,6 +258,23 @@ def test_formal_scene_copy_contract_replaces_ocr_and_route_guess_with_visible_ac
     assert "CEKEMACH" not in repaired["scenes"][1]["voiceover"]
 
 
+def test_formal_scene_copy_contract_downgrades_last_mile_claim_on_warehouse_footage():
+    import app
+
+    repaired = app._enforce_formal_scene_copy_contract(
+        {"title": "标题", "angle": "角度", "scenes": [
+            {"voiceover": "记录同步给末端配送，提示派送前再次核对箱体外观。", "text_overlay": "末端配送"},
+        ]},
+        [{
+            "scene_role": "owned_proof",
+            "primary_category": "warehouse",
+            "copy_anchor": "工作人员正在逐件核对包裹。",
+        }],
+    )
+
+    assert repaired["scenes"][0]["voiceover"] == "工作人员正在逐件核对包裹。"
+
+
 def test_formal_planner_compacts_an_overlong_model_clause_without_another_model_call():
     import app
 
