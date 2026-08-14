@@ -1730,10 +1730,13 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
     """Deterministically repair only the first Hook-to-owned bridge beat."""
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     labels = {
-        "warehouse": "仓内分拣和核对",
-        "staff": "分拣和检查",
-        "facility": "现场设施核对",
-        "delivery": "发运和交接核对",
+        # Keep the deterministic bridge inside the shortest real-video beat.
+        # The previous longer sentence was trimmed after repair and could
+        # leave a broken fragment such as “分拣和”。
+        "warehouse": "核对仓内分拣",
+        "staff": "核对分拣检查",
+        "facility": "核对现场设施",
+        "delivery": "核对发运交接",
     }
     for index, scene in enumerate(scenes):
         if index >= len(repaired["scenes"]):
@@ -1747,7 +1750,7 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
         if not (empty_transition or not valid_relation or not valid_action):
             continue
         category = str(scene.get("primary_category") or "").casefold()
-        replacement = f"这类异常之后，Buffalo先把{labels.get(category, '仓配动作')}理清。"
+        replacement = f"异常后，Buffalo{labels.get(category, '核对仓配动作')}。"
         repaired["scenes"][index]["voiceover"] = replacement
         repaired["scenes"][index]["text_overlay"] = replacement.rstrip("。")[:24]
     return repaired

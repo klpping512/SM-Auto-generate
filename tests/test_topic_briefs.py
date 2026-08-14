@@ -200,7 +200,7 @@ def test_formal_narrative_rejects_a_hook_that_jumps_to_warehouse_without_bridge(
     ]}
     event = {"evidence": {"what_happened": "大型结构持续燃烧，现场出现火光和浓烟。"}}
 
-    with pytest.raises(ValueError, match="没有说明物流安全承接关系"):
+    with pytest.raises(ValueError, match="不能只做无意义转场"):
         app._validate_formal_narrative(generated, scenes, event)
 
 
@@ -218,7 +218,9 @@ def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
     ]}
 
     fixed = app._repair_formal_narrative_bridge(generated, scenes)
-    assert fixed["scenes"][1]["voiceover"] == "这类异常之后，Buffalo先把仓内分拣和核对理清。"
+    assert fixed["scenes"][1]["voiceover"] == "异常后，Buffalo核对仓内分拣。"
+    compacted = app._compact_long_formal_voiceovers(fixed, [None, 22])
+    assert compacted["scenes"][1]["voiceover"] == "异常后，Buffalo核对仓内分拣。"
 
 
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
