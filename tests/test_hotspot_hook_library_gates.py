@@ -117,6 +117,40 @@ def test_hotspot_library_exposes_only_confirmed_factful_ready_hooks_and_can_clea
     assert db.get_hotspot_event_clip(valid["id"]) is not None
 
 
+def test_hotspot_library_can_browse_audited_hooks_without_making_them_renderable(tmp_db):
+    import database as db
+
+    client, headers = _admin_client(tmp_db)
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "Snow road report", "summary": "Road conditions after a snow event",
+        "source_url": "https://example.com/audited-only", "publisher": "SA Today",
+        "published_at": "2026-08-13T00:00:00Z", "retrieved_at": "2026-08-13T00:00:00Z",
+        "snapshot_sha256": "audited-only-hook",
+    })
+    asset_id = db.create_asset({
+        "name": "待补物流切入母片", "filepath": "assets/audited-only.mp4", "file_type": "video",
+        "category": "other", "duration": 20, "size": 10, "source": "youtube", "status": "active",
+        "sha256": "a" * 64,
+    })
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 8_000, "title_zh": "积雪道路上车辆缓慢通行",
+        "title_en": "Vehicles move slowly on a snowy road", "confidence": .9,
+        "review_status": "confirmed", "segments": [],
+        "evidence": {"what_happened": "车辆在积雪道路上缓慢通行", "hook_reason": "道路与车辆状态清晰可见"},
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/audited-only/event.mp4", None, "ready")
+
+    strict = client.get("/api/hotspot-events", headers=headers)
+    assert strict.status_code == 200
+    assert strict.json() == []
+
+    audited = client.get("/api/hotspot-events?audited_only=true", headers=headers)
+    assert audited.status_code == 200
+    assert audited.json()[0]["id"] == event["id"]
+    assert audited.json()[0]["is_renderable"] is False
+    assert audited.json()[0]["library_status"] == "audit_only"
+
+
 def test_admin_can_delete_one_hook_without_deleting_mother_or_siblings(tmp_db):
     import database as db
 

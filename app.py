@@ -1451,14 +1451,40 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
     )
 
 
+def _is_audited_hotspot_hook(event: dict) -> bool:
+    """Expose a fact-backed audited clip without confusing it with a ready Hook.
+
+    The audit library is intentionally broader than the renderable logistics
+    library: a clip may have a confirmed visual fact and a local playable proxy
+    while still needing a cautious logistics bridge before it can enter a
+    video project.  The assets page can show those clips for review, but action
+    endpoints continue to use ``_is_confirmed_renderable_hotspot_hook``.
+    """
+    evidence = event.get("evidence") or {}
+    required = ("what_happened", "hook_reason")
+    values = [str(evidence.get(key) or "").strip() for key in required]
+    placeholders = ("未记录", "待确认", "unknown", "n/a")
+    return bool(
+        str(event.get("review_status") or "") == "confirmed"
+        and str(event.get("clip_status") or "") == "ready"
+        and str(event.get("clip_path") or "").strip()
+        and all(value and not value.casefold().startswith(placeholders) for value in values)
+    )
+
+
 @app.get("/api/hotspot-events")
 async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | None = None,
-                              eligible_only: bool = True, user=Depends(get_current_user)):
+                              eligible_only: bool = True, audited_only: bool = False,
+                              user=Depends(get_current_user)):
     events = db.list_hotspot_event_clips(asset_id=asset_id, hotspot_id=hotspot_id)
-    if eligible_only:
+    if audited_only:
+        events = [event for event in events if _is_audited_hotspot_hook(event)]
+    elif eligible_only:
         events = [event for event in events if _is_confirmed_renderable_hotspot_hook(event)]
     segments = db.list_asset_segments(limit=20_000)
     for event in events:
+        event["is_renderable"] = _is_confirmed_renderable_hotspot_hook(event)
+        event["library_status"] = "ready" if event["is_renderable"] else "audit_only"
         _decorate_hotspot_event(event, segments)
     return events
 
