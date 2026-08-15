@@ -183,11 +183,13 @@ def test_douyin_copywriting_sop_keeps_peer_voice_without_turning_style_into_a_se
     chat = douyin_copywriting_sop.prompt_for_chat_douyin()
 
     assert douyin_copywriting_sop.metadata() == {
-        "id": "south-africa-logistics-douyin-copy-style", "version": "v2",
+        "id": "south-africa-logistics-douyin-copy-style", "version": "v4",
     }
     assert "一线物流同行" in planner
     assert "不得照抄" in planner
-    assert "发生什么—要核对什么—画面里能看到什么" in planner
+    assert "发生什么—为什么影响物流—要核对什么—画面里能看到什么" in planner
+    assert "品牌转化" in planner
+    assert "风险前置" in planner
     assert "服务承诺门禁" in chat
 
 

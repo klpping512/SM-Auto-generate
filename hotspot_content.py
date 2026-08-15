@@ -24,7 +24,8 @@ def compose(hotspot: dict) -> dict:
         "【Buffalo 观点】\n"
         "以上仅转述公开来源事实，不是 Buffalo 已执行的服务结果。"
         "卖家可据此自行核对订单节点、船期与通关资料；品牌建议不替代官方公告，"
-        "也不把新闻摘要写成 Buffalo 能力证明。"
+        "也不把新闻摘要写成 Buffalo 能力证明。Buffalo 的营销承接只落到已确认资料或自有画面："
+        "把风险前置、把动作做细、把异常留痕；没有证据时只写建议，不写结果承诺。"
     )
     source_refs = []
     excerpt = summary if summary and summary != raw_title else ""

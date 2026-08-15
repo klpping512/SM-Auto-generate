@@ -62,7 +62,7 @@ def _custom_topic(event: dict, topic_brief: dict | None) -> dict:
     return {
         "topic": subject,
         "angle": angle,
-        "claim": f"{audience_text}，使用 Buffalo 可见的仓配、分拣、运输或交付动作解释{focus}，不作无证据承诺。",
+        "claim": f"{audience_text}，使用 Buffalo 可见的仓配、分拣、运输或交付动作解释{focus}，并把动作转成品牌优势，不作无证据承诺。",
         "nodes": nodes,
     }
 
@@ -85,8 +85,8 @@ def build_brief(event: dict, owned_segments: list[dict], topic_brief: dict | Non
         {"name": "hook", "instruction": f"用一段真实热点画面提出问题：{title}正在改变什么？"},
         {"name": "context", "instruction": f"解释它对{topic}的具体影响，不能只复述标题。"},
         {"name": "evidence", "instruction": "使用同源热点片段补充现场变化，不把无关画面当作事实证据。"},
-        {"name": "brand_proof", "instruction": f"用 Buffalo 的仓储、分拣、运输或交付画面回应{topic}。"},
-        {"name": "close", "instruction": "用可核验的服务动作收束，不使用绝对化承诺。"},
+        {"name": "brand_proof", "instruction": f"用 Buffalo 的仓储、分拣、运输或交付画面回应{topic}，并把一个可见动作转成品牌优势：风险前置、动作可核对、异常可留痕或交接更稳。"},
+        {"name": "close", "instruction": "把前面的物流问题收束到 Buffalo 一个有证据的执行优势和客户下一步，不使用绝对化承诺。"},
     ]
     categories = sorted({str(item.get("primary_category") or "") for item in owned_segments if item.get("primary_category")})
     return {
@@ -97,7 +97,7 @@ def build_brief(event: dict, owned_segments: list[dict], topic_brief: dict | Non
         "source_asset_id": event.get("asset_id"),
         "angle": angle,
         "logistics_topic": topic,
-        "claim": custom.get("claim") or topic_info["claim"],
+        "claim": custom.get("claim") or f"{topic_info['claim']}；把可见动作转成 Buffalo 的一个具体品牌优势，不作无证据承诺。",
         "topic_brief_id": (topic_brief or {}).get("id"),
         "audience": (topic_brief or {}).get("audience", ""),
         "goal": (topic_brief or {}).get("goal", ""),
@@ -111,7 +111,7 @@ def build_brief(event: dict, owned_segments: list[dict], topic_brief: dict | Non
         # 错当成每条视频的准入条件。
         "required_evidence": {"hotspot_video": 1, "owned_video": 4, "image_ratio_max": 0.15},
         "available_owned_categories": categories,
-        "brand_claims": ["仓储、分拣、运输和交付动作必须以素材为证", "只描述素材能证明的服务动作"],
+        "brand_claims": ["仓储、分拣、运输和交付动作必须以素材为证", "只描述素材能证明的服务动作", "把可见动作转成风险前置、动作可核对、异常可留痕或交接更稳的品牌优势"],
         "negative_claims": ["不写百分百安全", "不写绝对时效保证", "不把单个热点扩大为整个南非事实"],
         "tone": "事实清楚、克制、有现场感",
         "target_duration_ms": 60_000,

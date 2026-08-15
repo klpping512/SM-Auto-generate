@@ -1689,8 +1689,27 @@ def _validate_formal_copy_specificity(generated: dict) -> None:
 
 
 _EMPTY_HOOK_TRANSITIONS = ("镜头转到仓内", "先看执行现场", "问题摆在这里")
-_HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "火情", "火灾", "核对")
+_HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "提醒", "变化", "火情", "火灾", "核对")
 _VISIBLE_ACTION_TERMS = ("Buffalo", "仓", "分拣", "核对", "隔离", "归位", "标签", "封条", "堆位", "包装", "动线")
+_BRAND_ADVANTAGE_TERMS = ("做稳", "做细", "做实", "可核对", "留痕", "前置", "更清楚", "更可控")
+
+
+def _hotspot_risk_lead(voiceover: str) -> str:
+    """Turn the verified Hook fact into a short, non-causal marketing lead."""
+    text = str(voiceover or "")
+    if any(term in text for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾")):
+        return "火情提醒风险"
+    if any(term in text for term in ("拥堵", "排队", "滞留", "堵车")):
+        return "拥堵提醒风险"
+    if any(term in text for term in ("侧翻", "事故", "碰撞", "翻车")):
+        return "事故提醒风险"
+    if any(term in text for term in ("暴雨", "大雨", "洪水", "积水", "降雪", "天气")):
+        return "天气提醒风险"
+    if any(term in text for term in ("港口", "码头", "口岸", "边境", "清关")):
+        return "节点变化风险"
+    if any(term in text for term in ("封路", "罢工", "停运", "关闭")):
+        return "通行变化风险"
+    return "现场提醒风险"
 
 
 def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict | None) -> None:
@@ -1723,6 +1742,8 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
             raise ValueError("热点后的第一个自有镜头没有说明物流安全承接关系")
         if not any(term in bridge for term in _VISIBLE_ACTION_TERMS):
             raise ValueError("热点后的第一个自有镜头没有落到 Buffalo 可见动作")
+        if not any(term in bridge for term in _BRAND_ADVANTAGE_TERMS):
+            raise ValueError("热点后的第一个自有镜头没有把可见动作转成 Buffalo 品牌优势")
         break
 
 
@@ -1730,14 +1751,7 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
     """Deterministically repair only the first Hook-to-owned bridge beat."""
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     first_voiceover = str(repaired["scenes"][0].get("voiceover") or "") if repaired["scenes"] else ""
-    if any(term in first_voiceover for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾")):
-        contrast_lead = "火情提醒风险"
-    elif any(term in first_voiceover for term in ("拥堵", "排队", "滞留")):
-        contrast_lead = "拥堵提醒风险"
-    elif any(term in first_voiceover for term in ("侧翻", "事故", "碰撞")):
-        contrast_lead = "事故提醒风险"
-    else:
-        contrast_lead = "现场提醒风险"
+    contrast_lead = _hotspot_risk_lead(first_voiceover)
     labels = {
         # Keep the contrast line inside the shortest real-video beat while
         # making the brand response visible and stable, not causal.
@@ -1754,8 +1768,9 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
         voiceover = str(repaired["scenes"][index].get("voiceover") or "")
         valid_relation = any(term in voiceover for term in _HOOK_BRIDGE_TERMS)
         valid_action = any(term in voiceover for term in _VISIBLE_ACTION_TERMS)
+        valid_advantage = any(term in voiceover for term in _BRAND_ADVANTAGE_TERMS)
         empty_transition = any(phrase in voiceover for phrase in _EMPTY_HOOK_TRANSITIONS)
-        if not (empty_transition or not valid_relation or not valid_action):
+        if not (empty_transition or not valid_relation or not valid_action or not valid_advantage):
             continue
         category = str(scene.get("primary_category") or "").casefold()
         replacement = f"{contrast_lead}，Buffalo把{labels.get(category, '仓配核对')}做稳。"
@@ -2034,7 +2049,7 @@ def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict])
         "narrative_contract": {
             "beat_1": "明确说出 Hook 发生了什么，不能只说‘现场’或复述标题。",
             "beat_2": "解释这个事实为什么会影响运输、存储或配送安全。",
-            "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接；安全性必须用动作表现，不能只喊口号。",
+            "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接，并把一个具体优势（风险前置、动作可核对、异常可留痕或交接更稳）落到画面；不能只喊口号。",
             "beat_4": "每个后续镜头只讲一个可见动作，最后再用统一 CTA 收束。",
         },
         "allowed_scenes": allowed_scenes,
@@ -2690,15 +2705,15 @@ async def _generate_topic_brief_video(
         hotspot_story_contract = (
             "叙事开场只有第1段热点 Hook：必须用允许 Hook 的 what_happened 明确说明发生了什么，"
             "不能只说‘现场正在发生’、只复述标题或只抛一个问题。第1段只能描述允许 Hook 中可见或已给出的热点事实。"
-            "第1个自有镜头不是无意义转场，必须承担桥接：先说明该事实为什么会影响运输、存储或配送安全，"
-            "再把 Buffalo 镜头里的一个可见动作接上；禁止把‘镜头转到仓内’作为完整旁白。"
+            "第1个自有镜头不是无意义转场，必须承担营销桥接：先说明该事实为什么会影响运输、存储或配送安全，"
+            "再把 Buffalo 镜头里的一个可见动作接上，并明确该动作体现的品牌优势；禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     else:
         hotspot_story_contract = (
             "前两段是同一事件的热点事实：第1段前两秒给出强现场事实和卖家问题，第2段只补充同一现场可见情况。"
             "前两段只能描述允许 Hook 中可见或已给出的热点事实；第2段不得写卖家已经采取了什么动作。"
-            "第1个自有镜头必须承担事件到物流安全动作的桥接，禁止把‘镜头转到仓内’作为完整旁白。"
+            "第1个自有镜头必须承担事件到物流安全动作的营销桥接，并把动作转成 Buffalo 的一个可见品牌优势；禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
     scene_count_line = f"必须严格输出 {len(scenes)} 个分镜，分镜条数与 allowed_scenes 完全一致，不得多不得少。"
@@ -2708,9 +2723,9 @@ async def _generate_topic_brief_video(
             + hotspot_story_contract
             + hotspot_quota_line
             + "热点事实不得写‘堵死’、全面瘫痪、完全停摆或全线停摆等原始事实未证实的夸张断言。"
-            "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
+            "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明；但必须把该动作转成一个有证据的品牌优势，如风险前置、动作可核对、异常可留痕或交接更稳。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
             "自有镜头旁白只能描述画面可见动作；没有清关、入库前或派送前事实时，不得凭画面推断这些节点已经发生。"
-            "每段必须提供新的具体信息。第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成‘事件事实→物流安全问题→Buffalo可见动作’的桥接。"
+            "每段必须提供新的具体信息。第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成‘事件事实→物流安全问题→Buffalo可见动作→品牌优势’的桥接。"
             "禁止使用‘镜头转到仓内’、‘先看执行现场’、‘问题摆在这里’等空转场句作为整段旁白。"
             "不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
             + scene_count_line
@@ -2736,7 +2751,7 @@ async def _generate_topic_brief_video(
     )
     try:
         result = await model_router.call_text(
-            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v10",
+            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v11",
             max_output_tokens=planner_output_budget,
         )
         voiceover_limits = [_scene_voiceover_max_chars(scene) for scene in scenes]
@@ -2807,7 +2822,7 @@ async def _generate_topic_brief_video(
                 }, ensure_ascii=False)
                 repair_result = await model_router.call_text(
                     job_id, "planner_text", repair_messages,
-                    prompt_version="topic-brief-video-plan-v10-repair", max_output_tokens=planner_output_budget,
+                    prompt_version="topic-brief-video-plan-v11-repair", max_output_tokens=planner_output_budget,
                 )
                 try:
                     repaired_candidate = _planner_json(

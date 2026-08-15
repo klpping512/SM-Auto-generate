@@ -701,7 +701,7 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
     if role == "owned_proof":
         labels = {"warehouse": "仓储和备货", "staff": "分拣与检查", "facility": "现场设施", "delivery": "运输与交付"}
         if flow_role == "post_hook_bridge":
-            return f"这类异常之后，Buffalo先把{labels.get(category, '仓配动作')}理清。"
+            return f"这个变化提醒风险，Buffalo把{labels.get(category, '仓配动作')}做稳。"
         openings = (
             "先看执行现场：", "再往下拆一层：", "真正影响客户体验的是：",
             "从仓内细节看：", "换到另一处动作：", "再补一个核对节点：",
@@ -720,7 +720,7 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
             # 上下文；文案只用准备词，绝不宣称已清关/已放行。不加开场
             # 前缀，避免叠加后突破预览链的单镜字数上限。
             return safe_customs_preparation_copy(category)
-        return f"{openings[(index - 1) % len(openings)]}Buffalo 用{labels.get(category, '仓配流程')}承接每一步。"
+        return f"{openings[(index - 1) % len(openings)]}Buffalo把{labels.get(category, '仓配流程')}做细，动作更好核对。"
     return "热点会变化，履约准备要先到位。"
 
 

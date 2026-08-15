@@ -223,6 +223,25 @@ def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
     assert compacted["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo把仓内核对做稳。"
 
 
+def test_formal_narrative_bridge_uses_the_hook_as_a_generic_brand_marketing_pivot():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+         "primary_category": "delivery"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "口岸卡车排队，通行受到影响。"},
+        {"voiceover": "Buffalo有运输能力。"},
+    ]}
+
+    fixed = app._repair_formal_narrative_bridge(generated, scenes)
+
+    assert fixed["scenes"][1]["voiceover"] == "拥堵提醒风险，Buffalo把发运交接做稳。"
+    assert any(term in fixed["scenes"][1]["voiceover"] for term in app._BRAND_ADVANTAGE_TERMS)
+
+
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
     import app
 
@@ -370,10 +389,10 @@ def test_generate_topic_brief_uses_one_model_plan_for_a_verified_sixty_second_pr
     revision = payload["project"]["current_revision"]
     assert len(revision["payload"]["scenes"]) == 8
     assert revision["payload"]["scenes"][0]["voiceover"].startswith("第1段")
-    assert captured["prompt_version"] == "topic-brief-video-plan-v10"
+    assert captured["prompt_version"] == "topic-brief-video-plan-v11"
     assert "一线物流同行" in captured["messages"][0]["content"]
     assert json.loads(payload["project"]["source_snapshot"])["copywriting_sop"] == {
-        "id": "south-africa-logistics-douyin-copy-style", "version": "v3",
+        "id": "south-africa-logistics-douyin-copy-style", "version": "v4",
     }
 
 
