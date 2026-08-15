@@ -218,9 +218,9 @@ def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
     ]}
 
     fixed = app._repair_formal_narrative_bridge(generated, scenes)
-    assert fixed["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo把仓内核对做稳。"
-    compacted = app._compact_long_formal_voiceovers(fixed, [None, 22])
-    assert compacted["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo把仓内核对做稳。"
+    assert fixed["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo核对做稳。"
+    compacted = app._compact_long_formal_voiceovers(fixed, [None, 21])
+    assert compacted["scenes"][1]["voiceover"] == "火情提醒风险，Buffalo核对做稳。"
 
 
 def test_formal_narrative_bridge_uses_the_hook_as_a_generic_brand_marketing_pivot():
@@ -238,7 +238,7 @@ def test_formal_narrative_bridge_uses_the_hook_as_a_generic_brand_marketing_pivo
 
     fixed = app._repair_formal_narrative_bridge(generated, scenes)
 
-    assert fixed["scenes"][1]["voiceover"] == "拥堵提醒风险，Buffalo把发运交接做稳。"
+    assert fixed["scenes"][1]["voiceover"] == "拥堵提醒风险，Buffalo交接做稳。"
     assert any(term in fixed["scenes"][1]["voiceover"] for term in app._BRAND_ADVANTAGE_TERMS)
 
 
@@ -252,7 +252,7 @@ def test_formal_narrative_hook_repair_supports_non_fire_road_congestion_facts():
     ]
     generated = {"scenes": [
         {"voiceover": "现场变化需要关注。", "text_overlay": "现场变化"},
-        {"voiceover": "拥堵提醒风险，Buffalo把发运交接做稳。"},
+        {"voiceover": "拥堵提醒风险，Buffalo交接做稳。"},
     ]}
     event = {"evidence": {"what_happened": "R37公路画面中可见大量人群聚集和车辆拥堵，背景有山脉与城镇。"}}
 
@@ -271,7 +271,7 @@ def test_formal_narrative_hook_repair_carries_generic_logistics_question_into_op
     ]
     generated = {"scenes": [
         {"voiceover": "南非末端配送车正在路上跑。", "text_overlay": "末端配送"},
-        {"voiceover": "现场提醒风险，Buffalo把仓内核对做稳。"},
+        {"voiceover": "现场提醒风险，Buffalo核对做稳。"},
     ]}
     event = {"hook_kind": "generic_logistics", "evidence": {
         "what_happened": "展示了末端配送与派送环节的典型作业画面。",
@@ -298,7 +298,32 @@ def test_formal_narrative_bridge_uses_neutral_contrast_for_generic_logistics_hoo
 
     fixed = app._repair_formal_narrative_bridge(generated, scenes)
 
-    assert fixed["scenes"][1]["voiceover"] == "物流环节更考验核对，Buffalo把仓内核对做稳。"
+    assert fixed["scenes"][1]["voiceover"] == "物流环节更考验核对，Buffalo核对做稳。"
+
+
+def test_formal_narrative_bridge_survives_final_short_scene_compaction():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video",
+         "primary_category": "warehouse", "duration_ms": 6_000},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "末端配送如何稳住最后三公里？"},
+        {"voiceover": "仓内这一步先核对。"},
+    ]}
+
+    fixed = app._repair_formal_narrative_bridge(generated, scenes)
+    compacted = app._compact_long_formal_voiceovers(
+        fixed, [None, app._scene_voiceover_max_chars(scenes[1])]
+    )
+
+    assert "Buffalo" in compacted["scenes"][1]["voiceover"]
+    assert "做稳" in compacted["scenes"][1]["voiceover"]
+    app._validate_formal_narrative(compacted, scenes, {
+        "evidence": {"what_happened": "末端配送与派送环节的典型作业画面。"}
+    })
 
 
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():

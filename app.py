@@ -1988,10 +1988,10 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
     labels = {
         # Keep the contrast line inside the shortest real-video beat while
         # making the brand response visible and stable, not causal.
-        "warehouse": "仓内核对",
-        "staff": "分拣检查",
-        "facility": "现场核对",
-        "delivery": "发运交接",
+        "warehouse": ("核对", "做稳"),
+        "staff": ("分拣", "做细"),
+        "facility": ("核对", "做稳"),
+        "delivery": ("交接", "做稳"),
     }
     hotspot_seen = False
     bridge_checked = False
@@ -2012,7 +2012,22 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
         if not (empty_transition or not valid_relation or not valid_action or not valid_advantage):
             continue
         category = str(scene.get("primary_category") or "").casefold()
-        replacement = f"{contrast_lead}，Buffalo把{labels.get(category, '仓配核对')}做稳。"
+        action, advantage = labels.get(category, ("核对", "做稳"))
+        candidates = [
+            f"{contrast_lead}，Buffalo{action}{advantage}。",
+            f"物流风险，Buffalo{action}{advantage}。",
+            f"现场变化，Buffalo{action}{advantage}。",
+        ]
+        maximum = _scene_voiceover_max_chars(scene)
+        minimum = _scene_voiceover_min_chars(scene)
+        replacement = next(
+            (
+                candidate for candidate in candidates
+                if (maximum is None or len("".join(candidate.split())) <= maximum)
+                and (minimum is None or len("".join(candidate.split())) >= minimum)
+            ),
+            candidates[-1],
+        )
         repaired["scenes"][index]["voiceover"] = replacement
         repaired["scenes"][index]["text_overlay"] = replacement.rstrip("。")[:24]
     return repaired
