@@ -136,7 +136,15 @@ def test_hotspot_library_derives_soft_bridge_for_logistics_adjacent_audited_hook
         "event_index": 1, "start_ms": 0, "end_ms": 8_000, "title_zh": "积雪道路上车辆缓慢通行",
         "title_en": "Vehicles move slowly on a snowy road", "confidence": .9,
         "review_status": "confirmed", "segments": [],
-        "evidence": {"what_happened": "车辆在积雪道路上缓慢通行", "hook_reason": "道路与车辆状态清晰可见"},
+        "evidence": {
+            "what_happened": "车辆在积雪道路上缓慢通行",
+            "hook_reason": "道路与车辆状态清晰可见",
+            "visual_audit": {
+                "scene_type": "road",
+                "visible_objects": ["积雪道路", "车辆"],
+                "visible_actions": ["缓慢通行"],
+            },
+        },
     }])[0]
     db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/audited-only/event.mp4", None, "ready")
 

@@ -1464,6 +1464,52 @@ def _hotspot_fact_text(event: dict) -> str:
     ) + " " + str(evidence.get("what_happened") or "")
 
 
+def _soft_bridge_visual_anchor(event: dict, question: str) -> bool:
+    """Require the visual audit to show the logistics object/action too."""
+    evidence = event.get("evidence") or {}
+    visual = evidence.get("visual_audit") or {}
+    if not visual:
+        return False
+    visible_text = " ".join(
+        str(value or "")
+        for key in ("scene_type", "visible_objects", "visible_actions", "reason")
+        for value in ((visual.get(key) if isinstance(visual.get(key), list) else [visual.get(key)]))
+    ).casefold()
+    anchor_groups = {
+        "港口或装卸环节出现变化时，发货前要先核对哪些节点？": (
+            "港口", "码头", "集装箱", "吊机", "装卸", "货柜", "port", "container", "crane", "cargo",
+        ),
+        "边境或查验环节变化时，运输和单证要先核对什么？": (
+            "边境", "海关", "查验", "机场", "航班", "行李", "手推车", "customs", "airport", "luggage", "baggage",
+        ),
+        "道路通行受影响时，货运路线和配送节点要先核对什么？": (
+            "道路", "公路", "车道", "卡车", "货车", "车辆", "交通", "road", "truck", "vehicle", "traffic", "route",
+        ),
+        "仓配或运输现场出现变化时，哪些动作需要先核对？": (
+            "仓库", "分拣", "包裹", "货物", "卡车", "货车", "叉车", "配送", "warehouse", "parcel", "forklift", "delivery",
+        ),
+        "天气变化影响通行时，运输和配送要先核对哪些条件？": (
+            "道路", "公路", "车道", "卡车", "货车", "车辆", "积雪", "暴雪", "洪水", "road", "truck", "vehicle", "snow", "flood",
+        ),
+    }
+    if not any(marker.casefold() in visible_text for marker in anchor_groups.get(question, ())):
+        return False
+    # An interview or stand-up shot with a parked service vehicle is not a
+    # logistics Hook.  Permit a border/airport frame when passenger or baggage
+    # movement is also visible, since that is a real clearance context.
+    action_text = " ".join(str(value or "") for value in (visual.get("visible_actions") or [])).casefold()
+    interview_only = ("采访", "话筒", "麦克风", "讲话", "发言", "播报", "面对镜头", "interview", "microphone", "speaking")
+    logistics_actions = (
+        "行驶", "驾驶", "通行", "装卸", "搬运", "分拣", "装载", "卸货", "推车", "行走",
+        "排队等待放行", "queue at border", "driving", "loading", "unloading", "walking",
+    )
+    if any(marker in action_text for marker in interview_only) and not any(
+        marker in action_text for marker in logistics_actions
+    ):
+        return False
+    return True
+
+
 def _derive_soft_logistics_question(event: dict) -> str:
     """Derive a conditional logistics question from verified visual facts only."""
     evidence = event.get("evidence") or {}
@@ -1484,7 +1530,8 @@ def _derive_soft_logistics_question(event: dict) -> str:
         if markers[0] in ("暴雪", "大雪", "积雪", "暴雨", "洪水", "风暴", "恶劣天气", "极端天气"):
             if not any(term.casefold() in fact_text for term in mobility_terms):
                 continue
-        return question
+        if _soft_bridge_visual_anchor(event, question):
+            return question
     return ""
 
 
