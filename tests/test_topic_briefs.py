@@ -242,6 +242,25 @@ def test_formal_narrative_bridge_uses_the_hook_as_a_generic_brand_marketing_pivo
     assert any(term in fixed["scenes"][1]["voiceover"] for term in app._BRAND_ADVANTAGE_TERMS)
 
 
+def test_formal_narrative_hook_repair_supports_non_fire_road_congestion_facts():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video", "duration_ms": 11_000},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+         "primary_category": "delivery"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "现场变化需要关注。", "text_overlay": "现场变化"},
+        {"voiceover": "拥堵提醒风险，Buffalo把发运交接做稳。"},
+    ]}
+    event = {"evidence": {"what_happened": "R37公路画面中可见大量人群聚集和车辆拥堵，背景有山脉与城镇。"}}
+
+    fixed = app._repair_formal_narrative_hook(generated, scenes, event)
+
+    assert fixed["scenes"][0]["voiceover"] == event["evidence"]["what_happened"]
+
+
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
     import app
 

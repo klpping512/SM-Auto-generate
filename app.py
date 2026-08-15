@@ -1692,6 +1692,11 @@ _EMPTY_HOOK_TRANSITIONS = ("镜头转到仓内", "先看执行现场", "问题�
 _HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "提醒", "变化", "火情", "火灾", "核对")
 _VISIBLE_ACTION_TERMS = ("Buffalo", "仓", "分拣", "核对", "隔离", "归位", "标签", "封条", "堆位", "包装", "动线")
 _BRAND_ADVANTAGE_TERMS = ("做稳", "做细", "做实", "可核对", "留痕", "前置", "更清楚", "更可控")
+_HOOK_FACT_TERMS = (
+    "燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾", "结构",
+    "道路", "公路", "人群", "车辆", "卡车", "拥堵", "排队", "滞留", "尘土",
+    "积雪", "大雪", "暴雨", "洪水", "港口", "码头", "口岸", "边境", "飞机", "警灯",
+)
 
 
 def _hotspot_risk_lead(voiceover: str) -> str:
@@ -1712,6 +1717,44 @@ def _hotspot_risk_lead(voiceover: str) -> str:
     return "现场提醒风险"
 
 
+def _hook_fact_terms(what_happened: str) -> list[str]:
+    return [term for term in _HOOK_FACT_TERMS if term in str(what_happened or "")]
+
+
+def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: dict | None) -> dict:
+    """Keep the opening grounded in any verified Hook fact, not a fire-only lexicon."""
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if not event or not scenes or not repaired["scenes"]:
+        return repaired
+    if scenes[0].get("scene_role") != "hotspot_evidence":
+        return repaired
+    what_happened = str((event.get("evidence") or {}).get("what_happened") or "").strip()
+    terms = _hook_fact_terms(what_happened)
+    first_voiceover = str(repaired["scenes"][0].get("voiceover") or "")
+    if not terms or sum(term in first_voiceover for term in terms) >= min(2, len(terms)):
+        return repaired
+    maximum = _scene_voiceover_max_chars(scenes[0])
+    minimum = _scene_voiceover_min_chars(scenes[0])
+    candidates = [what_happened]
+    if any(term in what_happened for term in ("拥堵", "排队", "滞留")):
+        candidates.append("现场可见人群聚集，车辆出现拥堵。")
+    elif any(term in what_happened for term in ("积雪", "大雪", "暴雨", "洪水")):
+        candidates.append("现场可见恶劣天气，车辆通行受到影响。")
+    elif any(term in what_happened for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火")):
+        candidates.append("现场可见火光和浓烟，风险需要核对。")
+    elif any(term in what_happened for term in ("道路", "公路", "车辆", "卡车")):
+        candidates.append("道路现场可见车辆活动，通行情况需要核对。")
+    else:
+        candidates.append("现场事实已核验，先看画面中的具体变化。")
+    for candidate in candidates:
+        compact_length = len("".join(candidate.split()))
+        if (maximum is None or compact_length <= maximum) and (minimum is None or compact_length >= minimum):
+            repaired["scenes"][0]["voiceover"] = candidate
+            repaired["scenes"][0]["text_overlay"] = candidate.rstrip("。")[:24]
+            break
+    return repaired
+
+
 def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict | None) -> None:
     """Reject a fluent script that skips the Hook-to-brand narrative bridge."""
     if not event or not any(scene.get("evidence_type") == "hotspot_video" for scene in scenes):
@@ -1726,10 +1769,7 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
     first = str(generated_scenes[0].get("voiceover") or "")
     if any(phrase in first for phrase in _EMPTY_HOOK_TRANSITIONS):
         raise ValueError("热点开场不能使用空转场句")
-    fact_terms = [
-        term for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "结构", "卡车", "排队", "拥堵", "侧翻", "人员")
-        if term in what_happened
-    ]
+    fact_terms = _hook_fact_terms(what_happened)
     if fact_terms and sum(term in first for term in fact_terms) < min(2, len(fact_terms)):
         raise ValueError("热点开场没有明确说明 Hook 发生了什么")
     for index, scene in enumerate(scenes[1:], 1):
@@ -2776,6 +2816,7 @@ async def _generate_topic_brief_video(
             )
             _validate_formal_copy_specificity(generated)
             _validate_generated_topic_anchor(generated, brief)
+            generated = _repair_formal_narrative_hook(generated, scenes, event)
             generated = _repair_formal_narrative_bridge(generated, scenes)
             _validate_formal_narrative(generated, scenes, event)
         except ValueError as initial_error:
@@ -2837,6 +2878,7 @@ async def _generate_topic_brief_video(
                     )
                     _validate_formal_copy_specificity(generated)
                     _validate_generated_topic_anchor(generated, brief)
+                    generated = _repair_formal_narrative_hook(generated, scenes, event)
                     generated = _repair_formal_narrative_bridge(generated, scenes)
                     _validate_formal_narrative(generated, scenes, event)
                     break
@@ -2860,6 +2902,7 @@ async def _generate_topic_brief_video(
         logger.exception("内容规划失败: %s", brief_id)
         raise HTTPException(502, f"内容规划失败：{str(exc)[:160]}") from exc
     generated = _enforce_formal_scene_copy_contract(generated, scenes)
+    generated = _repair_formal_narrative_hook(generated, scenes, event)
     generated = _repair_formal_narrative_bridge(generated, scenes)
     generated = _compact_long_formal_voiceovers(generated, voiceover_limits)
     generated = _extend_short_formal_voiceovers(
