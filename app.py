@@ -1402,39 +1402,142 @@ async def list_asset_segments(asset_id: int = None, query: str = "", limit: int 
     return db.list_asset_segments(asset_id=asset_id, limit=limit)
 
 
-def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
-    """Only expose Hooks with verified fact, logistics bridge and local proxy.
+_HOTSPOT_OUT_OF_SCOPE_TERMS = (
+    # 原有基线
+    "市政", "环卫", "垃圾", "污水", "供水", "管道破裂", "公园", "野生动物",
+    "治安", "犯罪", "政治", "委员会", "证词", "娱乐",
+    "municipal", "refuse", "waste", "sewage", "wildlife", "testimony", "commission",
+    # 听证/法庭/选举/体育/社会等非物流场景
+    "听证", "法庭", "法院", "出庭", "受审", "庭审", "作证",
+    "议员", "部长", "总统", "总理", "选举", "大选", "选情", "政客",
+    "峰会", "部长级", "非盟",
+    "足球", "联赛", "世界杯", "球队", "女足", "决赛", "赛事", "橄榄球", "板球", "网球",
+    "教育", "学校", "学生", "校园",
+    "医疗", "医院", "手术", "艾滋", "hiv", "器官", "捐献", "疫苗",
+    "庆典", "周年", "颁奖", "发布会", "品牌",
+    "监狱", "囚犯", "杀手", "遇害", "谋杀",
+    "难民", "移民",
+    "住宅火灾",
+)
 
-    This legacy safety net deliberately rejects public-affairs footage that can
-    mention a generic "delivery" question but sits outside Buffalo's confirmed
-    ecommerce, cross-border, warehousing and last-mile scope.  Downloaded media
-    are curated by the built-in model after analysis; the local gate keeps older,
-    pre-SOP rows from silently re-entering the usable Hook library.
-    """
+# These facts can introduce a logistics risk or preparation question without
+# claiming that Buffalo caused, solved, or directly participated in the news
+# event.  Generic "vehicle" alone is intentionally not enough.
+_SOFT_LOGISTICS_FACT_GROUPS = (
+    (
+        ("港口", "港区", "码头", "集装箱", "装卸", "port", "harbour", "harbor", "container", "cargo terminal"),
+        "港口或装卸环节出现变化时，发货前要先核对哪些节点？",
+    ),
+    (
+        ("边境", "口岸", "海关", "查验", "清关", "border", "customs", "clearance"),
+        "边境或查验环节变化时，运输和单证要先核对什么？",
+    ),
+    (
+        ("道路", "公路", "封路", "拥堵", "堵车", "排队", "滞留", "交通", "路线", "通行", "road", "route", "traffic", "congestion", "closed road"),
+        "道路通行受影响时，货运路线和配送节点要先核对什么？",
+    ),
+    (
+        ("仓储", "仓库", "分拣", "配送", "运输", "货运", "卡车", "物流", "warehouse", "delivery", "transport", "freight", "truck"),
+        "仓配或运输现场出现变化时，哪些动作需要先核对？",
+    ),
+    (
+        ("暴雪", "大雪", "积雪", "暴雨", "洪水", "风暴", "恶劣天气", "极端天气", "snow", "storm", "flood", "severe weather"),
+        "天气变化影响通行时，运输和配送要先核对哪些条件？",
+    ),
+)
+
+# A soft bridge may tolerate incidental context such as “students stranded by
+# snow”, but it must never launder a purely political, sporting, criminal or
+# medical story into a Buffalo advertisement.
+_SOFT_BRIDGE_HARD_BLOCK_TERMS = (
+    "政治", "议会", "政党", "选举", "总统", "部长", "峰会", "听证", "法庭", "法院",
+    "足球", "联赛", "世界杯", "球队", "女足", "决赛", "赛事", "橄榄球", "板球", "网球",
+    "医疗", "医院", "手术", "艾滋", "hiv", "疫苗", "谋杀", "遇害", "杀手", "难民", "移民",
+)
+
+
+def _hotspot_fact_text(event: dict) -> str:
     evidence = event.get("evidence") or {}
+    return " ".join(
+        str(event.get(key) or "")
+        for key in ("title_zh", "title_en")
+    ) + " " + str(evidence.get("what_happened") or "")
+
+
+def _derive_soft_logistics_question(event: dict) -> str:
+    """Derive a conditional logistics question from verified visual facts only."""
+    evidence = event.get("evidence") or {}
+    if str(evidence.get("logistics_question") or "").strip() and event.get("logistics_bridge_mode") != "soft":
+        return ""
+    fact_text = _hotspot_fact_text(event).casefold()
+    if any(term.casefold() in fact_text for term in _SOFT_BRIDGE_HARD_BLOCK_TERMS):
+        return ""
+    mobility_terms = (
+        "道路", "公路", "交通", "路线", "通行", "车辆", "卡车", "运输", "货运",
+        "road", "route", "traffic", "vehicle", "truck", "transport", "freight",
+    )
+    for markers, question in _SOFT_LOGISTICS_FACT_GROUPS:
+        if not any(term.casefold() in fact_text for term in markers):
+            continue
+        # Weather is a logistics bridge only when the frame also contains a
+        # mobility/route fact; a reporter standing in bad weather is not enough.
+        if markers[0] in ("暴雪", "大雪", "积雪", "暴雨", "洪水", "风暴", "恶劣天气", "极端天气"):
+            if not any(term.casefold() in fact_text for term in mobility_terms):
+                continue
+        return question
+    return ""
+
+
+def _with_soft_logistics_bridge(event: dict) -> dict:
+    """Return an in-memory event with a cautious bridge; never rewrite audit data."""
+    question = _derive_soft_logistics_question(event)
+    if not question:
+        return event
+    bridged = dict(event)
+    evidence = dict(event.get("evidence") or {})
+    evidence["logistics_question"] = question
+    bridged["evidence"] = evidence
+    bridged["logistics_bridge_mode"] = "soft"
+    bridged["derived_logistics_question"] = question
+    return bridged
+
+
+def _soft_bridge_context_allowed(event: dict) -> bool:
+    """Allow incidental out-of-scope context only when logistics facts dominate."""
+    fact_text = _hotspot_fact_text(event).casefold()
+    if any(term.casefold() in fact_text for term in _SOFT_BRIDGE_HARD_BLOCK_TERMS):
+        return False
+    return bool(_derive_soft_logistics_question(event))
+
+
+def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
+    """Only expose verified Hooks with a defensible logistics bridge and proxy.
+
+    A missing bridge is filled in memory only when the verified frame itself
+    shows a logistics-adjacent fact such as a road closure, snow-related access
+    issue, congestion, port handling or warehouse activity.  Pure politics,
+    sports, interviews and public-affairs footage remain audited archive items.
+    """
+    candidate = _with_soft_logistics_bridge(event)
+    evidence = candidate.get("evidence") or {}
     required = ("what_happened", "hook_reason", "logistics_question")
     values = [str(evidence.get(key) or "").strip() for key in required]
     placeholders = ("未记录", "待确认", "unknown", "n/a")
     event_text = " ".join((
-        str(event.get("title_zh") or ""), str(event.get("title_en") or ""),
+        str(candidate.get("title_zh") or ""), str(candidate.get("title_en") or ""),
         str(evidence.get("what_happened") or ""), str(evidence.get("logistics_question") or ""),
     )).casefold()
-    out_of_scope = (
-        # 原有基线
-        "市政", "环卫", "垃圾", "污水", "供水", "管道破裂", "公园", "野生动物",
-        "治安", "犯罪", "政治", "委员会", "证词", "娱乐",
-        "municipal", "refuse", "waste", "sewage", "wildlife", "testimony", "commission",
-        # 2026-08-06 扩词：听证/法庭/选举/体育/社会等 35 条漏网（门禁只挡委员会/证词/政治）
-        "听证", "法庭", "法院", "出庭", "受审", "庭审", "作证",
-        "议员", "部长", "总统", "总理", "选举", "大选", "选情", "政客",
-        "峰会", "部长级", "非盟",
-        "足球", "联赛", "世界杯", "球队", "女足", "决赛", "赛事", "橄榄球", "板球", "网球",
-        "教育", "学校", "学生", "校园",
-        "医疗", "医院", "手术", "艾滋", "hiv", "器官", "捐献", "疫苗",
-        "庆典", "周年", "颁奖", "发布会", "品牌",
-        "监狱", "囚犯", "杀手", "遇害", "谋杀",
-        "难民", "移民",
-        "住宅火灾",
+    out_of_scope_hit = any(term.casefold() in event_text for term in _HOTSPOT_OUT_OF_SCOPE_TERMS)
+    # A snow-blocked road may mention students because they are affected, but
+    # the usable bridge is still the visible road/access condition.  Do not
+    # make the same exception for a story whose facts are intrinsically
+    # political, sporting, criminal or medical.
+    out_of_scope_allowed = (
+        not out_of_scope_hit
+        or (
+            candidate.get("logistics_bridge_mode") == "soft"
+            and _soft_bridge_context_allowed(candidate)
+        )
     )
     # A legacy Hook can have a real oil-price frame but still carry an old,
     # unsupported bridge such as “South African transport costs have already
@@ -1449,7 +1552,7 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
         and str(event.get("clip_status") or "") == "ready"
         and str(event.get("clip_path") or "").strip()
         and all(value and not value.casefold().startswith(placeholders) for value in values)
-        and not any(term in event_text for term in out_of_scope)
+        and out_of_scope_allowed
         and not unsupported_cost_leap
     )
 
@@ -1508,6 +1611,10 @@ async def cleanup_ineligible_hotspot_events(user=Depends(require_role(UserRole.A
 
 def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> dict:
     """Expose a hotspot event as a previewable virtual asset without copying its mother video."""
+    bridged = _with_soft_logistics_bridge(event)
+    if bridged is not event:
+        event.clear()
+        event.update(bridged)
     asset = db.get_asset(int(event["asset_id"])) or {}
     public = media_assets.public_asset(asset) if asset else {}
     # 批17：卡片时效徽标取父热点真实发布时间（RSS 为 RFC2822 / YouTube 经回填为 ISO）
@@ -1549,6 +1656,7 @@ async def get_hotspot_event(event_id: int, user=Depends(get_current_user)):
     event = db.get_hotspot_event_clip(event_id)
     if not event:
         raise HTTPException(404, "热点事件不存在")
+    event = _with_soft_logistics_bridge(event)
     if event.get("clip_status") != "ready":
         asset = db.get_asset(int(event["asset_id"]))
         if asset and asset.get("file_type") == "video":
@@ -2154,6 +2262,7 @@ def _marketing_hook_candidates(
     }
     events_by_hotspot: dict[int, list[dict]] = {}
     for event in db.list_hotspot_event_clips():
+        event = _with_soft_logistics_bridge(event)
         funnel["scanned"] += 1
         kind = str(event.get("hook_kind") or "timely_event")
         if hook_kind and kind != hook_kind:
@@ -2620,6 +2729,8 @@ async def _generate_topic_brief_video(
         raise HTTPException(404, "选题简报不存在")
     chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
     event = db.get_hotspot_event_clip(body.hotspot_event_id) if body.hotspot_event_id else None
+    if event:
+        event = _with_soft_logistics_bridge(event)
     if chain_mode != "owned_only" and not event:
         raise HTTPException(404, "热点事件不存在")
     approved_hook_event_ids: list[int] = []
@@ -2634,7 +2745,10 @@ async def _generate_topic_brief_video(
                 approved_hook_event_ids.insert(0, int(event["id"]))
             if not 1 <= len(approved_hook_event_ids) <= 2:
                 raise HTTPException(409, "聊天成片必须锁定一至两段已确认 Hook。")
-            locked_events = [db.get_hotspot_event_clip(event_id) for event_id in approved_hook_event_ids]
+            locked_events = []
+            for event_id in approved_hook_event_ids:
+                clip = db.get_hotspot_event_clip(event_id)
+                locked_events.append(_with_soft_logistics_bridge(clip) if clip else None)
             if (
                 any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
                 or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
@@ -2647,12 +2761,16 @@ async def _generate_topic_brief_video(
                 if int(second["start_ms"]) < int(first["end_ms"]):
                     raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
         source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
-        related_events = db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+        related_events = [
+            _with_soft_logistics_bridge(item)
+            for item in db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+        ]
         # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
         if approved_hook_event_ids:
             known_ids = {int(e.get("id") or 0) for e in related_events}
             for clip_id in approved_hook_event_ids:
                 clip = db.get_hotspot_event_clip(int(clip_id))
+                clip = _with_soft_logistics_bridge(clip) if clip else None
                 if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
                     related_events.append(clip)
     owned_segments = [item for item in db.list_asset_segments(limit=20_000) if not item.get("asset_hotspot_id")]
@@ -3192,6 +3310,7 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
     event = db.get_hotspot_event_clip(event_id)
     if not event:
         raise HTTPException(404, "热点事件不存在")
+    event = _with_soft_logistics_bridge(event)
     owned_segments = [
         item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
@@ -3200,9 +3319,12 @@ async def get_hotspot_logistics_plan(event_id: int, topic_brief_id: str | None =
         item for item in db.list_assets(file_type="image", status="active")
         if not item.get("hotspot_id")
     ]
-    related_events = db.list_hotspot_event_clips(
-        asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id")
-    )
+    related_events = [
+        _with_soft_logistics_bridge(item)
+        for item in db.list_hotspot_event_clips(
+            asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id")
+        )
+    ]
     source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
     planning_event = {**source_hotspot, **event}
     topic_brief = db.get_topic_brief(topic_brief_id, user["id"]) if topic_brief_id else None
@@ -5034,10 +5156,11 @@ async def _retrieve_confirmed_chat_hooks(
                 "marketing_question": item.get("marketing_question"),
             } for hook in selected_hooks]
             hook_count = len(selected_hooks)
-            locked_events = [
-                db.get_hotspot_event_clip(int(hook["event_clip_id"]))
-                for hook in selected_hooks
-            ]
+            locked_events = []
+            for hook in selected_hooks:
+                locked = db.get_hotspot_event_clip(int(hook["event_clip_id"]))
+                if locked:
+                    locked_events.append(_with_soft_logistics_bridge(locked))
             locked_events = [event for event in locked_events if event]
             delivery_readiness = _chat_video_delivery_readiness(normalized_topic, locked_events)
             ready_events = [
@@ -5263,9 +5386,12 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         "primary_event_id": primary["id"],
         "approved_hook_event_ids": [int(event["id"]) for event in locked_events],
     })
-    related_events = db.list_hotspot_event_clips(
-        asset_id=primary["asset_id"], hotspot_id=primary["hotspot_id"],
-    )
+    related_events = [
+        _with_soft_logistics_bridge(item)
+        for item in db.list_hotspot_event_clips(
+            asset_id=primary["asset_id"], hotspot_id=primary["hotspot_id"],
+        )
+    ]
     # 批18：并入跨父 locked 事件（locked_events 可含不同父热点，之前被静默丢弃）。
     known_ids = {int(e.get("id") or 0) for e in related_events}
     for locked in locked_events:
@@ -5357,6 +5483,7 @@ async def diagnostics_owned_matching(
         event = db.get_hotspot_event_clip(int(hotspot_event_id))
         if not event:
             raise HTTPException(status_code=404, detail="热点事件不存在")
+        event = _with_soft_logistics_bridge(event)
         locked_events = [event]
     nodes = _chat_video_logistics_nodes(topic, locked_events)
     source = {}
@@ -5674,7 +5801,10 @@ async def set_hotspot_event_hook_kind(event_id: int, body: dict, user=Depends(re
 def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:
     """Validate locked Hooks before a durable task consumes model capacity."""
     event_ids = list(dict.fromkeys(int(event_id) for event_id in event_ids))
-    events = [db.get_hotspot_event_clip(event_id) for event_id in event_ids]
+    events = []
+    for event_id in event_ids:
+        event = db.get_hotspot_event_clip(event_id)
+        events.append(_with_soft_logistics_bridge(event) if event else None)
     if not 1 <= len(event_ids) <= 2 or any(event is None or not _is_confirmed_renderable_hotspot_hook(event) for event in events):
         raise HTTPException(409, "匹配的热点 Hook 已失效，请重新发起对话检索。")
     ordered_events = sorted(events, key=lambda event: int(event["start_ms"]))

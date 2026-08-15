@@ -117,7 +117,7 @@ def test_hotspot_library_exposes_only_confirmed_factful_ready_hooks_and_can_clea
     assert db.get_hotspot_event_clip(valid["id"]) is not None
 
 
-def test_hotspot_library_can_browse_audited_hooks_without_making_them_renderable(tmp_db):
+def test_hotspot_library_derives_soft_bridge_for_logistics_adjacent_audited_hooks(tmp_db):
     import database as db
 
     client, headers = _admin_client(tmp_db)
@@ -142,13 +142,35 @@ def test_hotspot_library_can_browse_audited_hooks_without_making_them_renderable
 
     strict = client.get("/api/hotspot-events", headers=headers)
     assert strict.status_code == 200
-    assert strict.json() == []
+    assert strict.json()[0]["id"] == event["id"]
+    assert strict.json()[0]["is_renderable"] is True
+    assert strict.json()[0]["logistics_bridge_mode"] == "soft"
+    assert strict.json()[0]["evidence"]["logistics_question"] == "道路通行受影响时，货运路线和配送节点要先核对什么？"
 
     audited = client.get("/api/hotspot-events?audited_only=true", headers=headers)
     assert audited.status_code == 200
     assert audited.json()[0]["id"] == event["id"]
-    assert audited.json()[0]["is_renderable"] is False
-    assert audited.json()[0]["library_status"] == "audit_only"
+    assert audited.json()[0]["is_renderable"] is True
+    assert audited.json()[0]["library_status"] == "ready"
+
+
+def test_soft_bridge_does_not_make_pure_sports_clip_renderable(tmp_db):
+    import app
+
+    event = {
+        "title_zh": "球队训练现场",
+        "title_en": "Football team training",
+        "review_status": "confirmed",
+        "clip_status": "ready",
+        "clip_path": "assets/hotspot-events/sports/event.mp4",
+        "evidence": {
+            "what_happened": "球员在训练场进行传球训练，画面可见球员和球门。",
+            "hook_reason": "训练动作清晰可见",
+        },
+    }
+
+    assert app._is_audited_hotspot_hook(event) is True
+    assert app._is_confirmed_renderable_hotspot_hook(event) is False
 
 
 def test_admin_can_delete_one_hook_without_deleting_mother_or_siblings(tmp_db):
