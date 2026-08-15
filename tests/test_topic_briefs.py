@@ -261,6 +261,46 @@ def test_formal_narrative_hook_repair_supports_non_fire_road_congestion_facts():
     assert fixed["scenes"][0]["voiceover"] == event["evidence"]["what_happened"]
 
 
+def test_formal_narrative_hook_repair_carries_generic_logistics_question_into_opening():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video", "duration_ms": 6_000},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+         "primary_category": "warehouse"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "南非末端配送车正在路上跑。", "text_overlay": "末端配送"},
+        {"voiceover": "现场提醒风险，Buffalo把仓内核对做稳。"},
+    ]}
+    event = {"hook_kind": "generic_logistics", "evidence": {
+        "what_happened": "展示了末端配送与派送环节的典型作业画面。",
+        "logistics_question": "末端配送如何高效完成最后三公里履约？",
+    }}
+
+    fixed = app._repair_formal_narrative_hook(generated, scenes, event)
+
+    assert fixed["scenes"][0]["voiceover"] == "末端配送如何稳住最后三公里？"
+
+
+def test_formal_narrative_bridge_uses_neutral_contrast_for_generic_logistics_hook():
+    import app
+
+    scenes = [
+        {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
+        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+         "primary_category": "warehouse"},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "末端配送如何稳住最后三公里？"},
+        {"voiceover": "Buffalo有运输能力。"},
+    ]}
+
+    fixed = app._repair_formal_narrative_bridge(generated, scenes)
+
+    assert fixed["scenes"][1]["voiceover"] == "物流环节更考验核对，Buffalo把仓内核对做稳。"
+
+
 def test_short_formal_scene_allows_a_natural_five_character_line_without_stock_padding():
     import app
 

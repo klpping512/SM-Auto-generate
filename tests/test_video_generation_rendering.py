@@ -296,7 +296,10 @@ def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
 
     # created_at 与 DB datetime('now') 一致：UTC 无时区串。旧用例用本地 datetime.now()
     # 恰好与旧 bug 的本地时区解释互相抵消，导致测试绿但生产误杀；改用 UTC 串才真实。
-    created = (datetime.now(timezone.utc) - timedelta(minutes=7)).strftime("%Y-%m-%d %H:%M:%S")
+    created = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=video_renderer.RENDER_TIMEOUT + 60)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     monkeypatch.setattr(video_renderer.db, "get_unfinished_render_jobs", lambda: [
         {"id": "job-stale", "status": "running", "created_at": created},
     ])
@@ -313,7 +316,11 @@ def test_cleanup_stale_jobs_kills_running_render(monkeypatch):
     # 状态标 canceled（而非 failed），is_canceled 认该状态，渲染线程必停
     assert updates == [(
         "job-stale",
-        {"status": "canceled", "stage": "超时清理", "error": "渲染超过 300 秒自动终止"},
+        {
+            "status": "canceled",
+            "stage": "超时清理",
+            "error": f"渲染超过 {video_renderer.RENDER_TIMEOUT} 秒自动终止",
+        },
     )]
     # run_cancelable_process 的 finally 已把进程从注册表清掉
     worker.join(timeout=5)
@@ -455,6 +462,25 @@ def test_subtitle_sync_report_covers_measured_audio_window():
     assert report["passed"] is True
     assert report["audio_duration"] == 4.2
     assert report["subtitle_end"] == 4.2
+
+
+def test_subtitle_sync_report_allows_short_leading_tts_silence_but_not_mid_sentence_gap():
+    import video_renderer
+
+    leading = video_renderer.subtitle_sync_report(
+        [{"start": 0.34, "end": 4.2, "text": "旁白"}], 4.2,
+    )
+    assert leading["passed"] is True
+    assert leading["leading_silence_tolerated"] == 0.34
+
+    middle = video_renderer.subtitle_sync_report(
+        [
+            {"start": 0.0, "end": 1.0, "text": "第一句"},
+            {"start": 1.34, "end": 4.2, "text": "第二句"},
+        ], 4.2,
+    )
+    assert middle["passed"] is False
+    assert middle["gaps"] == [0.34]
 
 
 def test_tts_speedup_factor_absorbs_measured_qwen_pacing_variation_without_distortion():

@@ -112,6 +112,9 @@ def test_video_project_workbench_has_five_stages_and_manual_review():
     assert "MiMo → Qwen" not in page
     assert "fallbackConfirm" not in page
     assert "voicePickerMarkup" in page
+    assert "配音服务与音色" in page
+    assert "先保存工作台当前选择" in page
+    assert "重试也必须使用当前 revision" in page
     assert "formatRenderProvenance" in page
     assert "热点 Hook" in page
     assert "Buffalo 自有" in page

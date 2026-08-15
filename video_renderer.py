@@ -1125,17 +1125,26 @@ def _align_cues_to_silence(
 
 
 def subtitle_sync_report(cues: list[dict], audio_duration: float, tolerance: float = 0.12) -> dict:
-    """校验字幕覆盖真实 TTS 音频窗口，避免字幕提前结束或越过旁白。"""
+    """校验字幕覆盖真实 TTS 音频窗口，避免字幕提前结束或越过旁白。
+
+    部分 TTS 会在第一句前保留一小段自然起声留白。它不是字幕中途断档，
+    不能把一条已完成的成片误判为失败；镜头中间的间隙仍然严格拦截。
+    """
     measured = round(max(0.0, float(audio_duration or 0)), 3)
     normalized = sorted(cues or [], key=lambda item: float(item.get("start") or 0))
     subtitle_end = round(float(normalized[-1].get("end") or 0), 3) if normalized else 0.0
     gaps = []
+    leading_silence = 0.0
     previous_end = 0.0
-    for cue in normalized:
+    for cue_index, cue in enumerate(normalized):
         start = float(cue.get("start") or 0)
         end = float(cue.get("end") or 0)
         if start > previous_end + tolerance:
-            gaps.append(round(start - previous_end, 3))
+            gap = round(start - previous_end, 3)
+            if cue_index == 0 and gap <= 0.45:
+                leading_silence = gap
+            else:
+                gaps.append(gap)
         if end < start or end > measured + tolerance:
             gaps.append(round(max(0.0, end - measured), 3))
         previous_end = max(previous_end, end)
@@ -1145,6 +1154,7 @@ def subtitle_sync_report(cues: list[dict], audio_duration: float, tolerance: flo
         "subtitle_end": subtitle_end,
         "cue_count": len(normalized),
         "gaps": gaps,
+        "leading_silence_tolerated": leading_silence,
     }
 
 

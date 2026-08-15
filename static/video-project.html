@@ -442,7 +442,7 @@ function renderVoice(){
     <div class="wb-card">
       <h2>配音字幕</h2>
       <div class="voice-block" style="display:grid;gap:14px">
-        <label>音色（MiMo 优先）</label>
+        <label>配音服务与音色</label>
         ${voicePickerMarkup(opts,selected,'projectVoice',{selectAttrs:'class="select"',previewButtonId:'projectVoicePreview',hintId:'projectVoiceHint'})}
         <label for="speechRate">语速</label>
         <input class="input" id="speechRate" type="number" min="0.8" max="1.3" step="0.05" value="${escapeHtml(String(p.speech_rate||1))}" style="max-width:160px;min-height:44px">
@@ -684,6 +684,8 @@ async function saveRevision(){
 
 async function startGeneration(){
   try{
+    // 先保存工作台当前选择；否则用户切到 MiniMax 后直接生成时，后端仍会读取旧 revision 的 MiMo。
+    await saveRevision();
     const response=await apiFetch(`/api/video-projects/${project.id}/generate`,{method:'POST'});
     const result=await response.json();
     job=result.job;project.active_job_id=job.id;renderAll();startPolling();refreshVideoTaskBadge();
@@ -705,7 +707,11 @@ async function resumeWithQualityFixes(){
   await continueGeneration();
 }
 async function retryGeneration(){
-  try{const response=await apiFetch(`/api/video-generation/jobs/${job.id}/retry`,{method:'POST'});const result=await response.json();job=result.job;project.active_job_id=job.id;renderAll();startPolling();refreshVideoTaskBadge();}catch(error){showToast(error.message,'error');}
+  try{
+    // 重试也必须使用当前 revision，尤其是用户刚把 TTS 从 MiMo 切到 MiniMax 的场景。
+    await saveRevision();
+    await startGeneration();
+  }catch(error){showToast(error.message,'error');}
 }
 async function cancelFromProject(){await cancelVideoGeneration(job.id);await loadJob();}
 async function regenerateFromManualReview(){await saveRevision();await startGeneration();}

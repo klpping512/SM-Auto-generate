@@ -1851,6 +1851,7 @@ _HOOK_FACT_TERMS = (
     "燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾", "结构",
     "道路", "公路", "人群", "车辆", "卡车", "拥堵", "排队", "滞留", "尘土",
     "积雪", "大雪", "暴雨", "洪水", "港口", "码头", "口岸", "边境", "飞机", "警灯",
+    "末端", "配送", "派送", "仓储", "仓库", "分拣", "运输", "货运", "物流", "装卸",
 )
 
 
@@ -1869,11 +1870,31 @@ def _hotspot_risk_lead(voiceover: str) -> str:
         return "节点变化风险"
     if any(term in text for term in ("封路", "罢工", "停运", "关闭")):
         return "通行变化风险"
-    return "现场提醒风险"
+    if any(term in text for term in ("末端", "配送", "派送", "仓储", "分拣", "运输", "货运", "物流")):
+        return "物流环节更考验核对"
+    return "现场变化更考验核对"
 
 
 def _hook_fact_terms(what_happened: str) -> list[str]:
     return [term for term in _HOOK_FACT_TERMS if term in str(what_happened or "")]
+
+
+def _compact_logistics_question(question: str) -> str:
+    """Keep the audited logistics question short enough for the Hook beat."""
+    text = str(question or "").strip()
+    if not text:
+        return ""
+    if "末端配送" in text or "最后三公里" in text:
+        return "末端配送如何稳住最后三公里？"
+    if "仓配" in text or "仓储" in text:
+        return "仓配变化时，哪些动作要先核对？"
+    if "道路" in text or "路线" in text or "通行" in text:
+        return "通行变化时，货运路线要先核对什么？"
+    if "港口" in text or "装卸" in text:
+        return "港口装卸变化时，要先核对哪些节点？"
+    if "边境" in text or "查验" in text or "单证" in text:
+        return "边境查验变化时，运输单证要先核对什么？"
+    return text.rstrip("。！") + "？" if not text.endswith("？") else text
 
 
 def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: dict | None) -> dict:
@@ -1884,13 +1905,25 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
     if scenes[0].get("scene_role") != "hotspot_evidence":
         return repaired
     what_happened = str((event.get("evidence") or {}).get("what_happened") or "").strip()
+    logistics_question = str((event.get("evidence") or {}).get("logistics_question") or "").strip()
     terms = _hook_fact_terms(what_happened)
     first_voiceover = str(repaired["scenes"][0].get("voiceover") or "")
-    if not terms or sum(term in first_voiceover for term in terms) >= min(2, len(terms)):
+    compact_question = _compact_logistics_question(logistics_question)
+    question_already_present = bool(
+        compact_question and compact_question.rstrip("？") in first_voiceover
+    )
+    fact_ok = bool(terms) and sum(term in first_voiceover for term in terms) >= min(2, len(terms))
+    # A generic logistics Hook is allowed as a reusable opener, but its audited
+    # logistics question must still reach the first spoken beat; otherwise the
+    # planner can produce a fluent yet content-free “车在路上跑” sentence.
+    if not terms and not compact_question:
+        return repaired
+    if fact_ok and (not compact_question or question_already_present):
         return repaired
     maximum = _scene_voiceover_max_chars(scenes[0])
     minimum = _scene_voiceover_min_chars(scenes[0])
-    candidates = [what_happened]
+    candidates = [compact_question] if compact_question else []
+    candidates.append(what_happened)
     if any(term in what_happened for term in ("拥堵", "排队", "滞留")):
         candidates.append("现场可见人群聚集，车辆出现拥堵。")
     elif any(term in what_happened for term in ("积雪", "大雪", "暴雨", "洪水")):
@@ -2243,7 +2276,7 @@ def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict])
         "facts": facts,
         "narrative_contract": {
             "beat_1": "明确说出 Hook 发生了什么，不能只说‘现场’或复述标题。",
-            "beat_2": "解释这个事实为什么会影响运输、存储或配送安全。",
+            "beat_2": "解释这个事实为什么会影响运输、存储或配送安全；优先使用 facts[0].logistics_question 提出的具体物流问题。",
             "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接，并把一个具体优势（风险前置、动作可核对、异常可留痕或交接更稳）落到画面；不能只喊口号。",
             "beat_4": "每个后续镜头只讲一个可见动作，最后再用统一 CTA 收束。",
         },
