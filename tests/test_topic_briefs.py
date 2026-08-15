@@ -209,7 +209,7 @@ def test_formal_narrative_bridge_has_a_deterministic_visible_action_repair():
 
     scenes = [
         {"scene_role": "hotspot_evidence", "evidence_type": "hotspot_video"},
-        {"scene_role": "owned_proof", "evidence_type": "owned_video", "flow_role": "post_hook_bridge",
+        {"scene_role": "owned_proof", "evidence_type": "owned_video",
          "primary_category": "warehouse"},
     ]
     generated = {"scenes": [

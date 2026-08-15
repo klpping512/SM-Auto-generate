@@ -1976,7 +1976,12 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
 
 
 def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict:
-    """Deterministically repair only the first Hook-to-owned bridge beat."""
+    """Deterministically repair only the first Hook-to-owned bridge beat.
+
+    ``flow_role`` is useful metadata, but it is not the safety boundary: older
+    plans and some model-repaired plans can omit it. The first owned proof after
+    the locked Hook is the bridge by position and must receive the same check.
+    """
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     first_voiceover = str(repaired["scenes"][0].get("voiceover") or "") if repaired["scenes"] else ""
     contrast_lead = _hotspot_risk_lead(first_voiceover)
@@ -1988,11 +1993,17 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
         "facility": "现场核对",
         "delivery": "发运交接",
     }
+    hotspot_seen = False
+    bridge_checked = False
     for index, scene in enumerate(scenes):
         if index >= len(repaired["scenes"]):
             break
-        if scene.get("scene_role") != "owned_proof" or scene.get("flow_role") != "post_hook_bridge":
+        if scene.get("scene_role") == "hotspot_evidence":
+            hotspot_seen = True
             continue
+        if not hotspot_seen or bridge_checked or scene.get("scene_role") != "owned_proof":
+            continue
+        bridge_checked = True
         voiceover = str(repaired["scenes"][index].get("voiceover") or "")
         valid_relation = any(term in voiceover for term in _HOOK_BRIDGE_TERMS)
         valid_action = any(term in voiceover for term in _VISIBLE_ACTION_TERMS)
