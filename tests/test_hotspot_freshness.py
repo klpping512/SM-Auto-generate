@@ -197,6 +197,61 @@ def test_template_d_thin_inventory_image_bridges():
     assert sum(scene["scene_role"] == "hotspot_evidence" for scene in scenes) == 1
 
 
+def test_adaptive_image_bridges_fill_a_video_duration_gap_after_four_segments():
+    """视频段达到 4 段但仍不足正式时长时，图片仍可作为受控补位。"""
+    brief = {
+        "hotspot_title": "港口作业变化", "hotspot_id": 10,
+        "logistics_topic": "跨境履约准备", "hotspot_type": "infrastructure",
+    }
+    events = [_event(1, 81, 10, "港口作业变化", end_ms=6_000)]
+    owned = [
+        _owned(index, category, f"Buffalo {category}现场动作 {index}")
+        for index, category in enumerate(("warehouse", "delivery", "staff", "facility"), 2)
+    ]
+    images = [
+        {"id": 100 + index, "asset_id": 100 + index, "file_type": "image",
+         "asset_file_type": "image", "primary_category": "warehouse",
+         "source": "local_directory", "name": f"Buffalo 仓内图片 {index}"}
+        for index in range(1, 7)
+    ]
+
+    scenes = plan_followup_scenes(
+        brief, events, owned, target_duration_ms=50_000,
+        owned_images=images, allow_adaptation=True,
+    )
+
+    image_scenes = [scene for scene in scenes if scene["evidence_type"] == "image"]
+    assert image_scenes
+    assert len(image_scenes) <= 6
+    assert all(int(scene["duration_ms"]) == 2_000 for scene in image_scenes)
+    assert sum(scene["scene_role"] == "hotspot_evidence" for scene in scenes) == 1
+    assert all(scene["scene_role"] == "owned_context_image" for scene in image_scenes)
+
+
+def test_adaptive_image_bridges_do_not_pad_a_video_plan_that_already_reaches_target():
+    """视频实际时长已达目标时，不无故插入静态图片。"""
+    brief = {
+        "hotspot_title": "仓内履约准备", "hotspot_id": 11,
+        "logistics_topic": "跨境履约准备", "hotspot_type": "warehouse",
+    }
+    events = [_event(1, 82, 11, "仓内履约准备", end_ms=60_000)]
+    owned = _owned_pool(6) + [_owned(8, "facility", "Buffalo 装车复核动作")]
+    for segment in owned:
+        segment["end_ms"] = 20_000
+    images = [
+        {"id": 200, "asset_id": 200, "file_type": "image",
+         "asset_file_type": "image", "primary_category": "warehouse",
+         "source": "local_directory", "name": "Buffalo 仓内图片"},
+    ]
+
+    scenes = plan_followup_scenes(
+        brief, events, owned, target_duration_ms=50_000,
+        owned_images=images, allow_adaptation=True,
+    )
+
+    assert not any(scene["evidence_type"] == "image" for scene in scenes)
+
+
 def test_opener_differs_across_fresh_stale_generic_inputs():
     """验收 4：同一 brief，fresh / 过期 timely / 仅 generic 三种输入 opener 不同。"""
     brief = {

@@ -867,10 +867,12 @@ def plan_followup_scenes(
     # owned_only：picks 恒空（纯自有，不含 za_stock）
     # buffalo 保底 + za_stock 追加后重新交织，避免 za_stock 堆在片尾
     owned = _diversify_owned_candidates(buffalo[:max(0, owned_limit - len(picks))] + picks)
-    # Ideal formal plans avoid automatic image inserts. Adaptive chat plans may
-    # re-enable up to three stills as rhythm bridges when owned footage is thin.
-    if allow_adaptation and len(owned) < 4:
-        context_images = context_images[:3]
+    # Formal plans prefer real footage, but a sparse/poorly indexed video pool
+    # must not make the 139-image Buffalo library unusable. Images are fallback
+    # rhythm bridges only when the actual video slots cannot reach the formal
+    # target; they never count as hotspot evidence or service-result proof.
+    if allow_adaptation:
+        context_images = context_images[:6]
     else:
         context_images = []
 
@@ -908,6 +910,13 @@ def plan_followup_scenes(
 
     def _slot_asset(slot: tuple[str, object]) -> int:
         return int(_slot_event(slot).get("asset_id") or 0)
+
+    # Do not add stills to a video plan that already has enough real footage.
+    # The target passed by callers excludes the fixed 3s brand endcard, so this
+    # comparison keeps the final 50–90s gate honest without padding good plans.
+    video_only_duration_ms = sum(source_duration(slot) for slot in source_slots)
+    if video_only_duration_ms >= target_duration_ms:
+        context_images = []
 
     # 批18 动线化：不再"热点全堆开头"。
     #   1) 开场 = 新鲜度最高 Hook（timely 优先，generic 常青兜底）——urgency 已并入
