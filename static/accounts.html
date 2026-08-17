@@ -19,15 +19,15 @@
 <script src="/static/common.js?v=5"></script>
 <script>
 const PAGE_ID = 'accounts';
-const platformNames = { xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
-const platformIcons = { xiaohongshu:'simple-icons:xiaohongshu',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
-const platformColors = { xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
+const platformNames = { wechat_mp:'微信公众号', xiaohongshu:'小红书',douyin:'抖音',facebook:'Facebook',twitter:'Twitter',reddit:'Reddit' };
+const platformIcons = { wechat_mp:'mdi:wechat', xiaohongshu:'simple-icons:xiaohongshu',douyin:'ri:tiktok-fill',facebook:'ri:facebook-box-fill',twitter:'ri:twitter-x-fill',reddit:'ri:reddit-fill' };
+const platformColors = { wechat_mp:'#07C160', xiaohongshu:'#FF2442',douyin:'#000',facebook:'#1877F2',twitter:'#1DA1F2',reddit:'#FF4500' };
 const requiredFields = {
     facebook: [['page_id','主页 ID'],['page_access_token','主页访问令牌 (Page Access Token)']],
     twitter:  [['access_token','用户访问令牌 (OAuth2 access_token)']],
     reddit:   [['client_id','App Client ID'],['client_secret','App Client Secret'],
                ['refresh_token','Refresh Token'],['user_agent','User-Agent'],['subreddit','目标 Subreddit']],
-    xiaohongshu: [], douyin: [],
+    xiaohongshu: [], douyin: [], wechat_mp: [],
 };
 
 let accounts = [];
@@ -116,7 +116,7 @@ function render() {
                         ${Object.entries(platformNames).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
                     </select></div>
                 <div id="platformHint" style="font-size:11px;color:var(--text-muted);padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);">
-                    选择小红书或抖音后，将通过扫码方式连接账号
+                    小红书、抖音通过扫码连接；公众号使用慧媒账号发布
                 </div>
                 <div id="nameField"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号名称</label><input id="newName" class="input" placeholder="如: SA物流达人"/></div>
                 <div id="idField"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">账号 ID</label><input id="newAccountId" class="input" placeholder="自动生成"/></div>
@@ -164,7 +164,7 @@ const connectFlows = {
         title: '连接小红书',
         steps: [
             { icon: 'mdi:cellphone', title: '准备', desc: '请确保手机已安装小红书 APP，并准备好扫码' },
-            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '浏览器将弹出小红书登录页，请用 APP 扫描二维码' },
+            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '本机 Chrome 已打开，请在其中点击扫码登录' },
             { icon: 'mdi:check-circle', title: '完成', desc: '登录成功，Cookie 已保存' },
         ],
     },
@@ -172,7 +172,7 @@ const connectFlows = {
         title: '连接抖音',
         steps: [
             { icon: 'mdi:cellphone', title: '准备', desc: '请确保手机已安装抖音 APP，并准备好扫码' },
-            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '浏览器将弹出抖音登录页，请用 APP 扫描二维码' },
+            { icon: 'mdi:qrcode-scan', title: '扫码登录', desc: '本机 Chrome 已打开，请在其中点击扫码登录' },
             { icon: 'mdi:check-circle', title: '完成', desc: '登录成功，Cookie 已保存' },
         ],
     },
@@ -182,6 +182,79 @@ let wizardAccountId = null;
 let wizardStep = 0;
 let wizardPlatform = '';
 let wizardPollTimer = null;
+
+const LOCAL_AGENT_URL = 'http://127.0.0.1:18765';
+const LOCAL_AGENT_INSTALLERS = {
+    windows: { url: '/static/downloads/SA-LogiFlow-Agent-Windows.exe', label: '下载 Windows 安装包' },
+    macos: { url: '/static/downloads/SA-LogiFlow-Agent-macOS.pkg', label: '下载 macOS 安装包' },
+};
+
+function getClientPlatform() {
+    const ua = (navigator.userAgent || '').toLowerCase();
+    if (ua.includes('windows')) return 'windows';
+    if (ua.includes('mac os') || ua.includes('macintosh')) return 'macos';
+    return 'unsupported';
+}
+
+function getLocalAgentInstaller() {
+    return LOCAL_AGENT_INSTALLERS[getClientPlatform()] || null;
+}
+
+async function checkLocalAgent() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    try {
+        const resp = await fetch(`${LOCAL_AGENT_URL}/health`, { signal: controller.signal });
+        if (!resp.ok) return { ok: false, error: '本机助手响应异常' };
+        const data = await resp.json();
+        return data.ok && data.chrome ? { ok: true, data } : { ok: false, error: '本机未找到 Google Chrome' };
+    } catch (e) {
+        return { ok: false, error: '本机扫码助手未安装或未启动' };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function renderLocalAgentInstall(targetId, retryCode) {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    const installer = getLocalAgentInstaller();
+    const downloadAction = installer
+        ? `<a class="btn btn-primary btn-sm" href="${installer.url}" download style="margin-top:12px;display:inline-flex;">${installer.label}</a>`
+        : `<p style="font-size:12px;color:#EF4444;margin-top:12px;">当前系统暂未提供安装包，请使用 Windows 或 macOS 电脑。</p>`;
+    target.innerHTML = `<div style="text-align:center;padding:12px 0;">
+        <iconify-icon icon="mdi:monitor-arrow-down-variant" width="42" style="color:var(--primary);"></iconify-icon>
+        <p style="font-size:14px;font-weight:700;color:var(--text-primary);margin-top:10px;">先安装本机扫码助手</p>
+        <p style="font-size:12px;color:var(--text-muted);line-height:1.7;margin-top:8px;">首次安装一次即可。安装完成后，点击“重新检测”，之后扫码会直接打开本机 Chrome。</p>
+        ${downloadAction}
+        <button class="btn btn-secondary btn-sm" onclick="${retryCode}" style="margin:12px 0 0 6px;">我已安装，重新检测</button>
+    </div>`;
+}
+
+async function startLocalScanSession(accountId) {
+    const health = await checkLocalAgent();
+    if (!health.ok) throw new Error(health.error);
+    const resp = await apiFetch(`/api/accounts/${accountId}/local-scan-login`, { method: 'POST' });
+    const data = await resp.json();
+    const agentResp = await fetch(`${LOCAL_AGENT_URL}/v1/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            server_url: window.location.origin,
+            session_id: data.session_id,
+            handoff_token: data.handoff_token,
+            complete_path: data.complete_path,
+            login_url: data.login_url,
+            logged_in_selector: data.logged_in_selector,
+        }),
+    });
+    if (!agentResp.ok) {
+        let message = '本机 Chrome 启动失败';
+        try { message = (await agentResp.json()).error || message; } catch {}
+        throw new Error(message);
+    }
+    return data;
+}
 
 function openWizard(id, platform) {
     const flow = connectFlows[platform];
@@ -215,7 +288,7 @@ function renderWizardStep() {
         nextBtn.style.display = '';
     } else if (wizardStep === 1) {
         body.innerHTML = `<div class="spin" style="width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--primary);border-radius:50%;"></div>
-            <p style="font-size:13px;color:var(--text-secondary);text-align:center;">${step.desc}<br/><span style="font-size:11px;color:var(--text-muted);">（浏览器已弹出，请完成扫码）</span></p>`;
+            <p style="font-size:13px;color:var(--text-secondary);text-align:center;">正在启动本机 Chrome…<br/><span style="font-size:11px;color:var(--text-muted);">启动后请在 Chrome 中点击扫码入口</span></p>`;
         nextBtn.style.display = 'none';
         // 启动扫码
         scanLoginFromWizard();
@@ -241,13 +314,15 @@ function closeWizard() {
 
 async function scanLoginFromWizard() {
     try {
-        const resp = await apiFetch(`/api/accounts/${wizardAccountId}/scan-login`, { method: 'POST' });
-        const data = await resp.json();
+        const data = await startLocalScanSession(wizardAccountId);
         if (data.session_id) pollWizardReady(data.session_id, 0);
-        else pollWizardLegacyReady(0); // 兼容尚未重启的旧版后端
     } catch (e) {
-        document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:alert-circle" width="40" style="color:#EF4444;"></iconify-icon>
-            <p style="font-size:13px;color:#EF4444;">启动失败：${escapeHtml(e.message)}</p>`;
+        if (e.message.includes('本机')) {
+            renderLocalAgentInstall('wizardBody', 'scanLoginFromWizard()');
+        } else {
+            document.getElementById('wizardBody').innerHTML = `<iconify-icon icon="mdi:alert-circle" width="40" style="color:#EF4444;"></iconify-icon>
+                <p style="font-size:13px;color:#EF4444;">启动失败：${escapeHtml(e.message)}</p>`;
+        }
         document.getElementById('wizardCancel').textContent = '关闭';
     }
 }
@@ -324,6 +399,8 @@ function onPlatformChange() {
     // RPA: 简化表单 + 红色扫码按钮
     document.getElementById('idField').style.display = isRpa ? 'none' : '';
     document.getElementById('nameField').querySelector('label').textContent = isRpa ? '扫码登录 ' + platformNames[pf] : '账号名称';
+    document.getElementById('idField').querySelector('label').textContent = pf === 'wechat_mp' ? '慧媒账号标识（可选）' : '账号 ID';
+    document.getElementById('newAccountId').placeholder = pf === 'wechat_mp' ? '留空使用慧媒默认账号' : '自动生成';
     document.getElementById('newName').placeholder = isRpa ? '给这个账号起个名字...' : '如: SA物流达人';
     if (isRpa) {
         btn.textContent = '开始扫码连接';
@@ -337,7 +414,8 @@ function onPlatformChange() {
 async function addStep1Next() {
     const platform = document.getElementById('newPlatform').value;
     const name = document.getElementById('newName').value.trim() || (platformNames[platform] + '账号');
-    const accountId = (platform + '_' + Date.now().toString(36)).slice(0, 20);
+    const accountIdInput = document.getElementById('newAccountId').value.trim();
+    const accountId = accountIdInput || (platform + '_' + Date.now().toString(36)).slice(0, 20);
     if (!name) { showToast('请填写账号名称', 'error'); return; }
     const isRpa = ['xiaohongshu', 'douyin'].includes(platform);
     // 创建账号
@@ -359,27 +437,40 @@ async function addStep1Next() {
         step2.innerHTML = `<div style="text-align:center;padding:20px 0;">
             <div class="spin" style="width:40px;height:40px;border:3px solid var(--border-light);border-top-color:#FF2442;border-radius:50%;margin:0 auto 16px;"></div>
             <p style="font-size:15px;font-weight:700;color:var(--text-primary);">正在打开 ${platformNames[platform]} 登录页</p>
-            <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">浏览器将弹出一个新窗口，<br/>请使用 ${platformNames[platform]} APP 扫码完成登录</p>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">本机 Chrome 将打开，请在其中点击扫码登录并完成操作</p>
         </div>`;
-        try {
-            const loginResp = await apiFetch(`/api/accounts/${newAcc.id}/scan-login`, { method: 'POST' });
-            const loginData = await loginResp.json();
-            if (loginData.session_id) pollAddReady(newAcc.id, loginData.session_id, 0, platform);
-            else pollAddLegacyReady(newAcc.id, 0, platform); // 兼容旧版后端
-        } catch (e) {
-            step2.innerHTML = `<p style="color:#EF4444;text-align:center;padding:20px;">扫码启动失败：${escapeHtml(e.message)}<br/><button class="btn btn-secondary btn-sm" style="margin-top:12px;" onclick="closeAddModal()">关闭</button></p>`;
-        }
+        startExistingLocalScan(newAcc.id, platform);
     } else {
-        // API 平台：展示凭据表单
+        // API/慧媒平台：展示凭据表单
         const fields = requiredFields[platform] || [];
-        step2.innerHTML = `<div style="display:flex;flex-direction:column;gap:12px;">
-            <p style="font-size:12px;color:var(--text-muted);">请填写 ${platformNames[platform]} 的 API 凭据：</p>
-            ${fields.map(([k, label]) => `<div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">${escapeHtml(label)}</label>
-                <input id="addCred_${k}" class="input" placeholder="${escapeHtml(k)}" autocomplete="off"/></div>`).join('')}
-        </div>`;
+        step2.innerHTML = fields.length
+            ? `<div style="display:flex;flex-direction:column;gap:12px;">
+                <p style="font-size:12px;color:var(--text-muted);">请填写 ${platformNames[platform]} 的 API 凭据：</p>
+                ${fields.map(([k, label]) => `<div><label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:block;">${escapeHtml(label)}</label>
+                    <input id="addCred_${k}" class="input" placeholder="${escapeHtml(k)}" autocomplete="off"/></div>`).join('')}
+            </div>`
+            : `<div style="display:flex;flex-direction:column;gap:10px;padding:12px 0;">
+                <iconify-icon icon="mdi:check-decagram-outline" width="34" style="color:#07C160;"></iconify-icon>
+                <p style="font-size:13px;font-weight:600;color:var(--text-primary);">公众号通过慧媒账号发布</p>
+                <p style="font-size:11px;color:var(--text-muted);line-height:1.6;">无需在这里填写 API Key。请先确保慧媒已登录对应公众号，绑定后即可从发布队列发文。</p>
+            </div>`;
         document.getElementById('addStep2Btns').innerHTML = `
             <button class="btn btn-secondary btn-sm" onclick="closeAddModal()">取消</button>
-            <button class="btn btn-primary btn-sm" onclick="saveAddCredentials(${newAcc.id}, '${platform}')">保存凭据</button>`;
+            <button class="btn btn-primary btn-sm" onclick="saveAddCredentials(${newAcc.id}, '${platform}')">${fields.length ? '保存凭据' : '确认绑定'}</button>`;
+    }
+}
+
+async function startExistingLocalScan(accId, platform) {
+    const step2 = document.getElementById('addStep2Content');
+    try {
+        const loginData = await startLocalScanSession(accId);
+        if (loginData.session_id) pollAddReady(accId, loginData.session_id, 0, platform);
+    } catch (e) {
+        if (e.message.includes('本机')) {
+            renderLocalAgentInstall('addStep2Content', `startExistingLocalScan(${accId}, '${platform}')`);
+        } else {
+            step2.innerHTML = `<p style="color:#EF4444;text-align:center;padding:20px;">扫码启动失败：${escapeHtml(e.message)}<br/><button class="btn btn-secondary btn-sm" style="margin-top:12px;" onclick="closeAddModal()">关闭</button></p>`;
+        }
     }
 }
 
@@ -494,12 +585,16 @@ async function saveCredentials() {
 // ==================== RPA 扫码登录 ====================
 async function scanLogin(id) {
     try {
-        const resp = await apiFetch(`/api/accounts/${id}/scan-login`, { method: 'POST' });
-        const data = await resp.json();
-        showToast('已启动，请在弹出的浏览器完成扫码', 'info');
+        const data = await startLocalScanSession(id);
+        showToast('已启动，请在本机 Chrome 中点击扫码登录', 'info');
         if (data.session_id) pollAccountReady(id, data.session_id, 0);
-        else pollAccountLegacyReady(id, 0);
-    } catch (e) { showToast('扫码启动失败: ' + e.message, 'error'); }
+    } catch (e) {
+        if (e.message.includes('本机')) {
+            showToast('请先安装本机扫码助手', 'error');
+        } else {
+            showToast('扫码启动失败: ' + e.message, 'error');
+        }
+    }
 }
 
 function pollAccountLegacyReady(id, tries) {

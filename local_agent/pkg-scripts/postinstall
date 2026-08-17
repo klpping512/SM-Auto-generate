@@ -1,0 +1,56 @@
+#!/bin/bash
+set -eu
+
+LABEL="com.buffalo.salogiflow.agent"
+APP_PATH="/Applications/SA-LogiFlow-Agent.app"
+AGENT_BIN="$APP_PATH/Contents/MacOS/SA-LogiFlow-Agent"
+CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console)"
+
+if [ "$CONSOLE_USER" = "root" ] || [ ! -x "$AGENT_BIN" ]; then
+    exit 0
+fi
+
+CONSOLE_UID="$(/usr/bin/id -u "$CONSOLE_USER")"
+CONSOLE_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
+LAUNCH_DIR="$CONSOLE_HOME/Library/LaunchAgents"
+PLIST="$LAUNCH_DIR/$LABEL.plist"
+
+/bin/mkdir -p "$LAUNCH_DIR"
+/usr/bin/chown "$CONSOLE_USER":staff "$LAUNCH_DIR"
+
+/bin/cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.buffalo.salogiflow.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$AGENT_BIN</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SALOGIFLOW_AGENT_PORT</key>
+        <string>18765</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/salogiflow-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/salogiflow-agent.error.log</string>
+</dict>
+</plist>
+PLIST
+
+/usr/bin/chown "$CONSOLE_USER":staff "$PLIST"
+/bin/chmod 644 "$PLIST"
+/bin/launchctl bootout "gui/$CONSOLE_UID/$LABEL" 2>/dev/null || true
+/bin/launchctl bootstrap "gui/$CONSOLE_UID" "$PLIST"
+/bin/launchctl kickstart -k "gui/$CONSOLE_UID/$LABEL"
+exit 0

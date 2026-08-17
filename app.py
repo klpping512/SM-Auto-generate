@@ -3,6 +3,10 @@ import asyncio
 import json as _json
 import logging
 import os
+import secrets
+import socket
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4 as _uuid4
@@ -29,7 +33,7 @@ from models import (
     GenerateRequest, GenerateResponse,
     QueueCreateRequest, AccountCreateRequest, AccountCredentialsRequest, ReviewRequest, ChatRequest,
     LoginRequest, RegisterRequest, TokenResponse,
-    UserRole,
+    UserRole, LocalScanCompleteRequest,
 )
 import publish_readiness
 from topic_library import TOPIC_CATEGORIES, TOPIC_MAP
@@ -54,6 +58,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    _clear_stale_remote_desktop_artifacts()
     # 确保默认管理员存在
     if not db.get_user_by_username("admin"):
         db.create_user("admin", hash_password("admin123"), "admin", "系统管理员")
@@ -87,6 +92,28 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # 扫码登录会话仅用于本机单进程部署；前端据此获得明确的成功/超时/错误状态。
 scan_login_sessions: dict[str, dict] = {}
+# 本机原生 Chrome 扫码会话：令牌只允许本次指定账号回传一次 Cookie。
+local_scan_handoffs: dict[str, dict] = {}
+# 每个扫码任务使用独立的 Xvfb + x11vnc 桌面；noVNC 只通过一次性 token 路由到对应端口。
+remote_desktop_sessions: dict[str, dict] = {}
+remote_desktop_lock = asyncio.Lock()
+REMOTE_DESKTOP_ROOT = Path(os.environ.get("SALOGIFLOW_REMOTE_DESKTOP_ROOT", "/opt/distribution-manager/data/remote-desktops"))
+REMOTE_NOVNC_TOKEN_DIR = Path(os.environ.get("SALOGIFLOW_NOVNC_TOKEN_DIR", "/opt/distribution-manager/data/novnc-tokens"))
+REMOTE_DISPLAY_START = int(os.environ.get("SALOGIFLOW_REMOTE_DISPLAY_START", "100"))
+REMOTE_DISPLAY_COUNT = int(os.environ.get("SALOGIFLOW_REMOTE_DISPLAY_COUNT", "50"))
+REMOTE_VNC_PORT_START = int(os.environ.get("SALOGIFLOW_REMOTE_VNC_PORT_START", "6100"))
+
+
+def _clear_stale_remote_desktop_artifacts():
+    """服务重启后清理上次任务留下的无效 token/密码文件。"""
+    for directory, pattern in ((REMOTE_NOVNC_TOKEN_DIR, "*.token"), (REMOTE_DESKTOP_ROOT, "*.pass")):
+        if not directory.exists():
+            continue
+        for path in directory.glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("无法清理扫码桌面残留文件: %s", path)
 # 手动发布会话：有头浏览器自动填好内容停在发布页，等用户人工点「发布」。
 manual_publish_sessions: dict[str, dict] = {}
 # 手动发布会话：弹有头浏览器自动填好内容、停在发布页，等用户人工点「发布」。
@@ -350,8 +377,193 @@ async def set_account_credentials(
     return {"ok": True, "ready": r["ready"], "missing": r["missing"]}
 
 
-async def _run_scan_login(account: dict, session_id: str):
-    """后台：有头浏览器让用户扫码，轮询登录态 → 存 cookie → 置 active。本地单机场景。"""
+@app.post("/api/accounts/{account_id}/local-scan-login")
+async def start_local_scan_login(account_id: int, user=Depends(require_role(UserRole.ADMIN))):
+    """创建本机 Chrome 扫码会话；浏览器助手用一次性 handoff token 回传 Cookie。"""
+    from adapters import get_adapter
+    from adapters.rpa_base import RpaAdapter
+
+    accounts = [a for a in db.get_accounts() if a["id"] == account_id]
+    if not accounts:
+        raise HTTPException(404, "Account not found")
+    acc = accounts[0]
+    adapter = get_adapter(acc["platform"])
+    if not isinstance(adapter, RpaAdapter):
+        raise HTTPException(400, "该平台不使用扫码登录，请填写凭据")
+    session_id = str(_uuid4())
+    handoff_token = secrets.token_urlsafe(32)
+    scan_login_sessions[session_id] = {
+        "status": "waiting", "mode": "local", "account_id": acc["id"],
+        "platform": acc["platform"], "owner_id": user["id"],
+    }
+    local_scan_handoffs[session_id] = {
+        "token": handoff_token, "account_id": acc["id"], "owner_id": user["id"],
+        "expires_at": time.time() + 300,
+    }
+    db.add_audit_log(user["id"], user["username"], "local_scan_login",
+                     target=f"{acc['platform']}:{acc['account_id']}")
+    return {
+        "started": True,
+        "session_id": session_id,
+        "mode": "local",
+        "handoff_token": handoff_token,
+        "login_url": adapter.login_url,
+        "logged_in_selector": adapter._logged_in_selector(),
+        "complete_path": f"/api/accounts/{account_id}/local-scan-login/{session_id}/complete",
+        "status": "waiting",
+    }
+
+
+@app.post("/api/accounts/{account_id}/local-scan-login/{session_id}/complete")
+async def complete_local_scan_login(
+    account_id: int,
+    session_id: str,
+    req: LocalScanCompleteRequest,
+):
+    """接收本机助手回传的 Cookie；不要求 JWT，仅接受短时一次性 handoff token。"""
+    handoff = local_scan_handoffs.get(session_id)
+    session = scan_login_sessions.get(session_id)
+    if not handoff or not session or session.get("mode") != "local":
+        raise HTTPException(404, "本机扫码会话不存在或已结束")
+    if handoff["account_id"] != account_id or handoff["expires_at"] < time.time():
+        local_scan_handoffs.pop(session_id, None)
+        session.update({"status": "timeout", "error": "本机扫码会话已过期"})
+        raise HTTPException(410, "本机扫码会话已过期")
+    if not secrets.compare_digest(req.handoff_token, handoff["token"]):
+        raise HTTPException(403, "无效的本机扫码令牌")
+    local_scan_handoffs.pop(session_id, None)
+    if req.error:
+        session.update({"status": "error", "error": req.error})
+        return {"ok": False, "status": "error"}
+    if not req.cookies:
+        session.update({"status": "error", "error": "本机浏览器未返回 Cookie"})
+        return {"ok": False, "status": "error"}
+    accounts = [a for a in db.get_accounts() if a["id"] == account_id]
+    if not accounts:
+        session.update({"status": "error", "error": "Account not found"})
+        return {"ok": False, "status": "error"}
+    from adapters.rpa_base import build_credentials
+    acc = accounts[0]
+    db.update_account_credentials(acc["account_id"], build_credentials(req.cookies))
+    db.update_account_status(account_id, "active")
+    session.update({"status": "success"})
+    db.add_audit_log(handoff["owner_id"], "local-agent", "local_scan_complete",
+                     target=f"{acc['platform']}:{acc['account_id']}")
+    return {"ok": True, "status": "success"}
+
+
+def _remote_port_is_listening(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.1)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+async def _stop_remote_process(process: subprocess.Popen | None):
+    if not process or process.poll() is not None:
+        return
+    process.terminate()
+    for _ in range(20):
+        if process.poll() is not None:
+            return
+        await asyncio.sleep(0.05)
+    process.kill()
+
+
+def _remote_browser_url(token: str, password: str) -> str:
+    # 密码放在 URL fragment，不会随 HTTP 请求发送到 nginx/websockify 日志。
+    return (
+        "/novnc/vnc.html?autoconnect=1&resize=scale"
+        f"&path=novnc/websockify%3Ftoken%3D{token}#password={password}"
+    )
+
+
+async def _start_remote_desktop(session_id: str) -> dict:
+    """为一次扫码任务创建独立桌面，并返回前端可用的 noVNC 会话 URL。"""
+    async with remote_desktop_lock:
+        REMOTE_DESKTOP_ROOT.mkdir(parents=True, exist_ok=True)
+        REMOTE_NOVNC_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        used = {(item["display"], item["port"]) for item in remote_desktop_sessions.values()}
+        selected = None
+        for offset in range(REMOTE_DISPLAY_COUNT):
+            display = REMOTE_DISPLAY_START + offset
+            port = REMOTE_VNC_PORT_START + offset
+            if (display, port) not in used:
+                selected = display, port
+                break
+        if not selected:
+            raise RuntimeError("扫码桌面资源已用尽，请稍后重试")
+        display, port = selected
+        token = secrets.token_urlsafe(24)
+        password = secrets.token_hex(4)  # x11vnc 密码最多 8 个字符
+        passfile = REMOTE_DESKTOP_ROOT / f"{session_id}.pass"
+        tokenfile = REMOTE_NOVNC_TOKEN_DIR / f"{session_id}.token"
+        xvfb = None
+        vnc = None
+        try:
+            passfile.write_text("", encoding="utf-8")
+            os.chmod(passfile, 0o600)
+            subprocess.run(
+                ["/usr/bin/x11vnc", "-storepasswd", password, str(passfile)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            xvfb = subprocess.Popen(
+                ["/usr/bin/Xvfb", f":{display}", "-screen", "0", "1600x1000x24",
+                 "-nolisten", "tcp", "-ac", "-noreset"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            socket_path = Path(f"/tmp/.X11-unix/X{display}")
+            for _ in range(100):
+                if xvfb.poll() is not None:
+                    raise RuntimeError(f"Xvfb 启动失败，退出码 {xvfb.returncode}")
+                if socket_path.exists():
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise RuntimeError(f"Xvfb 显示器 :{display} 未就绪")
+            vnc = subprocess.Popen(
+                ["/usr/bin/x11vnc", "-display", f":{display}", "-rfbport", str(port),
+                 "-rfbauth", str(passfile), "-localhost", "-forever", "-shared",
+                 "-noxdamage", "-repeat", "-wait", "5", "-quiet"],
+                env={**os.environ, "DISPLAY": f":{display}"},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            for _ in range(100):
+                if vnc.poll() is not None:
+                    raise RuntimeError(f"x11vnc 启动失败，退出码 {vnc.returncode}")
+                if _remote_port_is_listening(port):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise RuntimeError(f"VNC 端口 {port} 未就绪")
+            tokenfile.write_text(f"{token}: 127.0.0.1:{port}\n", encoding="utf-8")
+            os.chmod(tokenfile, 0o600)
+            desktop = {
+                "display": display, "port": port, "token": token, "password": password,
+                "passfile": passfile, "tokenfile": tokenfile, "xvfb": xvfb, "vnc": vnc,
+                "remote_browser_url": _remote_browser_url(token, password),
+            }
+            remote_desktop_sessions[session_id] = desktop
+            return desktop
+        except Exception:
+            await _stop_remote_process(vnc)
+            await _stop_remote_process(xvfb)
+            passfile.unlink(missing_ok=True)
+            tokenfile.unlink(missing_ok=True)
+            raise
+
+
+async def _cleanup_remote_desktop(session_id: str):
+    desktop = remote_desktop_sessions.pop(session_id, None)
+    if not desktop:
+        return
+    await _stop_remote_process(desktop.get("vnc"))
+    await _stop_remote_process(desktop.get("xvfb"))
+    Path(desktop["tokenfile"]).unlink(missing_ok=True)
+    Path(desktop["passfile"]).unlink(missing_ok=True)
+
+
+async def _run_scan_login(account: dict, session_id: str, desktop: dict):
+    """后台：在本次任务的独立有头浏览器中扫码，轮询登录态 → 存 cookie。"""
     from adapters import get_adapter
     from adapters.rpa_base import RpaAdapter, browser_launch_options, build_credentials
     adapter = get_adapter(account["platform"])
@@ -360,11 +572,16 @@ async def _run_scan_login(account: dict, session_id: str):
             "status": "error", "error": "该平台不支持扫码登录",
             "account_id": account["id"], "platform": account["platform"],
         }
+        await _cleanup_remote_desktop(session_id)
         return
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            browser = await p.chromium.launch(**browser_launch_options(headless=False, use_proxy=getattr(adapter, "use_proxy", False)))
+            launch_options = browser_launch_options(
+                headless=False, use_proxy=getattr(adapter, "use_proxy", False),
+            )
+            launch_options["env"] = {**os.environ, "DISPLAY": f":{desktop['display']}"}
+            browser = await p.chromium.launch(**launch_options)
             try:
                 context = await browser.new_context()
                 page = await context.new_page()
@@ -389,6 +606,8 @@ async def _run_scan_login(account: dict, session_id: str):
             db.update_account_status(account["id"], "expired")
         scan_login_sessions[session_id].update({"status": status, "error": str(exc)})
         logger.exception("扫码登录异常: %s", account["account_id"])
+    finally:
+        await _cleanup_remote_desktop(session_id)
 
 
 @app.post("/api/accounts/{account_id}/scan-login")
@@ -406,14 +625,23 @@ async def scan_login(account_id: int, user=Depends(require_role(UserRole.ADMIN))
     # 限制内存中的历史会话数量。
     if len(scan_login_sessions) >= 100:
         for old_id in list(scan_login_sessions)[:20]:
+            if old_id in remote_desktop_sessions:
+                continue
             scan_login_sessions.pop(old_id, None)
     scan_login_sessions[session_id] = {
         "status": "waiting", "account_id": acc["id"], "platform": acc["platform"],
     }
-    asyncio.create_task(_run_scan_login(acc, session_id))
+    try:
+        desktop = await _start_remote_desktop(session_id)
+    except Exception as exc:
+        scan_login_sessions.pop(session_id, None)
+        logger.exception("扫码桌面创建失败: %s", acc["account_id"])
+        raise HTTPException(503, f"无法创建扫码桌面：{exc}") from exc
+    scan_login_sessions[session_id]["remote_browser_url"] = desktop["remote_browser_url"]
+    asyncio.create_task(_run_scan_login(acc, session_id, desktop))
     db.add_audit_log(user["id"], user["username"], "scan_login", target=f"{acc['platform']}:{acc['account_id']}")
     return {"started": True, "session_id": session_id, "status": "waiting",
-            "message": "已启动扫码登录，请在弹出的浏览器完成扫码"}
+            "message": "已启动扫码登录，请在远程浏览器中完成扫码"}
 
 
 @app.get("/api/accounts/{account_id}/scan-login/{session_id}")
@@ -421,7 +649,10 @@ async def scan_login_status(account_id: int, session_id: str, user=Depends(requi
     session = scan_login_sessions.get(session_id)
     if not session or session.get("account_id") != account_id:
         raise HTTPException(404, "扫码登录会话不存在")
-    return {"status": session["status"], "error": session.get("error")}
+    result = {"status": session["status"], "error": session.get("error")}
+    if session.get("remote_browser_url"):
+        result["remote_browser_url"] = session["remote_browser_url"]
+    return result
 
 
 @app.post("/api/accounts/{account_id}/test-connection")

@@ -159,6 +159,12 @@ class AccountCredentialsRequest(BaseModel):
     credentials: dict
 
 
+class LocalScanCompleteRequest(BaseModel):
+    handoff_token: str
+    cookies: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
 # ==================== Topics ====================
 
 class TopicCategory(BaseModel):

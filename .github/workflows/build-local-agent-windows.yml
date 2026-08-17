@@ -1,0 +1,35 @@
+name: Build Windows local scan agent
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "local_agent/**"
+      - "scripts/build_local_agent_windows.ps1"
+      - ".github/workflows/build-local-agent-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build installer
+        shell: pwsh
+        run: .\scripts\build_local_agent_windows.ps1
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SA-LogiFlow-Agent-Windows
+          path: dist/SA-LogiFlow-Agent-Windows.exe

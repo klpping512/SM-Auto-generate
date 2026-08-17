@@ -17,3 +17,7 @@ static/assets/thumbnails/
 *.MP4
 static/chat.html.bak
 video_renderer.py.bak
+/build/
+/dist/
+/SA-LogiFlow-Agent.spec
+static/downloads/*.pkg
