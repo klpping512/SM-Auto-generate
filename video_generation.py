@@ -675,7 +675,11 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 asset_lookup=asset_lookup,
                 event_lookup=event_lookup,
                 platform=str((project or {}).get("platform") or "douyin"),
-                target_duration_ms=int((project or {}).get("target_duration_ms") or 60_000),
+                target_duration_ms=video_renderer.resolve_formal_video_target_ms(
+                    project=project,
+                    snapshot=snapshot if isinstance(snapshot, dict) else {},
+                    payload=planning_payload,
+                ),
             )
         except (ValueError, TypeError) as exc:
             script = payload

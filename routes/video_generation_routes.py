@@ -361,6 +361,17 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             raise HTTPException(409, "已达重生成上限（2 次），请人工评审脚本或另建项目")
         project = db.get_video_project(job["project_id"], created_by=user["id"])
         payload = body.payload if body and body.payload is not None else project["current_revision"]["payload"]
+        snapshot = project.get("source_snapshot") or {}
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except json.JSONDecodeError:
+                snapshot = {}
+        payload = video_renderer.normalize_revision_formal_target(
+            payload,
+            project=project,
+            snapshot=snapshot if isinstance(snapshot, dict) else {},
+        )
         revision = db.create_video_project_revision(project["id"], payload, user["id"])
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.update_video_generation_job(

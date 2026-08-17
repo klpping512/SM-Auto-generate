@@ -43,7 +43,68 @@ FORMAL_MIN_SCENES = 7
 FORMAL_MAX_SCENES = 10
 FORMAL_MIN_DURATION_MS = 50_000
 FORMAL_MAX_DURATION_MS = 90_000
+FORMAL_DEFAULT_TARGET_MS = 60_000
 TTS_BREATHING_ROOM_SECONDS = 0.35
+
+
+def formal_duration_in_range(duration_ms: int | None) -> bool:
+    try:
+        value = int(duration_ms or 0)
+    except (TypeError, ValueError):
+        return False
+    return FORMAL_MIN_DURATION_MS <= value <= FORMAL_MAX_DURATION_MS
+
+
+def resolve_formal_video_target_ms(
+    *,
+    project: dict | None = None,
+    snapshot: dict | None = None,
+    payload: dict | None = None,
+    fallback: int = FORMAL_DEFAULT_TARGET_MS,
+) -> int:
+    """Resolve the formal 50–90s target from the original request or snapshot.
+
+    Failed revisions may store the adaptive plan's actual duration (for example
+    14933ms) in ``target_duration_ms``; resume/scripting must not reuse that
+    value as the next formal planning target.
+    """
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    chat = snap.get("chat") if isinstance(snap.get("chat"), dict) else {}
+    candidates: list[int] = []
+    for value in (
+        snap.get("target_duration_ms"),
+        chat.get("target_duration_ms"),
+        (payload or {}).get("formal_target_duration_ms"),
+    ):
+        if formal_duration_in_range(value):
+            candidates.append(int(value))
+    proj = project if isinstance(project, dict) else {}
+    if formal_duration_in_range(proj.get("target_duration_ms")):
+        candidates.append(int(proj["target_duration_ms"]))
+    if candidates:
+        return candidates[0]
+    return int(fallback)
+
+
+def normalize_revision_formal_target(
+    payload: dict | None,
+    *,
+    project: dict | None = None,
+    snapshot: dict | None = None,
+    fallback: int = FORMAL_DEFAULT_TARGET_MS,
+) -> dict:
+    """Restore a formal target on resume when a revision stored a short actual plan."""
+    normalized = dict(payload or {})
+    formal_target = resolve_formal_video_target_ms(
+        project=project,
+        snapshot=snapshot,
+        payload=normalized,
+        fallback=fallback,
+    )
+    normalized["formal_target_duration_ms"] = formal_target
+    if not formal_duration_in_range(normalized.get("target_duration_ms")):
+        normalized["target_duration_ms"] = formal_target
+    return normalized
 # TTS 的实际语速会随停顿和专有名词改变。真实短 Hook 不能循环，
 # 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
 # 必须失败，而不是把听感明显失真的旁白强塞进现场画面。

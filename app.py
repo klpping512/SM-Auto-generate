@@ -3146,6 +3146,19 @@ async def _generate_topic_brief_video(
             "required": {"owned_video": 1},
             "next_action": "补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
         })
+    if final_planned_duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
+        raise HTTPException(409, _formal_duration_insufficient_detail(
+            final_duration_ms=final_planned_duration_ms,
+            coverage={
+                "hotspot_video": hotspot_count,
+                "owned_video": owned_count,
+                "za_stock": za_stock_count,
+                "image": image_count,
+                "duration_ms": final_planned_duration_ms,
+            },
+            adaptation=adaptation,
+            chain_mode=chain_mode,
+        ))
     if not model_router.key_is_available("planner_text"):
         raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请先配置当前模型路由对应的 API Key。")
     context = _compact_topic_evidence(brief, event, scenes)
@@ -3362,6 +3375,26 @@ async def _generate_topic_brief_video(
         scene.update(generated_scene)
     scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
     duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
+    if duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
+        raise HTTPException(409, _formal_duration_insufficient_detail(
+            final_duration_ms=duration_ms,
+            coverage={
+                "hotspot_video": hotspot_count,
+                "owned_video": owned_count,
+                "za_stock": za_stock_count,
+                "image": image_count,
+                "duration_ms": duration_ms,
+            },
+            adaptation=adaptation,
+            chain_mode=chain_mode,
+        ))
+    formal_target_ms = video_renderer.resolve_formal_video_target_ms(
+        snapshot={
+            "target_duration_ms": body.target_duration_ms,
+            **(source_snapshot or {}),
+        },
+        fallback=body.target_duration_ms,
+    )
     title = f"{generated['title']}｜{duration_ms // 1000}秒动态视频"
     project_snapshot = {
         "topic_brief_id": brief_id, "hotspot_event_id": event["id"] if event else None, "brief": planning_brief,
@@ -3385,7 +3418,8 @@ async def _generate_topic_brief_video(
         project_snapshot["chat"] = source_snapshot
     revision_payload = {
         "title": generated["title"], "platform": body.platform, "duration_target_ms": duration_ms,
-        "target_duration_ms": duration_ms,
+        "target_duration_ms": formal_target_ms,
+        "formal_target_duration_ms": formal_target_ms,
         "source_type": "topic_brief_dual_library",
         "brief": {**planning_brief, "angle": generated["angle"]}, "scenes": scenes,
         "adaptation": adaptation,
@@ -3408,7 +3442,7 @@ async def _generate_topic_brief_video(
             revision_payload,
             user["id"],
             title=title,
-            target_duration_ms=duration_ms,
+            target_duration_ms=formal_target_ms,
         )
         if not updated_revision:
             raise HTTPException(404, "视频项目修订不存在")
@@ -3417,7 +3451,7 @@ async def _generate_topic_brief_video(
         project = db.create_video_project(
             created_by=user["id"], source_type="topic_brief_dual_library",
             source_snapshot=project_snapshot,
-            title=title, platform=body.platform, target_duration_ms=duration_ms, target_orientation="portrait",
+            title=title, platform=body.platform, target_duration_ms=formal_target_ms, target_orientation="portrait",
         )
         db.create_video_project_revision(project["id"], revision_payload, user["id"])
         project = db.get_video_project(project["id"], created_by=user["id"])
@@ -3467,6 +3501,30 @@ def _video_project_snapshot(project: dict | None) -> dict:
         except _json.JSONDecodeError:
             return {}
     return snapshot if isinstance(snapshot, dict) else {}
+
+
+def _formal_duration_insufficient_detail(
+    *,
+    final_duration_ms: int,
+    coverage: dict,
+    adaptation: dict,
+    chain_mode: str,
+) -> dict:
+    if chain_mode == "owned_only":
+        message = "当前 Buffalo 自有素材无法形成 50–90 秒正式成片。"
+    else:
+        message = "热点 Hook 已匹配，但当前素材组合无法形成 50–90 秒正式成片。"
+    return {
+        "message": message,
+        "status": "needs_owned_media",
+        "coverage": coverage,
+        "required": {"duration_ms": "50000–90000"},
+        "adaptation": adaptation,
+        "next_action": (
+            "补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频，"
+            "或重新锁定更强相关的 Hook。"
+        ),
+    }
 
 
 def _build_video_generation_handlers(static_dir: Path):
@@ -3588,7 +3646,12 @@ def _build_video_generation_handlers(static_dir: Path):
                     hotspot_event_id=hook_ids[0] if hook_ids else None,
                     approved_hook_event_ids=hook_ids,
                     platform=str(project.get("platform") or snapshot.get("platform") or "douyin"),
-                    target_duration_ms=int(project.get("target_duration_ms") or snapshot.get("target_duration_ms") or 60_000),
+                    target_duration_ms=video_renderer.resolve_formal_video_target_ms(
+                        project=project,
+                        snapshot=snapshot,
+                        payload=(project.get("current_revision") or {}).get("payload") or {},
+                        fallback=60_000,
+                    ),
                     chain_mode=(brief_for_chain or {}).get("chain_mode") or chain_mode,
                 ),
                 {
@@ -5972,6 +6035,7 @@ def _chat_video_delivery_readiness(
     image_count = sum(scene.get("evidence_type") == "image" for scene in scenes)
     duration_ms = sum(int(scene.get("duration_ms") or 0) for scene in scenes) + cta_duration_ms
     adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
+    duration_ok = video_renderer.formal_duration_in_range(duration_ms)
     coverage = {
         "hotspot_video": hotspot_count,
         "owned_video": owned_count,
@@ -5981,7 +6045,7 @@ def _chat_video_delivery_readiness(
     if chain_mode == "owned_only":
         # This is an explicit no-Hook production mode: all factual claims must
         # come from the topic copy and visible Buffalo-owned actions.
-        delivery_ready = bool(not planner_issue and scenes and hotspot_count == 0)
+        delivery_ready = bool(not planner_issue and scenes and hotspot_count == 0 and duration_ok)
         if delivery_ready and not adaptation.get("adapted"):
             message = "未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出。"
             status = "owned_only_ready"
@@ -5994,13 +6058,16 @@ def _chat_video_delivery_readiness(
         elif planner_issue:
             message = "未匹配到热点 Hook，且当前 Buffalo 自有素材无法形成可渲染分镜。"
             status = "needs_owned_media"
+        elif not duration_ok:
+            message = "未匹配到热点 Hook，且当前 Buffalo 自有素材不足以形成 50–90 秒正式成片。"
+            status = "needs_owned_media"
         else:
             message = "未匹配到热点 Hook，当前自有素材规划未产出可用分镜。"
             status = "needs_owned_media"
     else:
         # Hard gate: locked Hook must yield at least one hotspot scene. Owned < 4
-        # is adaptation, not a block.
-        delivery_ready = bool(not planner_issue and hotspot_count >= 1)
+        # is adaptation, not a block. Formal delivery also requires 50–90s coverage.
+        delivery_ready = bool(not planner_issue and hotspot_count >= 1 and duration_ok)
         if delivery_ready and not adaptation.get("adapted"):
             message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
             status = "delivery_ready"
@@ -6012,6 +6079,9 @@ def _chat_video_delivery_readiness(
             status = "delivery_ready_adapted"
         elif planner_issue:
             message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
+            status = "needs_owned_media"
+        elif not duration_ok and hotspot_count >= 1:
+            message = "热点 Hook 已匹配，但当前素材不足以形成 50–90 秒正式成片。"
             status = "needs_owned_media"
         else:
             message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
