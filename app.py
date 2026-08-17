@@ -60,7 +60,9 @@ import hotspot_preview_narration
 import hotspot_package_service
 import hotspot_hook_selector
 import hotspot_lexicon
+import hotspot_intake_policy
 import hotspot_video_sources
+import topic_hook_pipeline
 import video_quality.service as video_quality_service
 import douyin_copywriting_sop
 from auth import (
@@ -1626,6 +1628,13 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
         any(term in event_text for term in ("红海", "国际油价", "red sea", "oil price"))
         and any(term in event_text for term in ("同步攀升", "成本已", "运费已", "costs have risen"))
     )
+    real_logistics = (
+        hotspot_intake_policy.has_real_logistics_scene(candidate)
+        or candidate.get("logistics_bridge_mode") == "soft"
+    )
+    placeholder_question = hotspot_intake_policy.is_placeholder_logistics_question(
+        evidence.get("logistics_question")
+    )
     return bool(
         str(event.get("review_status") or "") == "confirmed"
         and str(event.get("clip_status") or "") == "ready"
@@ -1634,6 +1643,8 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
         and all(value and not value.casefold().startswith(placeholders) for value in values)
         and out_of_scope_allowed
         and not unsupported_cost_leap
+        and real_logistics
+        and not placeholder_question
     )
 
 
@@ -1664,20 +1675,46 @@ def _is_audited_hotspot_hook(event: dict) -> bool:
     )
 
 
+def _event_source_class(event: dict) -> str:
+    media = None
+    if event.get("asset_id"):
+        media = db.get_hotspot_media_by_asset_id(int(event["asset_id"]))
+    parent = db.get_hotspot(int(event["hotspot_id"])) if event.get("hotspot_id") else None
+    return hotspot_intake_policy.resolve_source_class(media, parent)
+
+
 @app.get("/api/hotspot-events")
 async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | None = None,
                               eligible_only: bool = True, audited_only: bool = False,
+                              library_status: str | None = None,
                               user=Depends(get_current_user)):
     events = db.list_hotspot_event_clips(asset_id=asset_id, hotspot_id=hotspot_id)
-    if audited_only:
-        events = [event for event in events if _is_audited_hotspot_hook(event)]
-    elif eligible_only:
-        events = [event for event in events if _is_confirmed_renderable_hotspot_hook(event)]
+    for event in events:
+        event["source_class"] = _event_source_class(event)
+    flags = hotspot_intake_policy.assign_ready_flags(
+        events,
+        is_hard_ready=_is_confirmed_renderable_hotspot_hook,
+        source_class_of=lambda event: str(event.get("source_class") or "general_news"),
+    )
     segments = db.list_asset_segments(limit=20_000)
     for event in events:
-        event["is_renderable"] = _is_confirmed_renderable_hotspot_hook(event)
-        event["library_status"] = "ready" if event["is_renderable"] else "audit_only"
+        status = flags.get(int(event.get("id") or 0), {})
+        event["is_renderable"] = bool(status.get("is_renderable"))
+        event["quota_held"] = bool(status.get("quota_held"))
+        event["library_status"] = (
+            "ready" if event["is_renderable"]
+            else ("audit_only" if _is_audited_hotspot_hook(event) else "ineligible")
+        )
+        event["ineligible_reason"] = "" if event["is_renderable"] else (
+            status.get("ineligible_reason") or "未通过可成片门禁"
+        )
         _decorate_hotspot_event(event, segments)
+    if library_status in {"ready", "audit_only"}:
+        events = [event for event in events if event.get("library_status") == library_status]
+    elif audited_only:
+        events = [event for event in events if _is_audited_hotspot_hook(event)]
+    elif eligible_only:
+        events = [event for event in events if event.get("is_renderable")]
     return events
 
 
@@ -1733,7 +1770,18 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
         "clip_error": event.get("clip_error"),
         "source_asset_id": event["asset_id"],
         "source_label": public.get("source_label") or "",
+        "source_class": event.get("source_class") or _event_source_class(event),
     }
+    evidence = event.get("evidence") or {}
+    event["logistics_scenes_real"] = hotspot_intake_policy.real_logistics_scenes(
+        event.get("logistics_scenes"),
+        " ".join(
+            str(event.get(key) or "")
+            for key in ("title_zh", "title_en")
+        ) + " " + str(evidence.get("what_happened") or ""),
+    )
+    if "source_class" not in event:
+        event["source_class"] = _event_source_class(event)
     return event
 
 
@@ -5226,6 +5274,31 @@ def _chat_hook_candidates_debug(candidates: list[dict], recently_used: set[int],
     return debug
 
 
+def _topic_media_by_asset(events: list[dict]) -> dict[int, dict]:
+    index: dict[int, dict] = {}
+    for event in events:
+        asset_id = int(event.get("asset_id") or 0)
+        if not asset_id or asset_id in index:
+            continue
+        media = db.get_hotspot_media_by_asset_id(asset_id)
+        if media:
+            index[asset_id] = media
+    return index
+
+
+def _match_buckets_for_topic(topic: str) -> tuple[dict, dict]:
+    query = topic_hook_pipeline.structure_topic(topic)
+    events = db.list_hotspot_event_clips()
+    buckets = topic_hook_pipeline.match_topic_hooks(
+        query,
+        events,
+        media_by_asset=_topic_media_by_asset(events),
+        is_ready=_is_confirmed_renderable_hotspot_hook,
+        is_audit=_is_audited_hotspot_hook,
+    )
+    return query, buckets
+
+
 async def _retrieve_confirmed_chat_hooks(
     topic: str,
     user_id: int,
@@ -5254,24 +5327,91 @@ async def _retrieve_confirmed_chat_hooks(
     }
     use_generic = not anchor.get("has_event_anchor")
     hook_kind = "generic_logistics" if use_generic else "timely_event"
-    candidates, kb_context, brand_evidence, funnel = _marketing_hook_candidates(
+    query, buckets = _match_buckets_for_topic(normalized_topic)
+    funnel = {
+        "scanned": buckets.get("checked") or 0,
+        "scene_mismatch": 0,
+        "relevance_low": 0,
+        "not_playable": 0,
+        "kind_filtered": 0,
+        "duplicate_or_recent": 0,
+        "passed": len(buckets.get("matched_ready") or []),
+        "selected": 0,
+        "matched_ready": len(buckets.get("matched_ready") or []),
+        "matched_audit_only": len(buckets.get("matched_audit_only") or []),
+    }
+    if not use_generic and buckets.get("matched_ready"):
+        ready_row = buckets["matched_ready"][0]
+        locked = db.get_hotspot_event_clip(int(ready_row["event_clip_id"]))
+        if locked and _is_confirmed_renderable_hotspot_hook(locked):
+            locked = _with_soft_logistics_bridge(locked)
+            selected_hooks = [{
+                "event_clip_id": locked["id"],
+                "asset_id": locked["asset_id"],
+                "event_identity": (locked.get("evidence") or {}).get("event_identity"),
+                "content_description": (locked.get("evidence") or {}).get("what_happened"),
+                "start_ms": locked.get("start_ms"),
+                "end_ms": locked.get("end_ms"),
+            }]
+            delivery_readiness = _chat_video_delivery_readiness(normalized_topic, [
+                db.get_hotspot_event_clip(int(hook["event_clip_id"])) for hook in selected_hooks
+                if db.get_hotspot_event_clip(int(hook["event_clip_id"]))
+            ])
+            funnel["selected"] = len(selected_hooks)
+            return {
+                "status": "matched",
+                "topic": normalized_topic,
+                "hooks": [{
+                    "event_clip_id": hook.get("event_clip_id"),
+                    "asset_id": hook.get("asset_id"),
+                    "title": locked.get("title_zh") or locked.get("title_en"),
+                    "event_identity": hook.get("event_identity"),
+                    "description": hook.get("content_description"),
+                    "marketing_question": (locked.get("evidence") or {}).get("logistics_question"),
+                } for hook in selected_hooks],
+                "model": {"used": False, "fallback": "topic_entity_match"},
+                "failure_class": None,
+                "event_anchor": {**anchor, "topic_query": query},
+                "hook_kind": hook_kind,
+                "funnel": funnel,
+                "match_buckets": {
+                    "matched_ready": buckets["matched_ready"][:5],
+                    "matched_audit_only": buckets["matched_audit_only"][:5],
+                    "unmatched": [],
+                },
+                "relevance": {
+                    "level": "strong",
+                    "reason": "；".join(ready_row.get("hits") or ["主题实体与物流场景命中"]),
+                },
+                "video": {
+                    "status": "ready",
+                    "hotspot_event_ids": [int(hook["event_clip_id"]) for hook in selected_hooks],
+                    "source_asset_id": int(selected_hooks[0]["asset_id"]),
+                    "delivery_readiness": delivery_readiness,
+                },
+                "producible_topics": [],
+                "candidates_debug": [],
+                "message": "已自动绑定与当前主题匹配的物流 Hook，可直接创建 60 秒视频项目。",
+            }
+    candidates, kb_context, brand_evidence, marketing_funnel = _marketing_hook_candidates(
         brief,
         limit=8,
         hook_kind=hook_kind,
         require_scene_overlap=use_generic,
         allow_broad_match=use_generic,
     )
+    funnel = {**funnel, **(marketing_funnel or {})}
     # Evergreen topics often lack scene keywords; still try generic logistics
     # openers so one-click production can auto-lock a real Hook.
     if use_generic and not candidates:
-        candidates, kb_context, brand_evidence, funnel = _marketing_hook_candidates(
+        candidates, kb_context, brand_evidence, marketing_funnel = _marketing_hook_candidates(
             brief,
             limit=8,
             hook_kind="generic_logistics",
             require_scene_overlap=False,
             allow_broad_match=True,
         )
-        funnel = {**(funnel or {}), "generic_relaxed": True}
+        funnel = {**funnel, **(marketing_funnel or {}), "generic_relaxed": True}
     # 同一聊天 session 内不应连续把同一段 Hook 当开场：对近期已用过的候选
     # 降权（不排除），素材库很小时仍能在没有更优选项时复用。
     recently_used = db.recent_session_hook_event_ids(session_id, user_id) if session_id else set()
@@ -5295,12 +5435,18 @@ async def _retrieve_confirmed_chat_hooks(
         selected, model_meta = await _model_decide_marketing_hooks(
             brief, candidates, kb_context, brand_evidence, limit=2,
         )
-        # One-click path: if the planner returns nothing, still auto-lock the
-        # strongest rule candidate instead of bouncing the user to retype.
+        # Official-operator topics (Transnet/SANRAL) must stay in matched_ready.
+        # Other timely logistics topics may still use the marketing candidate set.
+        strict_topic = bool(query.get("preferred_publishers"))
         if not selected:
             fallback = dict(candidates[0])
             hooks = _select_chat_video_hook_pair(fallback.get("hook_clips") or [])
-            if hooks:
+            ready_ids = {
+                int(item["event_clip_id"]) for item in (buckets.get("matched_ready") or [])
+                if item.get("event_clip_id") is not None
+            }
+            fallback_ids = {int(hook["event_clip_id"]) for hook in hooks if hook.get("event_clip_id") is not None}
+            if hooks and (use_generic or not strict_topic or fallback_ids <= ready_ids):
                 fallback["hook_clips"] = hooks
                 fallback["can_render_video"] = True
                 selected = [fallback]
@@ -5309,6 +5455,21 @@ async def _retrieve_confirmed_chat_hooks(
                     "used": False,
                     "fallback": "auto_lock_top_candidate",
                 }
+        if not use_generic and selected and strict_topic:
+            ready_ids = {
+                int(item["event_clip_id"]) for item in (buckets.get("matched_ready") or [])
+                if item.get("event_clip_id") is not None
+            }
+            filtered = []
+            for item in selected:
+                hook_ids = {
+                    int(hook["event_clip_id"])
+                    for hook in (item.get("hook_clips") or [])
+                    if hook.get("event_clip_id") is not None
+                }
+                if hook_ids and hook_ids <= ready_ids:
+                    filtered.append(item)
+            selected = filtered
         for item in selected:
             selected_hooks = _select_chat_video_hook_pair(item.get("hook_clips") or [])
             if not selected_hooks:
@@ -5345,9 +5506,13 @@ async def _retrieve_confirmed_chat_hooks(
             return {
                 "status": "matched", "topic": normalized_topic, "hooks": hooks, "model": model_meta,
                 "failure_class": None,
-                "event_anchor": anchor,
+                "event_anchor": {**anchor, "topic_query": query},
                 "hook_kind": hook_kind,
                 "funnel": funnel,
+                "match_buckets": {
+                    "matched_ready": buckets.get("matched_ready") or [],
+                    "matched_audit_only": buckets.get("matched_audit_only") or [],
+                },
                 "relevance": item.get("relevance") or {
                     "level": "strong", "reason": "内置模型确认该 Hook 可直接解释当前物流问题。",
                 },
@@ -5357,7 +5522,7 @@ async def _retrieve_confirmed_chat_hooks(
                     "source_asset_id": int(selected_hooks[0]["asset_id"]),
                     "delivery_readiness": delivery_readiness,
                 },
-                "producible_topics": producible,
+                "producible_topics": [] if not use_generic else producible,
                 "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
                 "message": (
                     "已自动锁定热点 Hook；可在卡片中更换，或直接创建 60 秒视频项目。"
@@ -5365,7 +5530,7 @@ async def _retrieve_confirmed_chat_hooks(
                     (
                         "已由内置模型锁定同一事件的两段已确认 Hook；成片会用双段现场增强开场。"
                         if hook_count == 2 else
-                        "已由内置模型锁定一段相关、已确认 Hook；成片会以该真实现场开场。"
+                        "已自动绑定与当前主题匹配的物流 Hook，可直接创建 60 秒视频项目。"
                     )
                 ),
             }
@@ -5408,30 +5573,61 @@ async def _retrieve_confirmed_chat_hooks(
             "request_id": None,
             "video": {"status": "disabled"},
             "failure_class": failure,
-            "event_anchor": anchor,
+            "event_anchor": {**anchor, "topic_query": query},
             "hook_kind": hook_kind,
             "funnel": funnel,
-            "producible_topics": producible,
+            "match_buckets": {
+                "matched_ready": buckets.get("matched_ready") or [],
+                "matched_audit_only": buckets.get("matched_audit_only") or [],
+            },
+            "producible_topics": producible if use_generic else [],
             "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
             "reason": failure,
             "message": message,
         }
 
-    request = db.enqueue_hotspot_discovery_request(normalized_topic, user_id)
-    refresh_started = sched.request_targeted_hotspot_refresh()
+    request = db.enqueue_hotspot_discovery_request(
+        normalized_topic,
+        user_id,
+        query=query,
+        max_candidates=query.get("max_candidates"),
+        source_classes=query.get("source_classes"),
+    )
+    refresh_started = False
+    if topic_hook_pipeline.autofetch_enabled():
+        refresh_started = sched.request_targeted_hotspot_refresh()
+    audit_gaps = [
+        f"{item.get('title') or 'Hook'}：{'；'.join(item.get('gaps') or [])}"
+        for item in (buckets.get("matched_audit_only") or [])[:3]
+        if item.get("gaps")
+    ]
+    started_note = (
+        "已启动定向采集（任务进行中）。"
+        if refresh_started else
+        "任务已入库，等待定向采集执行。"
+    )
     return {
-        "status": "queued", "topic": normalized_topic, "hooks": [], "request_id": request["id"],
+        "status": "queued",
+        "topic": normalized_topic,
+        "hooks": [],
+        "request_id": request["id"],
+        "discovery": topic_hook_pipeline.discovery_payload(request),
         "video": {"status": "disabled"},
         "failure_class": "coverage_gap",
-        "event_anchor": anchor,
+        "event_anchor": {**anchor, "topic_query": query},
         "hook_kind": hook_kind,
         "funnel": funnel,
-        "producible_topics": producible,
+        "match_buckets": {
+            "matched_ready": [],
+            "matched_audit_only": buckets.get("matched_audit_only") or [],
+        },
+        "producible_topics": [],
         "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
         "message": (
-            "当前没有与该主题相关且可播放的已确认热点 Hook；"
-            + ("已立即复扫已授权信源并启动定向入库。" if refresh_started else "定向入库任务正在处理中。")
-            + "完成下载、分析、模型裁剪和事实核验前不会生成无关素材的视频。"
+            f"当前没有可成片的匹配 Hook。已创建定向采集任务 #{request['id']}，阶段 {request.get('stage') or 'queued'}。"
+            f"{started_note}"
+            + ((" 相关但不可成片：" + " / ".join(audit_gaps) + "。") if audit_gaps else "")
+            + "完成下载、分析、事实核验前不会用无关新闻强行成片。"
         ),
     }
 
@@ -5905,30 +6101,14 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
                     "description": evidence.get("what_happened") or "",
                     "asset_id": event.get("asset_id"),
                 })
-    status = item.get("status") or "pending"
-    stage = item.get("stage") or {
-        "pending": "queued",
-        "processing": "fetch_sources",
-        "matched": "hooks_ready",
-        "unmatched": "done",
-        "failed": "done",
-        "cancelled_misrouted": "archived",
-    }.get(status, status)
-    return {
-        "id": item["id"],
-        "topic": item.get("topic"),
-        "status": status,
-        "stage": stage,
-        "error_message": item.get("error_message"),
-        "matched_media_id": media_id,
-        "hooks": hooks,
-        "recovery": (
-            "请更换更具体的时效事件主题后重试"
-            if status in {"unmatched", "failed"}
-            else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
-        ),
-        "updated_at": item.get("updated_at"),
-    }
+    status = item.get("status") or "queued"
+    payload = topic_hook_pipeline.discovery_payload(item, hooks=hooks)
+    payload["recovery"] = (
+        "定向采集已完成，但没有合格物流 Hook；可查看失败原因后重试，不得用无关新闻成片"
+        if status in {"unmatched", "no_match", "failed"}
+        else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
+    )
+    return payload
 
 
 @app.post("/api/hotspot-discovery-requests/archive-misrouted-comparisons")

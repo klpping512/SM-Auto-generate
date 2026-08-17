@@ -29,6 +29,7 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "owned_only" not in page
     assert "deliveryReadiness?.delivery_ready??true" in page
     assert "等待热点 Hook" in page
+    assert "任务 ID" in page
     assert "bindHookToOriginalTopic" in page
     assert "选择开场 Hook" in page
     assert "useProducibleTopic" not in page

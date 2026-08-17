@@ -127,7 +127,7 @@ def _derive_hook_keywords(fact_text: str) -> list[str]:
     # Grounded only in what_happened/title_zh — never the model's invented
     # logistics_question bridge sentence. Taxonomy lives in hotspot_lexicon.
     keywords = sorted(hotspot_lexicon.category_profile(fact_text, mode="event"))
-    return keywords or ["hotspot"]
+    return keywords
 
 
 def _compact_segment(segment: dict) -> dict:

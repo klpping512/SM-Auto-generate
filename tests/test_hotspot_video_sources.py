@@ -65,7 +65,7 @@ def test_configured_channels_env_overrides_defaults(monkeypatch):
     )
     channels = hotspot_video_sources.configured_channels()
     assert channels == [
-        {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
+        {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA", "source_class": "general_news"},
     ]
 
 
@@ -179,7 +179,46 @@ def test_authorized_youtube_metadata_is_persisted_for_qwen_intake(tmp_db):
     persisted = tmp_db.get_hotspot_media(media_id)
     assert persisted["duration_seconds"] == 245.0
     assert persisted["intake_metadata_checked_at"]
+    assert persisted["source_class"] == "general_news"
     assert tmp_db.get_hotspot(hotspot_id)["published_at"] == "2026-07-28T00:00:00+00:00"
+
+
+def test_hydrate_records_failure_reason_and_does_not_leave_row_immediately_retryable(tmp_db):
+    import hotspot_video_sources
+
+    hotspot_id, _ = tmp_db.upsert_hotspot({
+        "title": "Missing video",
+        "summary": "来自 eNCA 的公开视频热点。",
+        "source_url": "https://www.youtube.com/watch?v=missing001",
+        "publisher": "eNCA",
+        "retrieved_at": "2026-08-17T00:00:00+00:00",
+        "snapshot_sha256": "missing-video",
+    })
+    media_id, _ = tmp_db.upsert_hotspot_media({
+        "hotspot_id": hotspot_id,
+        "media_kind": "video_link",
+        "platform": "youtube",
+        "source_page_url": "https://www.youtube.com/watch?v=missing001",
+        "original_media_url": "https://www.youtube.com/watch?v=missing001",
+        "rights_tier": "green",
+        "download_status": "metadata_ready",
+    })
+
+    def runner(_command, **_kwargs):
+        raise RuntimeError("This video is not available")
+
+    rows, report = hotspot_video_sources.hydrate_youtube_intake_metadata(
+        [tmp_db.get_hotspot_media(media_id)], runner=runner
+    )
+
+    assert report["failed"][0]["media_id"] == media_id
+    persisted = tmp_db.get_hotspot_media(media_id)
+    assert persisted["intake_metadata_status"] == "failed"
+    assert persisted["failure_count"] == 1
+    assert persisted["failure_reason"]
+    assert persisted["retry_after"]
+    assert persisted["download_status"] == "metadata_ready"
+    assert hotspot_video_sources.hotspot_intake_policy.is_incremental_eligible(persisted) is False
 
 
 def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):

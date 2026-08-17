@@ -10,15 +10,16 @@ from datetime import datetime, timezone
 from typing import Callable
 
 import database as db
+import hotspot_intake_policy
 import hotspot_topic_packages
 
 
 DEFAULT_YOUTUBE_CHANNELS = [
     # 批22：官方机构、港口/道路和可信新闻视频共同供给；仅读取公开视频元数据。
-    {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA"},
-    {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV"},
-    {"name": "CNBC Africa", "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ"},
-    {"name": "BusinessDayTV", "url": "https://www.youtube.com/@BusinessDayTelevision"},
+    {"name": "eNCA", "url": "https://www.youtube.com/channel/UCI3RT5PGmdi1KVp9FG_CneA", "source_class": "general_news"},
+    {"name": "Newzroom Afrika", "url": "https://www.youtube.com/@NewzroomAfrikaTV", "source_class": "general_news"},
+    {"name": "CNBC Africa", "url": "https://www.youtube.com/channel/UCsba91UGiQLFOb5DN3Z_AdQ", "source_class": "general_news"},
+    {"name": "BusinessDayTV", "url": "https://www.youtube.com/@BusinessDayTelevision", "source_class": "general_news"},
     # 常青实拍：最新窗常 not available，加深扫描 + -F 预检取满可物料化母片。
     {
         "name": "Transnet NPA",
@@ -26,12 +27,13 @@ DEFAULT_YOUTUBE_CHANNELS = [
         "evergreen": True,
         "min_downloadable": 10,
         "playlist_scan_cap": 20,
+        "source_class": "official_logistics",
     },
-    {"name": "SANRAL Corporate", "url": "https://www.youtube.com/@SANRALCorporate"},
-    {"name": "Parliament of RSA", "url": "https://www.youtube.com/user/ParliamentofRSA"},
-    {"name": "JusticeGOVZA", "url": "https://www.youtube.com/user/JusticeGOVZA"},
-    {"name": "GovernmentZA", "url": "https://www.youtube.com/user/GovernmentZA"},
-    {"name": "SABC News", "url": "https://www.youtube.com/c/sabcdigitalnews"},
+    {"name": "SANRAL Corporate", "url": "https://www.youtube.com/@SANRALCorporate", "source_class": "official_logistics"},
+    {"name": "Parliament of RSA", "url": "https://www.youtube.com/user/ParliamentofRSA", "source_class": "general_news"},
+    {"name": "JusticeGOVZA", "url": "https://www.youtube.com/user/JusticeGOVZA", "source_class": "general_news"},
+    {"name": "GovernmentZA", "url": "https://www.youtube.com/user/GovernmentZA", "source_class": "general_news"},
+    {"name": "SABC News", "url": "https://www.youtube.com/c/sabcdigitalnews", "source_class": "general_news"},
 ]
 DEFAULT_CHANNEL_VIDEO_LIMIT = 8
 MAX_CHANNEL_VIDEO_LIMIT = 24
@@ -66,6 +68,9 @@ def _normalize_channel(item: dict, *, inherit: dict | None = None) -> dict | Non
         return None
     base = inherit or {}
     channel = {"name": name[:100], "url": url}
+    source_class = str(item.get("source_class") or base.get("source_class") or "").strip()
+    if source_class:
+        channel["source_class"] = source_class
     evergreen = item.get("evergreen", base.get("evergreen", False))
     if evergreen:
         channel["evergreen"] = True
@@ -325,10 +330,30 @@ def hydrate_youtube_intake_metadata(
                 )
             hydrated.append(updated)
             report["ready"] += 1
+            db.update_hotspot_media_state(int(item["id"]), **hotspot_intake_policy.clear_failure_state())
         except Exception as exc:
             message = str(exc)[:220]
+            current = db.get_hotspot_media(int(item["id"])) or item
+            failure = hotspot_intake_policy.next_metadata_failure_state(
+                current,
+                message,
+                confirmed=is_not_available_error(message),
+            )
             db.update_hotspot_media_intake_metadata(int(item["id"]), "", "", "failed")
+            db.update_hotspot_media_state(
+                int(item["id"]),
+                download_status=failure["download_status"],
+                failure_reason=failure["failure_reason"],
+                failure_count=failure["failure_count"],
+                retry_after=failure["retry_after"],
+                progress_detail=failure["progress_detail"],
+                error_message=message,
+            )
             item["intake_metadata_status"] = "failed"
+            item["download_status"] = failure["download_status"]
+            item["failure_reason"] = failure["failure_reason"]
+            item["failure_count"] = failure["failure_count"]
+            item["retry_after"] = failure["retry_after"]
             hydrated.append(item)
             report["failed"].append({"media_id": int(item["id"]), "error": message})
     return hydrated, report
@@ -343,6 +368,7 @@ def _upsert_channel_video(
     retryable: bool = False,
     retry_after: str | None = None,
     precheck_error: str = "",
+    source_class: str = "",
 ) -> tuple[bool, bool, int | None]:
     """写入热点+媒体。返回 (hotspot_created, media_created, media_id)。"""
     video_id = str(entry.get("id") or "").strip()
@@ -410,6 +436,7 @@ def _upsert_channel_video(
         "error_message": (precheck_error[:500] if retryable else None),
         "materialization_retryable": 1 if retryable else 0,
         "retry_after": retry_after if retryable else None,
+        "source_class": hotspot_intake_policy.normalize_source_class(source_class, publisher=name),
     })
     # upsert 对已存在行不改 download_status；抓取硬化必须回写状态与 retry 字段。
     # 但不得把已进入下载/分析管线的母片降级回 metadata_ready（定时重抓会撞上预热）。
@@ -505,6 +532,7 @@ def fetch_youtube_channel_hotspots(
                     created, media_created, media_id = _upsert_channel_video(
                         name=name, entry=entry, retrieved_at=retrieved_at,
                         download_status="metadata_ready",
+                        source_class=str(channel.get("source_class") or ""),
                     )
                     result["new" if created else "updated"] += 1
                     result["media"] += int(media_created)
@@ -528,6 +556,7 @@ def fetch_youtube_channel_hotspots(
                         retryable=True,
                         retry_after=retry_after_iso(),
                         precheck_error=probe_error or "yt-dlp -F unavailable",
+                        source_class=str(channel.get("source_class") or ""),
                     )
                     result["new" if created else "updated"] += 1
                     result["media"] += int(media_created)

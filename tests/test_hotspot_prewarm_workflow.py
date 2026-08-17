@@ -413,7 +413,8 @@ def test_startup_requeues_only_retryable_hook_curation_failures(tmp_db):
 async def test_chat_targeted_refresh_rescans_authorised_sources_before_hook_intake(tmp_db, monkeypatch):
     import scheduler
 
-    _candidate(tmp_db)
+    _admin_id, _hotspot_id, media_id = _candidate(tmp_db)
+    tmp_db.enqueue_hotspot_discovery_request("德班港拥堵最新", requested_by=_admin_id)
     captured = {}
 
     async def fetch_hotspots(**kwargs):
@@ -432,8 +433,10 @@ async def test_chat_targeted_refresh_rescans_authorised_sources_before_hook_inta
     assert report["status"] == "completed"
     import hotspot_video_sources
 
-    assert captured["fetch"]["video_limit"] == hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT
-    assert captured["fetch"]["video_channels"] == scheduler.hotspot_fetcher.configured_video_channels()
+    assert captured["fetch"]["video_limit"] <= hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT
+    names = [item.get("name") for item in captured["fetch"]["video_channels"]]
+    assert "Transnet NPA" in names
+    assert names.index("Transnet NPA") < names.index("eNCA")
     assert captured["prewarm"] is True
 
 

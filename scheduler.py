@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import database as db
@@ -18,7 +19,9 @@ import ratelimit
 import truth_guard
 import xhs_diff_guard
 import hotspot_fetcher
+import hotspot_intake_policy
 import hotspot_video_sources
+import topic_hook_pipeline
 import media_retention
 import model_router
 
@@ -117,34 +120,7 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
     metadata_candidates = [
         item for item in db.list_active_authorized_hotspot_media_for_full_intake()
         if item.get("media_kind") in {"video_link", "video_file"}
-        # A local service restart can interrupt a yt-dlp subprocess between
-        # state updates. Treat that recoverable in-flight marker as pending on
-        # the next three-day/full run instead of leaving an authorised source
-        # permanently outside the model pipeline.
-        # A terminal network failure is retried only by a later full run (never
-        # within the same snapshot), so one dead source cannot starve the rest
-        # of the authorised library forever.
-        and (
-            item.get("download_status") in {
-                "metadata_ready", "failed", "download_failed", "pending", "downloading",
-            }
-            # 最新窗暂不可用：到点后重试（retry_after 未到则跳过）。
-            or (
-                item.get("download_status") == "materialization_retryable"
-                and (
-                    not str(item.get("retry_after") or "").strip()
-                    or str(item.get("retry_after")) <= datetime.now(timezone.utc).isoformat()
-                )
-            )
-            # If the service stopped after a source file was saved, resume the
-            # built-in analysis from that authorised asset instead of requiring
-            # another external download.
-            or (
-                item.get("download_status") == "downloaded"
-                and item.get("processing_status") in {"not_started", "processing", "processing_failed"}
-                and item.get("asset_id")
-            )
-        )
+        and hotspot_intake_policy.is_full_intake_eligible(item)
     ]
     requested_media_ids = {int(value) for value in (media_ids or []) if str(value).strip().isdigit()}
     if requested_media_ids:
@@ -186,6 +162,25 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
             item["error_message"] = None
             item["progress_detail"] = "受控重策展：复用已分析母片，重新执行 Hook 策展与事实核验"
         metadata_candidates.extend(requested_ready_rows.values())
+        requested_paused_rows = {
+            int(item.get("id") or 0): item
+            for item in db.list_hotspot_media(lifecycle_status="active", limit=500)
+            if int(item.get("id") or 0) in requested_media_ids
+            and item.get("media_kind") in {"video_link", "video_file"}
+            and item.get("authorization_status") == "authorized"
+            and item.get("download_status") == hotspot_intake_policy.METADATA_FAILED_STATUS
+        }
+        for item in requested_paused_rows.values():
+            item["download_status"] = "metadata_ready"
+            item["retry_after"] = None
+            item["progress_detail"] = "受控重试：重新读取失效视频元数据"
+            db.update_hotspot_media_state(
+                int(item["id"]),
+                download_status="metadata_ready",
+                retry_after=None,
+                progress_detail=item["progress_detail"],
+            )
+        metadata_candidates.extend(requested_paused_rows.values())
         metadata_candidates = [
             item for item in metadata_candidates
             if int(item.get("id") or 0) in requested_media_ids
@@ -370,53 +365,106 @@ async def prewarm_authorized_hotspot_media(media_ids: list[int] | None = None):
 
 
 async def refresh_targeted_hotspot_hooks() -> dict:
-    """Immediately rescan authorised sources after a chat video has no Hook pair.
-
-    A user request must affect collection promptly.  The rescan remains bounded
-    to configured, authorised feeds and channels; it never turns a free-form
-    chat topic into an unlicensed web download.  The normal scheduler is still
-    responsible for maintaining the library between requests.
-    """
+    """Run topic-scoped intake for chat discovery jobs; persist stage evidence."""
     import chat_intent
 
+    if not topic_hook_pipeline.autofetch_enabled():
+        return {"status": "disabled", "reason": "TOPIC_HOOK_AUTOFETCH_ENABLED=0"}
     admin = db.get_first_admin_user()
-    pending = [
-        item for item in db.list_hotspot_discovery_requests(status="pending", limit=100)
-        if chat_intent.should_request_hotspot_retrieval(
-            chat_intent.classify_content_mode(item.get("topic") or "")
-        )
-    ]
-    # Archive comparison topics that should never have entered this queue.
+    pending = []
+    seen = set()
+    for status in ("pending", "queued", "processing", "fetching", "downloading", "analyzing", "reviewing"):
+        for item in db.list_hotspot_discovery_requests(status=status, limit=100):
+            request_id = int(item["id"])
+            if request_id in seen:
+                continue
+            seen.add(request_id)
+            mode = chat_intent.classify_content_mode(item.get("topic") or "")
+            if chat_intent.should_request_hotspot_retrieval(mode) or chat_intent.assess_event_anchor(item.get("topic") or "").get("has_event_anchor"):
+                pending.append(item)
     cancelled = db.cancel_misrouted_comparison_discovery_requests()
+    if not pending:
+        return {"status": "idle", "cancelled_misrouted": len(cancelled)}
     for item in pending:
         db.update_hotspot_discovery_request(
-            int(item["id"]), status="processing", stage="fetch_sources", error_message=None,
+            int(item["id"]), status="fetching", stage="fetching", error_message=None,
         )
     try:
+        query = pending[0].get("query") or topic_hook_pipeline.structure_topic(pending[0].get("topic") or "")
+        channels = topic_hook_pipeline.prefer_official_channels(
+            hotspot_fetcher.configured_video_channels(), query,
+        )
+        feeds = topic_hook_pipeline.prefer_official_feeds(hotspot_fetcher.configured_feeds(), query)
         fetched = await hotspot_fetcher.fetch_hotspots(
             static_dir=Path(__file__).with_name("static"),
             created_by=admin["id"] if admin else None,
-            video_channels=hotspot_fetcher.configured_video_channels(),
-            video_limit=hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT,
+            feeds=feeds,
+            video_channels=channels,
+            video_limit=min(
+                hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT,
+                int(query.get("max_candidates") or topic_hook_pipeline.autofetch_max_candidates()),
+            ),
         )
         for item in pending:
-            db.update_hotspot_discovery_request(int(item["id"]), stage="analyze_media")
+            db.update_hotspot_discovery_request(
+                int(item["id"]),
+                status="downloading",
+                stage="downloading",
+                candidate_count=int(fetched.get("video_media") or fetched.get("new") or 0),
+            )
         intake = await prewarm_authorized_hotspot_media()
+        for item in pending:
+            db.update_hotspot_discovery_request(int(item["id"]), status="analyzing", stage="analyzing")
         outcomes = []
         for item in pending:
             topic = str(item.get("topic") or "")
+            query = item.get("query") or topic_hook_pipeline.structure_topic(topic)
+            db.update_hotspot_discovery_request(int(item["id"]), status="reviewing", stage="reviewing")
+            events = db.list_hotspot_event_clips()
+            media_by_asset = {}
+            for event in events:
+                asset_id = int(event.get("asset_id") or 0)
+                if asset_id and asset_id not in media_by_asset:
+                    media = db.get_hotspot_media_by_asset_id(asset_id)
+                    if media:
+                        media_by_asset[asset_id] = media
+            buckets = topic_hook_pipeline.match_topic_hooks(
+                query,
+                events,
+                media_by_asset=media_by_asset,
+                is_ready=lambda event: (
+                    str(event.get("review_status") or "") == "confirmed"
+                    and str(event.get("clip_status") or "") == "ready"
+                    and bool(str(event.get("clip_path") or "").strip())
+                    and hotspot_intake_policy.has_real_logistics_scene(event)
+                    and not hotspot_intake_policy.is_placeholder_logistics_question(
+                        (event.get("evidence") or {}).get("logistics_question")
+                    )
+                ),
+                is_audit=lambda event: str(event.get("review_status") or "") == "confirmed",
+            )
+            if buckets["matched_ready"]:
+                matched_media_id = buckets["matched_ready"][0].get("asset_id")
+                media_row = media_by_asset.get(int(matched_media_id or 0)) or db.get_hotspot_media_by_asset_id(int(matched_media_id or 0))
+                media_id = int((media_row or {}).get("id") or 0) or _discovery_match_media_id_for_topic(topic)
+                if media_id:
+                    db.mark_hotspot_discovery_request_matched([int(item["id"])], media_id)
+                    db.update_hotspot_discovery_request(int(item["id"]), status="matched", stage="ready")
+                    outcomes.append({"request_id": int(item["id"]), "status": "matched", "matched_media_id": media_id})
+                    continue
             matched_media_id = _discovery_match_media_id_for_topic(topic)
             if matched_media_id:
                 db.mark_hotspot_discovery_request_matched([int(item["id"])], matched_media_id)
+                db.update_hotspot_discovery_request(int(item["id"]), status="matched", stage="ready")
                 outcomes.append({"request_id": int(item["id"]), "status": "matched", "matched_media_id": matched_media_id})
             else:
                 db.update_hotspot_discovery_request(
                     int(item["id"]),
-                    status="unmatched",
-                    stage="done",
-                    error_message="复扫完成，暂无与该主题强相关的已确认 Hook；可换更具体的时效事件后重试",
+                    status="no_match",
+                    stage="no_match",
+                    error_message="定向采集完成，暂无与该主题匹配且可成片的物流 Hook；未用无关新闻填补",
                 )
-                outcomes.append({"request_id": int(item["id"]), "status": "unmatched"})
+                outcomes.append({"request_id": int(item["id"]), "status": "no_match"})
         report = {
             "status": "completed",
             "fetch": fetched,
@@ -436,7 +484,7 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             db.update_hotspot_discovery_request(
                 int(item["id"]),
                 status="failed",
-                stage="done",
+                stage="failed",
                 error_message=f"补采失败：{str(exc)[:180]}",
             )
         return {"status": "failed", "error": str(exc)[:300], "cancelled_misrouted": len(cancelled)}
@@ -699,24 +747,48 @@ async def fetch_hotspots_then_incremental_hook_intake():
     )
     # Prefer targeted discovery queue first, then a small incremental authorized batch.
     targeted = await refresh_targeted_hotspot_hooks()
-    incremental_ids = []
-    for item in db.list_active_authorized_hotspot_media_for_full_intake():
-        if item.get("media_kind") not in {"video_link", "video_file"}:
-            continue
-        if item.get("download_status") not in {
-            "metadata_ready", "failed", "download_failed", "pending", "downloading",
-        }:
-            continue
-        incremental_ids.append(int(item["id"]))
-        if len(incremental_ids) >= max(1, int(os.environ.get("HOTSPOT_INCREMENTAL_HOOK_BATCH", "8"))):
-            break
+    batch_size = max(1, int(os.environ.get("HOTSPOT_INCREMENTAL_HOOK_BATCH", "8")))
+    selection = hotspot_intake_policy.select_incremental_media(
+        [
+            item for item in db.list_active_authorized_hotspot_media_for_full_intake()
+            if item.get("media_kind") in {"video_link", "video_file"}
+        ],
+        batch_size,
+    )
+    incremental_ids = selection["selected_ids"]
     intake = {"status": "skipped"}
     if incremental_ids:
         intake = await prewarm_authorized_hotspot_media(media_ids=incremental_ids)
-    report = {"fetch": fetched, "targeted": targeted, "incremental": intake, "incremental_ids": incremental_ids}
+    confirmed_hooks = int((intake.get("summary") or {}).get("confirmed_hooks") or intake.get("confirmed_hooks") or 0)
+    report = {
+        "fetch": fetched,
+        "targeted": targeted,
+        "incremental": intake,
+        "incremental_ids": incremental_ids,
+        "candidate_count": selection["candidate_count"],
+        "eligible_count": selection["eligible_count"],
+        "skipped_count": selection["skipped_count"],
+        "skipped_failed_ids": selection["skipped_failed_ids"],
+        "failed_ids": [item.get("media_id") for item in failed],
+        "failed_reasons": failed,
+        "analyzed": intake.get("selected_media_ids") or [],
+        "confirmed_hooks": confirmed_hooks,
+        "official_publishers": selection.get("official_publishers") or [],
+        "known_stuck_in_incremental": selection.get("known_stuck_in_incremental") or [],
+    }
     logger.info(
-        "抓取后增量 Hook 入库：fetch_new=%s targeted=%s incremental=%s ids=%s",
-        fetched.get("new"), targeted.get("status"), intake.get("status"), incremental_ids,
+        "抓取后增量 Hook 入库：candidates=%s eligible=%s skipped=%s skipped_failed=%s "
+        "incremental=%s ids=%s failed=%s confirmed_hooks=%s official=%s fetch_new=%s",
+        selection["candidate_count"],
+        selection["eligible_count"],
+        selection["skipped_count"],
+        selection["skipped_failed_ids"][:12],
+        intake.get("status"),
+        incremental_ids,
+        failed,
+        confirmed_hooks,
+        selection.get("official_publishers") or [],
+        fetched.get("new"),
     )
     return report
 
@@ -753,6 +825,45 @@ async def cleanup_hotspot_hook_cycle():
         logger.exception("Hook 周期清理任务失败")
 
 
+def _library_sync_next_run() -> datetime:
+    """Restore the durable 3-day cycle; restarts must not push it another 3 days."""
+    now = datetime.now()
+    state = db.get_scheduler_job_state("hotspot_hook_library_sync") or {}
+    raw = str(state.get("next_run_time") or "").strip()
+    if raw:
+        try:
+            stored = datetime.fromisoformat(raw)
+            if stored.tzinfo is not None:
+                stored = stored.replace(tzinfo=None)
+            if stored > now:
+                return stored
+            return now + timedelta(seconds=45)
+        except ValueError:
+            pass
+    nxt = now + timedelta(days=3)
+    db.upsert_scheduler_job_state(
+        "hotspot_hook_library_sync",
+        next_run_time=nxt.isoformat(timespec="seconds"),
+    )
+    return nxt
+
+
+def _persist_library_sync_schedule(event):
+    if getattr(event, "job_id", None) != "hotspot_hook_library_sync":
+        return
+    job = scheduler.get_job("hotspot_hook_library_sync")
+    nxt = getattr(job, "next_run_time", None) if job else None
+    if nxt is None:
+        nxt = datetime.now() + timedelta(days=3)
+    if getattr(nxt, "tzinfo", None) is not None:
+        nxt = nxt.replace(tzinfo=None)
+    db.upsert_scheduler_job_state(
+        "hotspot_hook_library_sync",
+        next_run_time=nxt.isoformat(timespec="seconds"),
+        last_run_time=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
 def start_scheduler():
     """启动定时调度器。"""
     # 每分钟检查一次定时发布任务（加 grace time 避免错过）
@@ -777,18 +888,21 @@ def start_scheduler():
         coalesce=True,
         misfire_grace_time=3600,  # 1 小时 grace time，避免连续错过导致任务失效
     )
+    library_sync_next = _library_sync_next_run()
     scheduler.add_job(
         prewarm_authorized_hotspot_media,
         "interval",
         days=3,
         id="hotspot_hook_library_sync",
-        # 全量入库是后台维护任务，不得在每次服务重启时抢占聊天与正式成片的
-        # 模型预算。首次及后续执行都按三天窗口；用户无 Hook 时的定向补采仍由
-        # request_targeted_hotspot_refresh 单独入队。
-        next_run_time=datetime.now() + timedelta(days=3),
+        next_run_time=library_sync_next,
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_listener(_persist_library_sync_schedule, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+    db.upsert_scheduler_job_state(
+        "hotspot_hook_library_sync",
+        next_run_time=library_sync_next.isoformat(timespec="seconds"),
     )
     # 批22：按 12 天完整周期检查清理，禁止用旧版 10 天年龄清理代替。
     scheduler.add_job(
@@ -803,7 +917,14 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
     scheduler.start()
-    logger.info("定时调度器已启动（每分钟发布检查 + 三天热点预热 + 12 天 Hook 周期清理）")
+    if topic_hook_pipeline.autofetch_enabled():
+        pending_discovery = db.list_hotspot_discovery_requests(status="pending", limit=20)
+        if pending_discovery:
+            request_targeted_hotspot_refresh()
+    logger.info(
+        "定时调度器已启动（每分钟发布检查 + 三天热点预热 next_run=%s + 12 天 Hook 周期清理）",
+        library_sync_next.isoformat(timespec="seconds"),
+    )
 
 
 def stop_scheduler():

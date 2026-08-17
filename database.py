@@ -972,8 +972,26 @@ def init_db():
         _ensure_column(conn, "hotspot_sources", "source_kind", "TEXT NOT NULL DEFAULT 'rss'")
         _ensure_column(conn, "hotspot_media", "materialization_retryable", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "hotspot_media", "retry_after", "TEXT")
+        _ensure_column(conn, "hotspot_media", "failure_reason", "TEXT")
+        _ensure_column(conn, "hotspot_media", "failure_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "hotspot_media", "source_class", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS scheduler_jobs (
+                job_id TEXT PRIMARY KEY,
+                next_run_time TEXT,
+                last_run_time TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+        _backfill_hotspot_media_source_class(conn)
         _ensure_column(conn, "hotspot_discovery_requests", "stage", "TEXT")
         _ensure_column(conn, "hotspot_discovery_requests", "error_message", "TEXT")
+        _ensure_column(conn, "hotspot_discovery_requests", "job_type", "TEXT NOT NULL DEFAULT 'topic_targeted_hotspot_intake'")
+        _ensure_column(conn, "hotspot_discovery_requests", "query_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, "hotspot_discovery_requests", "source_classes", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "hotspot_discovery_requests", "candidate_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "hotspot_discovery_requests", "max_candidates", "INTEGER NOT NULL DEFAULT 20")
+        _ensure_column(conn, "hotspot_discovery_requests", "next_run_time", "TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_hotspot_media_authorization "
             "ON hotspot_media(authorization_status,lifecycle_status,created_at)"
@@ -1007,7 +1025,31 @@ def init_db():
     record_schema_migration("2026-08-03-delivery-loop", "hook_kind/logistics_scenes + schema_migrations baseline")
     record_schema_migration("2026-08-06-articles-table", "新增 articles 表：公众号图文长文生产")
     record_schema_migration("2026-08-10-batch20-chain-mode", "topic_briefs.chain_mode 视频生成链路选择")
+    record_schema_migration(
+        "2026-08-17-batch22-topic-pipeline",
+        "hotspot_discovery_requests 定向采集任务字段：query/source_classes/candidate_count",
+    )
     logger.info("数据库初始化完成: %s", DB_PATH)
+
+
+def _backfill_hotspot_media_source_class(conn):
+    """Fill source_class from known publishers; leave unknown rows as general_news."""
+    from hotspot_intake_policy import PUBLISHER_SOURCE_CLASS
+
+    if "source_class" not in _table_columns(conn, "hotspot_media"):
+        return
+    for publisher, source_class in PUBLISHER_SOURCE_CLASS.items():
+        conn.execute(
+            """UPDATE hotspot_media
+               SET source_class=?
+               WHERE publisher=? AND (source_class IS NULL OR source_class='')""",
+            (source_class, publisher),
+        )
+    conn.execute(
+        """UPDATE hotspot_media
+           SET source_class='general_news'
+           WHERE source_class IS NULL OR source_class=''"""
+    )
 
 
 def _seed_defaults(conn):
@@ -2366,6 +2408,7 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
         "rights_note", "license_name", "rights_evidence_url", "attribution", "download_status",
         "processing_status", "error_message", "sha256", "asset_id", "lifecycle_status",
         "download_progress", "progress_detail", "materialization_retryable", "retry_after",
+        "failure_reason", "failure_count", "source_class",
     )
     defaults = {
         "platform": "direct", "publisher": "", "author": "", "authorization_status": "authorized", "rights_tier": "authorized",
@@ -2373,8 +2416,14 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
         "lifecycle_status": "active", "download_progress": 0, "intake_title": "",
         "intake_summary": "", "intake_metadata_status": "pending", "intake_decision_json": None,
         "materialization_retryable": 0, "retry_after": None,
+        "failure_reason": None, "failure_count": 0, "source_class": "",
     }
     payload = {**defaults, **data}
+    if not str(payload.get("source_class") or "").strip():
+        from hotspot_intake_policy import normalize_source_class
+        payload["source_class"] = normalize_source_class(
+            "", publisher=str(payload.get("publisher") or "")
+        )
     if "authorization_status" not in data:
         payload["authorization_status"] = "blocked" if str(payload.get("rights_tier") or "").casefold() in {"red", "blocked"} else "authorized"
     elif payload.get("authorization_status") not in HOTSPOT_MEDIA_AUTHORIZATION_STATUSES:
@@ -2389,7 +2438,7 @@ def upsert_hotspot_media(data: dict) -> tuple[int, bool]:
             mutable = (
                 "media_kind", "platform", "platform_media_id", "source_page_url", "embed_url",
                 "thumbnail_url", "publisher", "author", "published_at", "mime_type",
-                "duration_seconds", "width", "height",
+                "duration_seconds", "width", "height", "source_class",
             )
             conn.execute(
                 f"UPDATE hotspot_media SET {','.join(f'{name}=?' for name in mutable)},updated_at=datetime('now') WHERE id=?",
@@ -2407,6 +2456,43 @@ def get_hotspot_media(media_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM hotspot_media WHERE id=?", (media_id,)).fetchone()
         return dict(row) if row else None
+
+
+def get_hotspot_media_by_asset_id(asset_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM hotspot_media WHERE asset_id=? ORDER BY id DESC LIMIT 1",
+            (int(asset_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_scheduler_job_state(job_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM scheduler_jobs WHERE job_id=?",
+            (str(job_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_scheduler_job_state(
+    job_id: str,
+    *,
+    next_run_time: str | None = None,
+    last_run_time: str | None = None,
+) -> dict:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO scheduler_jobs (job_id, next_run_time, last_run_time, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(job_id) DO UPDATE SET
+                 next_run_time=COALESCE(excluded.next_run_time, scheduler_jobs.next_run_time),
+                 last_run_time=COALESCE(excluded.last_run_time, scheduler_jobs.last_run_time),
+                 updated_at=datetime('now')""",
+            (str(job_id), next_run_time, last_run_time),
+        )
+    return get_scheduler_job_state(job_id) or {"job_id": job_id}
 
 
 def list_hotspot_media(
@@ -2514,6 +2600,7 @@ def update_hotspot_media_state(media_id: int, **changes):
         "download_status", "processing_status", "error_message", "sha256", "asset_id",
         "download_progress", "progress_detail", "intake_decision_json",
         "materialization_retryable", "retry_after",
+        "failure_reason", "failure_count", "source_class",
     }
     values = {key: value for key, value in changes.items() if key in allowed}
     if not values:
@@ -4572,33 +4659,97 @@ def list_hotspot_event_clips(asset_id: int | None = None, hotspot_id: int | None
         return rows
 
 
-def enqueue_hotspot_discovery_request(topic: str, requested_by: int | None = None) -> dict:
-    """Persist a targeted collection request when the confirmed Hook library is empty."""
+def _hydrate_discovery_request(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    item = dict(row)
+    try:
+        item["query"] = json.loads(item.get("query_json") or "{}")
+    except Exception:
+        item["query"] = {}
+    try:
+        item["source_class_list"] = json.loads(item.get("source_classes") or "[]")
+    except Exception:
+        item["source_class_list"] = []
+    return item
+
+
+def enqueue_hotspot_discovery_request(
+    topic: str,
+    requested_by: int | None = None,
+    *,
+    query: dict | None = None,
+    max_candidates: int | None = None,
+    source_classes: list[str] | None = None,
+) -> dict:
+    """Persist a targeted collection request; reuse an active job for the same topic."""
     normalized = " ".join(str(topic or "").split())[:300]
     if not normalized:
         raise ValueError("定向采集主题不能为空")
     topic_key = normalized.casefold()
+    if requested_by is not None:
+        try:
+            requested_by = int(requested_by)
+        except (TypeError, ValueError):
+            requested_by = None
+        if requested_by is not None:
+            with get_conn() as conn:
+                if not conn.execute("SELECT id FROM users WHERE id=?", (requested_by,)).fetchone():
+                    requested_by = None
+    query = query or {}
+    classes = source_classes or query.get("source_classes") or []
+    limit = int(max_candidates or query.get("max_candidates") or 20)
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM hotspot_discovery_requests WHERE topic_key=?", (topic_key,)
         ).fetchone()
         if row:
+            current = dict(row)
+            status = str(current.get("status") or "")
+            if status in {
+                "pending", "queued", "processing", "fetching", "downloading",
+                "analyzing", "reviewing", "matched",
+            }:
+                return _hydrate_discovery_request(current)
             conn.execute(
-                "UPDATE hotspot_discovery_requests SET status='pending',requested_by=?,error_message=NULL,stage='queued',updated_at=datetime('now') WHERE id=?",
-                (requested_by, row["id"]),
+                """UPDATE hotspot_discovery_requests
+                   SET status='queued', requested_by=?, error_message=NULL, stage='queued',
+                       job_type='topic_targeted_hotspot_intake', query_json=?, source_classes=?,
+                       max_candidates=?, candidate_count=0, matched_media_id=NULL,
+                       updated_at=datetime('now')
+                   WHERE id=?""",
+                (
+                    requested_by,
+                    json.dumps(query, ensure_ascii=False),
+                    json.dumps(list(classes), ensure_ascii=False),
+                    limit,
+                    current["id"],
+                ),
             )
-            return dict(conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (row["id"],)).fetchone())
+            return _hydrate_discovery_request(dict(
+                conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (current["id"],)).fetchone()
+            ))
         cur = conn.execute(
-            "INSERT INTO hotspot_discovery_requests(topic,topic_key,requested_by,status,stage) VALUES(?,?,?,'pending','queued')",
-            (normalized, topic_key, requested_by),
+            """INSERT INTO hotspot_discovery_requests(
+                   topic, topic_key, requested_by, status, stage, job_type, query_json,
+                   source_classes, max_candidates
+               ) VALUES (?,?,?,'queued','queued','topic_targeted_hotspot_intake',?,?,?)""",
+            (
+                normalized, topic_key, requested_by,
+                json.dumps(query, ensure_ascii=False),
+                json.dumps(list(classes), ensure_ascii=False),
+                limit,
+            ),
         )
-        return dict(conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (cur.lastrowid,)).fetchone())
+        return _hydrate_discovery_request(dict(
+            conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (cur.lastrowid,)).fetchone()
+        ))
 
 
 def get_hotspot_discovery_request(request_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (int(request_id),)).fetchone()
-        return dict(row) if row else None
+        return _hydrate_discovery_request(dict(row) if row else None)
 
 
 def update_hotspot_discovery_request(
@@ -4608,6 +4759,8 @@ def update_hotspot_discovery_request(
     stage: str | None = None,
     error_message: str | None = None,
     matched_media_id: int | None = None,
+    candidate_count: int | None = None,
+    next_run_time: str | None = None,
 ) -> dict | None:
     fields: dict = {}
     if status is not None:
@@ -4618,6 +4771,10 @@ def update_hotspot_discovery_request(
         fields["error_message"] = error_message
     if matched_media_id is not None:
         fields["matched_media_id"] = int(matched_media_id)
+    if candidate_count is not None:
+        fields["candidate_count"] = int(candidate_count)
+    if next_run_time is not None:
+        fields["next_run_time"] = next_run_time
     if not fields:
         return get_hotspot_discovery_request(request_id)
     fields["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -4627,7 +4784,7 @@ def update_hotspot_discovery_request(
             (*fields.values(), int(request_id)),
         )
         row = conn.execute("SELECT * FROM hotspot_discovery_requests WHERE id=?", (int(request_id),)).fetchone()
-        return dict(row) if row else None
+        return _hydrate_discovery_request(dict(row) if row else None)
 
 
 def cancel_misrouted_comparison_discovery_requests(limit: int = 200) -> list[dict]:
@@ -4653,10 +4810,13 @@ def cancel_misrouted_comparison_discovery_requests(limit: int = 200) -> list[dic
 def list_hotspot_discovery_requests(status: str | None = None, limit: int = 50) -> list[dict]:
     query, params = "SELECT * FROM hotspot_discovery_requests", []
     if status:
-        query += " WHERE status=?"; params.append(status)
+        if status == "pending":
+            query += " WHERE status IN ('pending','queued')"
+        else:
+            query += " WHERE status=?"; params.append(status)
     query += " ORDER BY updated_at DESC,id DESC LIMIT ?"; params.append(max(1, min(int(limit), 200)))
     with get_conn() as conn:
-        return [dict(row) for row in conn.execute(query, params).fetchall()]
+        return [_hydrate_discovery_request(dict(row)) for row in conn.execute(query, params).fetchall()]
 
 
 def mark_hotspot_discovery_request_matched(request_ids: list[int], media_id: int) -> None:

@@ -27,7 +27,12 @@ COMPARISON_MARKERS = (
 HOTSPOT_MARKERS = (
     "最近", "最新", "新闻", "事故", "堵车", "拥堵", "道路中断", "突发",
     "今日", "昨晚", "刚刚", "breaking", "road closure", "accident",
-    "flood", "罢工", "口岸关闭", "封路",
+    "flood", "罢工", "口岸关闭", "封路", "动静", "延误", "作业中断",
+)
+
+# Official logistics operators are timely-event anchors even without time words.
+OFFICIAL_LOGISTICS_ENTITIES = (
+    "transnet", "sanral", "sars", "samsa", "npa",
 )
 
 EVERGREEN_MARKERS = (
@@ -80,6 +85,8 @@ def classify_content_mode(text: str, *, context: str = "") -> str:
         return "general_copy"
     if any(marker.casefold() in blob for marker in COMPARISON_MARKERS):
         return "comparison_research"
+    if any(marker.casefold() in blob for marker in OFFICIAL_LOGISTICS_ENTITIES):
+        return "hotspot"
     if any(marker.casefold() in blob for marker in HOTSPOT_MARKERS):
         return "hotspot"
     if any(marker.casefold() in blob for marker in EVERGREEN_MARKERS):
@@ -93,16 +100,17 @@ def assess_event_anchor(text: str, *, context: str = "") -> dict:
     folded = blob.casefold()
     time_hits = [marker for marker in HOTSPOT_MARKERS if marker.casefold() in folded]
     entity_hits = [marker for marker in EVENT_ENTITY_MARKERS if marker.casefold() in folded]
+    official_hits = [marker for marker in OFFICIAL_LOGISTICS_ENTITIES if marker.casefold() in folded]
     logistics_scenes = sorted(hotspot_lexicon.category_profile(blob, mode="topic"))
     scene_set = set(logistics_scenes)
     # Need at least one concrete entity/place/disruption term — time words alone
     # (e.g. "最近物流") are not enough to open discovery.
-    has_event_anchor = bool(entity_hits) or (
+    has_event_anchor = bool(entity_hits) or bool(official_hits) or (
         bool(time_hits) and bool(scene_set & {"port", "border", "disruption"})
     )
     return {
         "has_event_anchor": has_event_anchor,
-        "event_terms": sorted({*time_hits, *entity_hits}, key=str.casefold),
+        "event_terms": sorted({*time_hits, *entity_hits, *official_hits}, key=str.casefold),
         "logistics_scenes": logistics_scenes,
         "time_hits": time_hits,
         "entity_hits": entity_hits,
@@ -255,8 +263,12 @@ def should_attempt_hook_retrieval(content_mode: str) -> bool:
 
 
 def should_enqueue_hotspot_discovery(content_mode: str, event_anchor: dict | None) -> bool:
-    """Only concrete timely-event topics may open the discovery queue."""
-    return content_mode == "hotspot" and bool((event_anchor or {}).get("has_event_anchor"))
+    """Concrete logistics-entity topics may open discovery even without newsy wording."""
+    if content_mode == "comparison_research":
+        return False
+    return bool((event_anchor or {}).get("has_event_anchor")) and content_mode in {
+        "hotspot", "general_copy",
+    }
 
 
 def should_request_hotspot_retrieval(content_mode: str) -> bool:

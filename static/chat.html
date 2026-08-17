@@ -196,11 +196,21 @@ function hotspotRetrievalMarkup(result, resultId){
     const readiness=retrieval.video?.delivery_readiness;
     const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';
     const swap=producibleTopicsMarkup(result?.producible_topics||retrieval.producible_topics||[], resultId, true);
-    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>保留你的原主题叙事；可更换 Hook，或直接创建 60 秒视频项目。</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
+    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>已绑定当前主题的匹配 Hook，可直接创建 60 秒视频项目。</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
   }
   if(retrieval.status==='not_requested')return '';
   if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor'||result?.result_state==='hook_selection_required')return '';
-  return `<div class="result-warning" data-discovery-request="${escapeHtml(String(retrieval.request_id||''))}"><strong>文案草稿已生成 · 视频素材补采中</strong><p>${escapeHtml(retrieval.message||'已进入定向采集队列。')}</p><p>视频按钮会在 Hook 就绪后自动开放；可展开详情查看进度。</p></div>`;
+  const discovery=retrieval.discovery||{};
+  const requestId=retrieval.request_id||discovery.id||'';
+  const stage=discovery.stage||retrieval.stage||'queued';
+  const updated=discovery.updated_at||retrieval.updated_at||'';
+  const candidates=discovery.candidate_count??retrieval.candidate_count??0;
+  const error=discovery.error_message||retrieval.error_message||'';
+  const audit=(retrieval.match_buckets?.matched_audit_only||[]).slice(0,3).map(item=>`<li>${escapeHtml(item.title||'相关 Hook')}：${escapeHtml((item.gaps||[]).join('；')||'相关但不可成片')}</li>`).join('');
+  if(!requestId){
+    return `<div class="result-warning"><strong>无法成片</strong><p>没有定向采集任务 ID，不能显示“已立即复扫”。${escapeHtml(retrieval.message||'')}</p></div>`;
+  }
+  return `<div class="result-warning" data-discovery-request="${escapeHtml(String(requestId))}"><strong>定向采集进行中</strong><p>任务 ID #${escapeHtml(String(requestId))} · 阶段 ${escapeHtml(String(stage))} · 候选 ${escapeHtml(String(candidates))}${updated?` · 更新 ${escapeHtml(String(updated))}`:''}</p><p>${escapeHtml(retrieval.message||'已创建真实定向采集任务。')}</p>${error?`<p>失败原因：${escapeHtml(error)}</p>`:''}${audit?`<p>相关但不可成片：</p><ul>${audit}</ul>`:''}<p>视频按钮会在匹配 ready Hook 后自动开放；不会用无关新闻强行成片。</p></div>`;
 }
 
 function funnelDetailsMarkup(funnel){
@@ -266,7 +276,7 @@ function resultStateCard(result,id){
   const map={
     formal_content:{title:'平台内容已生成',hint:'可发送到编辑器继续修订；抖音视频请创建 60 秒视频项目。'},
     framework_pending_evidence:{title:'对比框架已生成 · 待补资料',hint:'请补充候选服务商、价格/时效来源与测试日期后再生成正式评测。'},
-    hotspot_retrieval_pending:{title:'文案草稿已生成 · 视频素材补采中',hint:'等待热点 Hook 就绪后，本卡片会开放「创建60秒视频项目」。'},
+    hotspot_retrieval_pending:{title:'定向采集进行中',hint:'卡片会显示任务 ID、阶段和失败原因；匹配到 ready Hook 后开放「创建60秒视频项目」。'},
     hook_coverage_gap:{title:'库未覆盖该时效事件',hint:'可等待定向补采，或点选下方 Hook 绑定到原主题。'},
     hook_gate_blocked:{title:'有候选但未过质量门禁',hint:'请点选下方已通过门禁的 Hook 绑定到原主题。'},
     hook_selection_required:{title:'请选择开场 Hook',hint:'系统未自动命中；点选下方 Hook 绑定到你的原主题即可开拍，无需改写输入框。'},
@@ -290,7 +300,7 @@ function resultStateCard(result,id){
   const frameworkActions=state==='framework_pending_evidence'||state==='authenticity_blocked'
     ?`<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',0)">编辑对比框架</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',0)">复制框架</button></div>`
     :'';
-  const topicActions=(state==='hook_selection_required'||state==='topic_needs_event_anchor'||state==='hook_coverage_gap'||state==='hook_gate_blocked'||state==='hotspot_retrieval_pending')
+  const topicActions=(state==='hook_selection_required'||state==='topic_needs_event_anchor'||state==='hook_gate_blocked')
     ?producibleTopicsMarkup(topics,id,false):'';
   const fixLink=(card.fix&&state!=='brand_assets_insufficient')
     ?`<a class="btn btn-secondary btn-sm" href="${escapeHtml(card.fix)}" style="margin-top:8px;display:inline-flex;min-height:44px;align-items:center">前往修复</a>`
@@ -309,7 +319,7 @@ function assistantBubbleText(result){
   if(state==='topic_needs_event_anchor')return '暂无可用 Hook';
   if(state==='hook_coverage_gap')return '库未覆盖该时效事件';
   if(state==='hook_gate_blocked')return '有候选但未过质量门禁';
-  if(state==='hotspot_retrieval_pending')return '文案草稿已生成 · 视频素材补采中';
+  if(state==='hotspot_retrieval_pending')return '定向采集进行中 · 任务已入库';
   if(state==='brand_assets_insufficient')return '脚本已生成 · 将按库存自适应出片';
   if(result?.outputs?.length>1)return `已按 ${result.outputs.length} 个平台分别生成内容。`;
   return '平台内容已生成';
@@ -408,7 +418,8 @@ async function scheduleDiscoveryPoll(resultId, requestId){
           ...(result.hotspot_retrieval||{}),
           status:'matched',
           hooks:payload.hooks,
-          message:'补采完成，已确认 Hook 可用。',
+          discovery:payload,
+          message:'定向采集完成，已确认匹配 Hook 可用。',
           video:{status:'ready',hotspot_event_ids:payload.hooks.map(item=>item.event_clip_id),delivery_readiness:{delivery_ready:true}},
         };
         result.result_state='formal_content';
@@ -419,13 +430,34 @@ async function scheduleDiscoveryPoll(resultId, requestId){
         showToast('热点 Hook 已就绪，可创建视频项目','success');
         return;
       }
-      if(['unmatched','failed','cancelled_misrouted'].includes(payload.status)){
-        result.hotspot_retrieval={...(result.hotspot_retrieval||{}),status:payload.status,message:payload.error_message||payload.recovery||'补采未完成'};
-        result.result_state=payload.status==='cancelled_misrouted'?'framework_pending_evidence':'hotspot_retrieval_pending';
+      if(['unmatched','no_match','failed','cancelled_misrouted'].includes(payload.status)){
+        result.hotspot_retrieval={
+          ...(result.hotspot_retrieval||{}),
+          status:payload.status,
+          discovery:payload,
+          message:payload.error_message||payload.recovery||'定向采集未得到合格 Hook',
+          error_message:payload.error_message,
+        };
+        result.result_state=payload.status==='cancelled_misrouted'?'framework_pending_evidence':'hook_coverage_gap';
         resultStore.set(resultId,result);
         const card=document.getElementById(`result-${resultId}`);
         if(card)card.outerHTML=resultCardMarkup(result,resultId);
         clearInterval(discoveryPollers[resultId]);delete discoveryPollers[resultId];
+        return;
+      }
+      result.hotspot_retrieval={
+        ...(result.hotspot_retrieval||{}),
+        discovery:payload,
+        stage:payload.stage,
+        candidate_count:payload.candidate_count,
+        updated_at:payload.updated_at,
+        error_message:payload.error_message,
+      };
+      resultStore.set(resultId,result);
+      const card=document.getElementById(`result-${resultId}`);
+      if(card){
+        const banner=card.querySelector('[data-discovery-request]');
+        if(banner)banner.outerHTML=hotspotRetrievalMarkup(result,resultId);
       }
     }catch(e){
       failures+=1;

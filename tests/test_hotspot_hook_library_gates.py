@@ -244,6 +244,38 @@ def test_downloaded_hotspot_copy_passes_when_linked_to_external_parent(tmp_db):
     assert app._is_confirmed_renderable_hotspot_hook(event) is True
 
 
+def test_hotspot_library_can_list_audit_only_without_mixing_ready_default(tmp_db):
+    import database as db
+
+    client, headers = _admin_client(tmp_db)
+    _create_ready_chat_hook(
+        db,
+        title="边境货车排队",
+        summary="口岸筛查",
+        event_title="卡车在口岸入口排队",
+        what_happened="货运卡车在口岸入口排队等待筛查",
+        logistics_question="等待会先影响哪个订单节点？",
+        snapshot="ready-default-hook",
+    )
+    _create_ready_chat_hook(
+        db,
+        title="球队训练",
+        summary="体育训练",
+        event_title="球队训练现场",
+        what_happened="球员在训练场进行传球训练，画面可见球员和球门。",
+        logistics_question="",
+        snapshot="audit-sports-hook",
+    )
+    ready = client.get("/api/hotspot-events", headers=headers)
+    audit = client.get("/api/hotspot-events?library_status=audit_only", headers=headers)
+    assert ready.status_code == 200
+    assert all(item["library_status"] == "ready" for item in ready.json())
+    assert {item["title_zh"] for item in ready.json()} == {"卡车在口岸入口排队"}
+    assert audit.status_code == 200
+    assert all(item["library_status"] == "audit_only" for item in audit.json())
+    assert {item["title_zh"] for item in audit.json()} == {"球队训练现场"}
+
+
 def test_formal_hook_repair_keeps_snow_road_fact_in_first_voiceover(tmp_db):
     import app
 
@@ -411,7 +443,7 @@ def test_chat_retrieval_uses_one_confirmed_hook_when_no_second_clip_exists(tmp_d
     assert result["status"] == "matched"
     assert result["video"]["status"] == "ready"
     assert result["video"]["hotspot_event_ids"] == [event["id"]]
-    assert "一段相关" in result["message"]
+    assert "一段相关" in result["message"] or "已自动绑定" in result["message"]
     readiness = result["video"]["delivery_readiness"]
     assert readiness["delivery_ready"] is True
     assert readiness["status"] in {"delivery_ready", "delivery_ready_adapted"}

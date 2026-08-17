@@ -376,7 +376,7 @@ def test_discovery_status_api_and_misrouted_archive(tmp_db):
         headers={"Authorization": f"Bearer {editor_token}"},
     )
     assert ok.status_code == 200
-    assert ok.json()["status"] == "pending"
+    assert ok.json()["status"] == "queued"
 
     archived = client.post(
         "/api/hotspot-discovery-requests/archive-misrouted-comparisons",
@@ -385,7 +385,7 @@ def test_discovery_status_api_and_misrouted_archive(tmp_db):
     assert archived.status_code == 200
     assert archived.json()["count"] == 1
     assert tmp_db.get_hotspot_discovery_request(request["id"])["status"] == "cancelled_misrouted"
-    assert tmp_db.get_hotspot_discovery_request(foreign["id"])["status"] == "pending"
+    assert tmp_db.get_hotspot_discovery_request(foreign["id"])["status"] == "queued"
 
 
 def test_chat_ui_uses_result_state_card_without_conflicting_peer_status():

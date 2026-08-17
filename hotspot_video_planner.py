@@ -694,14 +694,28 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
         if index == 1:
             if "musina" in title.casefold() and "拥堵" in title:
                 return "Musina 现场，筛查让卡车排起长队。你的订单，还能按原计划走吗？"
+            if any(str(item).casefold() == "transnet" for item in (brief.get("entities") or [])):
+                return f"{title}。先交代港口或铁路现场发生了什么，不夸大、不改归因。"
             return f"现场正在发生：{title}。你的订单，还能按原计划走吗？"
         if index == 2:
+            if any(str(item).casefold() == "transnet" for item in (brief.get("entities") or [])):
+                node = next((str(item) for item in (brief.get("logistics_nodes") or []) if item), "港口")
+                return f"这会直接影响{node}的装卸、堆场或跨境运输节奏；发货前要先核对船期和仓内收货窗口。"
             return f"堵的不只是一条路，{topic}的交付预期也要重新核对。"
         return "热点不是 Buffalo 的服务证明；真正该问的是，异常出现时，谁在提前调整路线和沟通？"
     if role == "owned_proof":
         labels = {"warehouse": "仓储和备货", "staff": "分拣与检查", "facility": "现场设施", "delivery": "运输与交付"}
         if flow_role == "post_hook_bridge":
-            return f"这个变化提醒风险，Buffalo把{labels.get(category, '仓配动作')}做稳。"
+            node = labels.get(category, "仓配动作")
+            if any(str(item).casefold() == "transnet" for item in (brief.get("entities") or [])):
+                return (
+                    f"同一风险落到{node}时，Buffalo 用可见核对、分拣留痕和可追踪交接"
+                    f"证明动作可检查，而不是口头承诺安全。"
+                )
+            return (
+                f"风险先落到{node}；Buffalo在该节点做可见的核对和留痕，"
+                f"用来证明现场动作可检查，而不是口头承诺。"
+            )
         openings = (
             "先看执行现场：", "再往下拆一层：", "真正影响客户体验的是：",
             "从仓内细节看：", "换到另一处动作：", "再补一个核对节点：",
