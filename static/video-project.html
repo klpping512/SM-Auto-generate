@@ -232,13 +232,21 @@ function readSceneEditors(){
 
 function currentPayloadFromForm(){
   const base=payload();
-  const selection=parseVoiceSelection(document.getElementById('projectVoice')?.value||'');
+  const snap=project.source_snapshot||{};
+  const voiceEl=document.getElementById('projectVoice');
+  let tts_provider=base.tts_provider||snap.tts_provider;
+  let voice=base.voice||snap.voice;
+  if(voiceEl&&voiceEl.value){
+    const selection=parseVoiceSelection(voiceEl.value);
+    tts_provider=selection.tts_provider||tts_provider;
+    voice=selection.voice||voice;
+  }
   const speechRate=Number(document.getElementById('speechRate')?.value||base.speech_rate||1);
   return {
     ...base,
     title:document.getElementById('projectTitle')?.textContent||base.title,
-    voice:selection.voice||base.voice,
-    tts_provider:selection.tts_provider||base.tts_provider,
+    voice,
+    tts_provider,
     speech_rate:speechRate,
     scenes:document.querySelectorAll('.scene-row').length?readSceneEditors():(base.scenes||[]),
   };
@@ -435,7 +443,10 @@ async function applyCandidate(sceneIndex,segmentId){
 
 function renderVoice(){
   const p=payload();
-  const selected=(p.tts_provider&&p.voice)?`${p.tts_provider}:${p.voice}`:voiceOptionValue((mediaCapabilities.voice_options||defaultVoiceOptions())[0]);
+  const snap=project.source_snapshot||{};
+  const provider=p.tts_provider||snap.tts_provider;
+  const voice=p.voice||snap.voice;
+  const selected=(provider&&voice)?`${provider}:${voice}`:voiceOptionValue((mediaCapabilities.voice_options||defaultVoiceOptions())[0]);
   const opts=mediaCapabilities.voice_options||defaultVoiceOptions();
   const unavailable=opts.filter(o=>o.available===false);
   document.getElementById('canvas').innerHTML=`
@@ -553,7 +564,10 @@ function renderReview(){
   const pausedMatch=status==='needs_review'&&job?.stage==='match_quality_check';
   const manuallyAccepted=job?.quality_report?.manual_review?.status==='accepted';
   const renderProgress=job?.quality_report?.render_progress;
-  const stage=manuallyAccepted?'人工验收已记录（未发布）':(pausedMatch?'匹配质量不足，等待人工处理':(renderProgress?.stage||VIDEO_STAGE_LABELS[job?.stage]||job?.stage||'等待生成'));
+  const failReason=job?.error_message||'';
+  const stage=status==='failed'
+    ? `${VIDEO_STAGE_LABELS[job?.stage]||job?.stage||'生成'}失败`
+    : (manuallyAccepted?'人工验收已记录（未发布）':(pausedMatch?'匹配质量不足，等待人工处理':(renderProgress?.stage||VIDEO_STAGE_LABELS[job?.stage]||job?.stage||'等待生成')));
   const publication=job?.quality_report?.publication;
   const manualReview=job?.quality_report?.manual_review;
   const internalPreview=publication?.tier==='internal_preview';
@@ -599,8 +613,9 @@ function renderReview(){
     <div class="wb-card">
       <h3>待确认问题</h3>
       ${adjustments.length?`<div class="adjustment-note"><strong>系统已自动调整</strong><div>${adjustments.map(escapeHtml).join('；')}</div></div>`:''}
+      ${status==='failed'&&failReason?`<div class="issue"><strong>失败原因</strong><div>${escapeHtml(failReason)}</div></div>`:''}
       ${issues.length?issues.slice(0,5).map(i=>`<div class="issue">${escapeHtml(i)}</div>`).join('')+'':''}
-      ${!issues.length&&!adjustments.length?'<div class="empty-note">当前没有需要人工处理的问题</div>':''}
+      ${!issues.length&&!adjustments.length&&!(status==='failed'&&failReason)?'<div class="empty-note">当前没有需要人工处理的问题</div>':''}
       ${!publishAllowed&&(internalPreview||manualReview)?'<div class="match-score-note"><strong>内部验收文件</strong>：不可进入发布队列。</div>':''}
     </div>`;
 }

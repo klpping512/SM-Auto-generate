@@ -251,6 +251,38 @@ async def test_run_claimed_job_preserves_report_written_inside_stage(monkeypatch
     assert state["quality_report"]["video_evaluation"]["error"] == "timeout"
 
 
+@pytest.mark.asyncio
+async def test_run_claimed_job_keeps_failing_stage_and_error_message(monkeypatch):
+    from video_generation import PipelineStage, run_claimed_job
+
+    state = {
+        "id": "job-fail-stage", "status": "running", "stage": "scripting",
+        "quality_report": {},
+    }
+
+    def get_job(_job_id):
+        return dict(state)
+
+    def update_job(_job_id, **kwargs):
+        state.update(kwargs)
+        return dict(state)
+
+    monkeypatch.setattr("database.get_video_generation_job", get_job)
+    monkeypatch.setattr("database.update_video_generation_job", update_job)
+    monkeypatch.setattr("database.renew_video_generation_lease", lambda *args, **kwargs: True)
+    events = []
+    monkeypatch.setattr("database.add_video_generation_event", lambda *args, **kwargs: events.append(args) or {})
+
+    async def scripting_stage(_job):
+        raise RuntimeError("内容规划失败：内容规划模型缺少标题、角度或有效分镜")
+
+    await run_claimed_job(state, "owner", {PipelineStage.SCRIPTING: scripting_stage})
+
+    assert state["status"] == "failed"
+    assert state["stage"] == "scripting"
+    assert "缺少标题、角度或有效分镜" in state["error_message"]
+
+
 def test_hotspot_followup_evidence_gate_requires_sixty_seconds_and_dynamic_video():
     from video_generation import hotspot_evidence_gate
 

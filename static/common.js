@@ -246,7 +246,7 @@ function voiceSelectMarkup(options, selectedValue, selectId, selectAttrs) {
     const optionsHtml = groupOrder.map((key) => {
         const items = groups.get(key).map((option) => {
             const value = voiceOptionValue(option);
-            const disabled = option.available === false;
+            const disabled = option.available === false && value !== selected;
             const reason = option.disabled_reason ? `（${option.disabled_reason}）` : '';
             return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${escapeHtml((option.label || `${option.provider} ${option.id}`) + reason)}</option>`;
         }).join('');

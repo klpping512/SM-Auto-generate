@@ -3176,6 +3176,11 @@ def get_model_cache(cache_key: str) -> dict | None:
     return result
 
 
+def delete_model_cache(cache_key: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM model_call_cache WHERE cache_key=?", (cache_key,))
+
+
 def record_model_call(
     job_id: str,
     role: str,

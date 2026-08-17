@@ -217,6 +217,93 @@ def test_vision_tagger_route_disables_thinking(tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_call_text_does_not_cache_empty_planner_json(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request):
+        calls["count"] += 1
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": '{"title":"","angle":"","scenes":[]}'}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 8},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first = await model_router.call_text(
+            "empty-plan", "planner_text", [{"role": "user", "content": "规划视频"}],
+            prompt_version="topic-brief-video-plan-v11", client=client, max_attempts=1,
+            cacheable=model_router.planner_plan_is_cacheable,
+        )
+        second = await model_router.call_text(
+            "empty-plan", "planner_text", [{"role": "user", "content": "规划视频"}],
+            prompt_version="topic-brief-video-plan-v11", client=client, max_attempts=1,
+            cacheable=model_router.planner_plan_is_cacheable,
+        )
+    finally:
+        await client.aclose()
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is False
+    assert calls["count"] == 2
+    assert model_router.planner_plan_cache_rejection(first["content"]) == "empty_plan_fields"
+    assert tmp_db.get_model_cache(
+        model_router.make_cache_key(
+            "planner_text",
+            {"messages": [{"role": "user", "content": "规划视频"}], "json_mode": False},
+            "topic-brief-video-plan-v11",
+        )
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_call_text_skips_poisoned_planner_cache_and_repair_bypasses_cache(tmp_db, monkeypatch):
+    import model_router
+
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    messages = [{"role": "user", "content": "规划视频"}]
+    cache_key = model_router.make_cache_key(
+        "planner_text", {"messages": messages, "json_mode": False}, "topic-brief-video-plan-v11",
+    )
+    tmp_db.create_model_budget("poison-plan", 10, 1_000, 10_000)
+    tmp_db.record_model_call(
+        "poison-plan", "planner_text", "mimo-v2.5-pro", cache_key, 1, 1, 0.01,
+        {"content": '{"title":"","angle":"","scenes":[]}'},
+    )
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request):
+        calls["count"] += 1
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": '{"title":"港口提醒","angle":"先看现场","scenes":[{"voiceover":"先核对船期再安排入库。","text_overlay":"核对船期"}]}'}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 16},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        skipped = await model_router.call_text(
+            "poison-plan", "planner_text", messages,
+            prompt_version="topic-brief-video-plan-v11", client=client, max_attempts=1,
+            cacheable=model_router.planner_plan_is_cacheable,
+        )
+        repaired = await model_router.call_text(
+            "poison-plan", "planner_text", messages,
+            prompt_version="topic-brief-video-plan-v11-repair", client=client, max_attempts=1,
+            use_cache=False, cacheable=model_router.planner_plan_is_cacheable,
+        )
+    finally:
+        await client.aclose()
+
+    assert skipped["cache_hit"] is False
+    assert repaired["cache_hit"] is False
+    assert calls["count"] == 2
+    assert model_router.planner_plan_is_cacheable(skipped["content"])
+    assert model_router.planner_plan_is_cacheable(repaired["content"])
+
+
+@pytest.mark.asyncio
 async def test_call_text_does_not_cache_empty_visible_content(tmp_db, monkeypatch):
     import model_router
 

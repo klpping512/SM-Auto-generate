@@ -536,11 +536,19 @@ async def run_claimed_job(
             db.add_video_generation_event, job["id"], "canceled", "视频生成已停止"
         )
     except Exception as exc:
+        latest = await asyncio.to_thread(db.get_video_generation_job, job["id"]) or job
+        fail_stage = str(latest.get("stage") or current.value)
+        if fail_stage in {
+            PipelineStage.FAILED.value,
+            PipelineStage.SUCCEEDED.value,
+            PipelineStage.CANCELED.value,
+        }:
+            fail_stage = current.value
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
             status=JobStatus.FAILED.value,
-            stage=PipelineStage.FAILED.value,
+            stage=fail_stage,
             error_code=type(exc).__name__,
             error_message=str(exc)[:500],
             lease_owner=None,
@@ -548,7 +556,7 @@ async def run_claimed_job(
         )
         await asyncio.to_thread(
             db.add_video_generation_event, job["id"], "failed", "视频生成失败",
-            {"error": str(exc)[:500]},
+            {"error": str(exc)[:500], "stage": fail_stage},
         )
 
 

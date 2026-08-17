@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 
 import httpx
 
@@ -286,6 +287,40 @@ def record_call(
     )
 
 
+def planner_plan_cache_rejection(content: str) -> str | None:
+    """Separate 'visible text exists' from 'this is a usable video plan'.
+
+    Empty title/angle/scenes is valid JSON and non-empty text, but must never
+    enter model_call_cache — retries would keep hitting the same poison.
+    """
+    raw = str(content or "").strip()
+    if not raw:
+        return "empty_content"
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return "invalid_json"
+    if not isinstance(payload, dict):
+        return "invalid_json"
+    title = str(payload.get("title") or "").strip()
+    angle = str(payload.get("angle") or "").strip()
+    scenes = payload.get("scenes")
+    if not title or not angle:
+        return "empty_plan_fields"
+    if not isinstance(scenes, list) or not scenes:
+        return "empty_scenes"
+    for item in scenes:
+        if not isinstance(item, dict) or not str(item.get("voiceover") or "").strip():
+            return "invalid_scene_voiceover"
+    return None
+
+
+def planner_plan_is_cacheable(content: str) -> bool:
+    return planner_plan_cache_rejection(content) is None
+
+
 def make_cache_key(role: str, payload: dict, prompt_version: str) -> str:
     route = get_route(role)
     raw = json.dumps(
@@ -407,6 +442,7 @@ async def call_text(
     max_output_tokens: int | None = None,
     json_mode: bool = False,
     use_cache: bool = True,
+    cacheable: Callable[[str], bool] | None = None,
     client: httpx.AsyncClient | None = None,
     max_attempts: int = 3,
 ) -> dict:
@@ -420,19 +456,31 @@ async def call_text(
     create_budget(job_id)
     cached = db.get_model_cache(cache_key) if use_cache else None
     if cached:
-        hit = record_call(
-            job_id,
-            role,
-            cache_key=cache_key,
-            input_tokens=0,
-            output_tokens=0,
-            response=cached["response"],
-        )
-        return {
-            "content": hit["response"]["content"],
-            "cache_hit": True,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
-        }
+        cached_content = str((cached.get("response") or {}).get("content") or "")
+        if cacheable is not None and not cacheable(cached_content):
+            logger.warning(
+                "call_text 忽略无效缓存: role=%s model=%s prompt_version=%s reason=%s",
+                role,
+                route.get("model"),
+                prompt_version,
+                planner_plan_cache_rejection(cached_content) if cacheable is planner_plan_is_cacheable else "not_cacheable",
+            )
+            db.delete_model_cache(cache_key)
+            cached = None
+        else:
+            hit = record_call(
+                job_id,
+                role,
+                cache_key=cache_key,
+                input_tokens=0,
+                output_tokens=0,
+                response=cached["response"],
+            )
+            return {
+                "content": hit["response"]["content"],
+                "cache_hit": True,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
 
     estimated_input = max(1, len(json.dumps(messages, ensure_ascii=False)) // 4)
     requested_output = int(max_output_tokens or route["max_tokens"])
@@ -515,6 +563,19 @@ async def call_text(
         # an empty answer; never cache that poison for Hook JSON consumers.
         raise RuntimeError("模型未返回可见文本内容")
     input_tokens, output_tokens = _usage_tokens(response_payload, estimated_input, content)
+    if cacheable is not None and not cacheable(content):
+        logger.warning(
+            "call_text 跳过无效缓存写入: role=%s model=%s prompt_version=%s reason=%s",
+            role,
+            route.get("model"),
+            prompt_version,
+            planner_plan_cache_rejection(content) if cacheable is planner_plan_is_cacheable else "not_cacheable",
+        )
+        return {
+            "content": content,
+            "cache_hit": False,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        }
     stored = record_call(
         job_id,
         role,

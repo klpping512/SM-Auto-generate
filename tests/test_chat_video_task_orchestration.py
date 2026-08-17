@@ -101,3 +101,38 @@ def test_owned_only_fallback_can_create_project_without_hotspot_event(tmp_db, mo
     snapshot = json.loads(payload["project"]["source_snapshot"])
     assert snapshot["fallback_mode"] == "owned_only_no_matching_hook"
     assert snapshot["matched_event_clip_ids"] == []
+
+
+def test_chat_video_request_persists_minimax_tts_on_snapshot_and_revision(tmp_db, monkeypatch):
+    import json
+
+    app, client, headers, event = _client_with_hook(tmp_db)
+    monkeypatch.setattr(
+        app, "_chat_video_delivery_readiness",
+        lambda *_args, **_kwargs: {"status": "delivery_ready", "delivery_ready": True},
+    )
+    response = client.post("/api/ai/chat/dual-library-video", headers=headers, json={
+        "topic": "帮我生成一个关乎南非海外仓的介绍视频",
+        "hotspot_event_ids": [event["id"]], "platform": "douyin",
+        "target_duration_ms": 60_000, "session_id": "tts-session",
+        "idempotency_key": "tts-minimax-idempotency",
+        "tts_provider": "minimax", "voice": "male-qn-qingse",
+    })
+
+    assert response.status_code == 202
+    payload = response.json()
+    snapshot = json.loads(payload["project"]["source_snapshot"])
+    revision = payload["project"]["current_revision"]["payload"]
+    assert snapshot["tts_provider"] == "minimax"
+    assert snapshot["voice"] == "male-qn-qingse"
+    assert revision["tts_provider"] == "minimax"
+    assert revision["voice"] == "male-qn-qingse"
+
+    saved = client.put(
+        f"/api/video-projects/{payload['project']['id']}/revision",
+        headers=headers,
+        json={"payload": {**revision, "title": "重试修订"}},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["payload"]["tts_provider"] == "minimax"
+    assert saved.json()["payload"]["voice"] == "male-qn-qingse"

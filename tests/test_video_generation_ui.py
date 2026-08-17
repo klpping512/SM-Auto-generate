@@ -38,6 +38,8 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "创建60秒视频项目" in page
     assert "前往修复" not in page or "brand_assets_insufficient" in page
     assert "resultStateCard" in page
+    assert "platform_errors" in page
+    assert "文案已生成，小红书配图失败，请重试配图" in page
     assert "当前情况" not in page or "result-state-hint" in page
     assert "source_type: 'chat'" not in page
 
@@ -117,6 +119,9 @@ def test_video_project_workbench_has_five_stages_and_manual_review():
     assert "配音服务与音色" in page
     assert "先保存工作台当前选择" in page
     assert "重试也必须使用当前 revision" in page
+    assert "voiceEl&&voiceEl.value" in page
+    assert "失败原因" in page
+    assert "error_message" in page
     assert "formatRenderProvenance" in page
     assert "热点 Hook" in page
     assert "Buffalo 自有" in page
@@ -172,6 +177,7 @@ def test_common_helpers_expose_voice_options_and_provenance():
     assert "voicePickerMarkup" in common
     assert "optgroup" in common
     assert "parseVoiceSelection" in common
+    assert "available === false && value !== selected" in common
     assert "formatRenderProvenance" in common
     assert "previewSelectedVoice" in common
     assert "/api/media/tts-preview" in common

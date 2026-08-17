@@ -288,6 +288,48 @@ def _render_xhs_carousel(title: str, pages: list | None, topic: str = "", catego
     return render_carousel(title, pages, STATIC_DIR, photo_pool=pool or None)
 
 
+XHS_CAROUSEL_USER_MESSAGE = "文案已生成，小红书配图失败，请重试配图"
+
+
+def _safe_xhs_carousel(
+    title: str,
+    pages: list | None,
+    topic: str = "",
+    category: str = "",
+    *,
+    output_id: str | None = None,
+) -> tuple[list, list, dict | None]:
+    """Render Xiaohongshu images without letting OS errors fail the whole chat."""
+    try:
+        image_pages, attachments = _render_xhs_carousel(title, pages, topic, category)
+        return image_pages, attachments, None
+    except Exception as exc:
+        kind = "permission_denied" if isinstance(exc, PermissionError) else type(exc).__name__
+        logger.warning(
+            "小红书配图失败 platform=xiaohongshu error_type=%s output_id=%s",
+            kind, output_id or title[:40],
+        )
+        return list(pages or []), [], {
+            "platform": "xiaohongshu",
+            "error_type": kind,
+            "output_id": output_id,
+            "message": XHS_CAROUSEL_USER_MESSAGE,
+        }
+
+
+def _planner_validation_kind(error: Exception) -> str:
+    text = str(error)
+    if "合法 JSON" in text:
+        return "invalid_json"
+    if "标题、角度或有效分镜" in text:
+        return "empty_plan_fields"
+    if "旁白" in text:
+        return "invalid_voiceover"
+    if "无效分镜" in text:
+        return "invalid_scene"
+    return "validation_error"
+
+
 # ==================== API: Topics ====================
 
 @app.get("/api/topics")
@@ -315,9 +357,14 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
         contents = [ai_engine._fallback_content(p, req.topic, req.category) for p in req.platforms]
         for content in contents:
             if content.platform.value == "xiaohongshu":
-                content.image_pages, content.attachments = _render_xhs_carousel(
+                content.image_pages, content.attachments, render_error = _safe_xhs_carousel(
                     content.title, content.image_pages, req.topic, req.category,
+                    output_id="generate-fallback",
                 )
+                if render_error:
+                    content.quality_warnings = list(content.quality_warnings or []) + [
+                        render_error["message"]
+                    ]
                 render_errors = check_rendered(content.image_pages, content.attachments, STATIC_DIR)
                 if render_errors:
                     logger.error("小红书渲染完整性告警(fallback): %s", render_errors)
@@ -334,9 +381,14 @@ async def generate_content(req: GenerateRequest, user=Depends(get_current_user))
     )
     for content in contents:
         if content.platform.value == "xiaohongshu":
-            content.image_pages, content.attachments = _render_xhs_carousel(
+            content.image_pages, content.attachments, render_error = _safe_xhs_carousel(
                 content.title, content.image_pages, req.topic, req.category,
+                output_id="generate",
             )
+            if render_error:
+                content.quality_warnings = list(content.quality_warnings or []) + [
+                    render_error["message"]
+                ]
             render_errors = check_rendered(content.image_pages, content.attachments, STATIC_DIR)
             if render_errors:
                 logger.error("小红书渲染完整性告警: %s", render_errors)
@@ -1591,14 +1643,41 @@ def _has_external_hotspot_provenance(event: dict) -> bool:
     return False
 
 
+def _is_legacy_ready_hotspot_hook(event: dict) -> bool:
+    """Restore existing timely Hooks that already have an audited clip.
+
+    The logistics-question and source-quota gates were added after the first
+    batch of event clips was generated.  Those clips already carry the
+    pipeline's ``logistics_scenes`` evidence, so keep them directly usable
+    without rewriting their stored audit data.  Review status, playable media,
+    external provenance, and the two core fact fields remain mandatory.
+    """
+    evidence = event.get("evidence") or {}
+    required = ("what_happened", "hook_reason")
+    values = [str(evidence.get(key) or "").strip() for key in required]
+    placeholders = ("未记录", "待确认", "unknown", "n/a")
+    logistics_scenes = event.get("logistics_scenes") or []
+    return bool(
+        str(event.get("hook_kind") or "") == "timely_event"
+        and logistics_scenes
+        and str(event.get("review_status") or "") == "confirmed"
+        and str(event.get("clip_status") or "") == "ready"
+        and str(event.get("clip_path") or "").strip()
+        and _has_external_hotspot_provenance(event)
+        and all(value and not value.casefold().startswith(placeholders) for value in values)
+    )
+
+
 def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
     """Only expose verified Hooks with a defensible logistics bridge and proxy.
 
-    A missing bridge is filled in memory only when the verified frame itself
-    shows a logistics-adjacent fact such as a road closure, snow-related access
-    issue, congestion, port handling or warehouse activity.  Pure politics,
+    Existing timely event clips with pipeline-generated logistics scene
+    evidence retain their original direct-ready behavior.  New or incomplete
+    records still need the cautious in-memory bridge below; pure politics,
     sports, interviews and public-affairs footage remain audited archive items.
     """
+    if _is_legacy_ready_hotspot_hook(event):
+        return True
     candidate = _with_soft_logistics_bridge(event)
     evidence = candidate.get("evidence") or {}
     required = ("what_happened", "hook_reason", "logistics_question")
@@ -1699,8 +1778,9 @@ async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | Non
     segments = db.list_asset_segments(limit=20_000)
     for event in events:
         status = flags.get(int(event.get("id") or 0), {})
-        event["is_renderable"] = bool(status.get("is_renderable"))
-        event["quota_held"] = bool(status.get("quota_held"))
+        legacy_ready = _is_legacy_ready_hotspot_hook(event)
+        event["is_renderable"] = legacy_ready or bool(status.get("is_renderable"))
+        event["quota_held"] = False if legacy_ready else bool(status.get("quota_held"))
         event["library_status"] = (
             "ready" if event["is_renderable"]
             else ("audit_only" if _is_audited_hotspot_hook(event) else "ineligible")
@@ -3127,6 +3207,7 @@ async def _generate_topic_brief_video(
         result = await model_router.call_text(
             job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v11",
             max_output_tokens=planner_output_budget,
+            cacheable=model_router.planner_plan_is_cacheable,
         )
         voiceover_limits = [_scene_voiceover_max_chars(scene) for scene in scenes]
         voiceover_minimums = [_scene_voiceover_min_chars(scene) for scene in scenes]
@@ -3154,6 +3235,14 @@ async def _generate_topic_brief_video(
             generated = _repair_formal_narrative_bridge(generated, scenes)
             _validate_formal_narrative(generated, scenes, event)
         except ValueError as initial_error:
+            logger.warning(
+                "内容规划校验失败: role=planner_text model=%s prompt_version=%s validation=%s retry=%s cache_hit=%s",
+                model_router.get_route("planner_text").get("model"),
+                "topic-brief-video-plan-v11",
+                _planner_validation_kind(initial_error),
+                0,
+                bool(result.get("cache_hit")),
+            )
             # The planner selected no file references, so one bounded rewrite can
             # safely repair malformed JSON or a short-scene narration overflow
             # without changing the approved Hook pair or the evidence plan.
@@ -3197,7 +3286,10 @@ async def _generate_topic_brief_video(
                 }, ensure_ascii=False)
                 repair_result = await model_router.call_text(
                     job_id, "planner_text", repair_messages,
-                    prompt_version="topic-brief-video-plan-v11-repair", max_output_tokens=planner_output_budget,
+                    prompt_version="topic-brief-video-plan-v11-repair",
+                    max_output_tokens=planner_output_budget,
+                    use_cache=False,
+                    cacheable=model_router.planner_plan_is_cacheable,
                 )
                 try:
                     repaired_candidate = _planner_json(
@@ -3217,6 +3309,14 @@ async def _generate_topic_brief_video(
                     _validate_formal_narrative(generated, scenes, event)
                     break
                 except ValueError as exc:
+                    logger.warning(
+                        "内容规划校验失败: role=planner_text model=%s prompt_version=%s validation=%s retry=%s cache_hit=%s",
+                        model_router.get_route("planner_text").get("model"),
+                        "topic-brief-video-plan-v11-repair",
+                        _planner_validation_kind(exc),
+                        repair_attempt + 1,
+                        bool(repair_result.get("cache_hit")),
+                    )
                     repair_error = exc
                     invalid_draft = repair_result["content"]
             else:
@@ -3291,6 +3391,17 @@ async def _generate_topic_brief_video(
         "adaptation": adaptation,
         "provenance": project_snapshot["provenance"],
     }
+    tts_provider = str((source_snapshot or {}).get("tts_provider") or "")
+    tts_voice = str((source_snapshot or {}).get("voice") or "")
+    if target_project_id:
+        existing_project = db.get_video_project(target_project_id, created_by=user["id"]) or {}
+        existing_payload = ((existing_project.get("current_revision") or {}).get("payload") or {})
+        existing_snapshot = _video_project_snapshot(existing_project)
+        tts_provider = tts_provider or str(existing_payload.get("tts_provider") or existing_snapshot.get("tts_provider") or "")
+        tts_voice = tts_voice or str(existing_payload.get("voice") or existing_snapshot.get("voice") or "")
+    if tts_provider:
+        revision_payload["tts_provider"] = tts_provider
+        revision_payload["voice"] = tts_voice
     if target_project_id and target_revision_id:
         updated_revision = db.update_video_project_revision_payload(
             target_revision_id,
@@ -3414,6 +3525,23 @@ def _build_video_generation_handlers(static_dir: Path):
         if not snapshot:
             return video_generation.PipelineStage.PLANNING
         hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
+        owned_only = str(snapshot.get("chain_mode") or "") == "owned_only" and not hook_ids
+        if owned_only:
+            report = dict(job.get("quality_report") or {})
+            report["chat_generation"] = {
+                **(report.get("chat_generation") or {}),
+                "locked_hook_event_ids": [],
+                "fallback_mode": "owned_only_no_matching_hook",
+                "next_step": "生成正式脚本",
+                "stage": video_generation.PipelineStage.HOOK_LOCKING.value,
+            }
+            await asyncio.to_thread(
+                db.update_video_generation_job,
+                job["id"],
+                progress=video_generation._STAGE_PROGRESS[video_generation.PipelineStage.HOOK_LOCKING],
+                quality_report=report,
+            )
+            return video_generation.PipelineStage.SCRIPTING
         events = [await asyncio.to_thread(db.get_hotspot_event_clip, event_id) for event_id in hook_ids]
         if not 1 <= len(events) <= 2 or any(event is None or not _is_confirmed_renderable_hotspot_hook(event) for event in events):
             raise RuntimeError("锁定的热点 Hook 已失效，请重新发起对话检索")
@@ -3442,7 +3570,8 @@ def _build_video_generation_handlers(static_dir: Path):
         if not snapshot:
             return video_generation.PipelineStage.PLANNING
         hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
-        if not hook_ids:
+        chain_mode = str(snapshot.get("chain_mode") or "hotspot_owned")
+        if not hook_ids and chain_mode != "owned_only":
             raise RuntimeError("缺少锁定 Hook，无法生成正式脚本")
         brief_for_chain = await asyncio.to_thread(
             db.get_topic_brief, str(snapshot.get("topic_brief_id") or ""), job["created_by"]
@@ -3452,23 +3581,29 @@ def _build_video_generation_handlers(static_dir: Path):
             job["id"],
             progress=video_generation._STAGE_PROGRESS[video_generation.PipelineStage.SCRIPTING],
         )
-        result = await _generate_topic_brief_video(
-            str(snapshot["topic_brief_id"]),
-            TopicBriefGenerateRequest(
-                hotspot_event_id=hook_ids[0],
-                approved_hook_event_ids=hook_ids,
-                platform=str(project.get("platform") or snapshot.get("platform") or "douyin"),
-                target_duration_ms=int(project.get("target_duration_ms") or snapshot.get("target_duration_ms") or 60_000),
-                chain_mode=(brief_for_chain or {}).get("chain_mode") or snapshot.get("chain_mode") or "hotspot_owned",
-            ),
-            {
-                "id": int(job["created_by"]),
-                "username": str(snapshot.get("username") or "system"),
-            },
-            source_snapshot=snapshot,
-            target_project_id=job["project_id"],
-            target_revision_id=job["revision_id"],
-        )
+        try:
+            result = await _generate_topic_brief_video(
+                str(snapshot["topic_brief_id"]),
+                TopicBriefGenerateRequest(
+                    hotspot_event_id=hook_ids[0] if hook_ids else None,
+                    approved_hook_event_ids=hook_ids,
+                    platform=str(project.get("platform") or snapshot.get("platform") or "douyin"),
+                    target_duration_ms=int(project.get("target_duration_ms") or snapshot.get("target_duration_ms") or 60_000),
+                    chain_mode=(brief_for_chain or {}).get("chain_mode") or chain_mode,
+                ),
+                {
+                    "id": int(job["created_by"]),
+                    "username": str(snapshot.get("username") or "system"),
+                },
+                source_snapshot=snapshot,
+                target_project_id=job["project_id"],
+                target_revision_id=job["revision_id"],
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message") or str(detail)
+            raise RuntimeError(str(detail)[:160]) from exc
         latest = await asyncio.to_thread(db.get_video_generation_job, job["id"])
         report = dict((latest or job).get("quality_report") or {})
         report["chat_generation"] = {
@@ -6069,11 +6204,24 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
             outputs, {"sufficient": False, "evidence_state": "insufficient"},
         )
 
+    platform_errors: list[dict] = []
     for item in outputs:
         if item["platform"] == "xiaohongshu" and item.get("title") != "生成失败":
-            item["image_pages"], item["attachments"] = _render_xhs_carousel(
+            item["image_pages"], item["attachments"], render_error = _safe_xhs_carousel(
                 item["title"], item.get("image_pages"), item.get("title") or "", "",
+                output_id=str(item.get("platform") or "xiaohongshu"),
             )
+            if render_error:
+                platform_errors.append(render_error)
+                item["quality_warnings"] = list(item.get("quality_warnings") or []) + [
+                    render_error["message"]
+                ]
+    usable_outputs = [
+        item for item in outputs
+        if str(item.get("title") or "").strip() and str(item.get("title")) != "生成失败"
+    ]
+    if not usable_outputs:
+        raise HTTPException(502, "所有平台内容生成失败")
     readiness = ((hotspot_retrieval or {}).get("video") or {}).get("delivery_readiness") or {}
     # Only treat as insufficient when Hook matched but adaptive planning still
     # cannot produce a renderable plan (delivery_ready=false). Thin owned stock
@@ -6112,6 +6260,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "content": context_content,
         "title": first["title"], "body": first["body"],
         "hashtags": first["hashtags"], "outputs": outputs,
+        "platform_errors": platform_errors,
         "hotspot_retrieval": hotspot_retrieval,
         "content_mode": content_mode,
         "degraded_from_comparison": degraded_from_comparison,
