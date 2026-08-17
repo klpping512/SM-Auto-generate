@@ -188,7 +188,7 @@ def classify_hook_failure(
         return None
     retrieval = hotspot_retrieval or {}
     status = str(retrieval.get("status") or "")
-    if status == "matched":
+    if status in {"matched", "owned_fallback"}:
         return None
     explicit = str(retrieval.get("failure_class") or "").strip()
     if explicit in {"no_event_anchor", "coverage_gap", "gate_blocked"}:
@@ -227,7 +227,7 @@ def derive_result_state(
         event_anchor=event_anchor,
         hotspot_retrieval=retrieval,
     )
-    if status == "matched":
+    if status in {"matched", "owned_fallback"}:
         video = retrieval.get("video") or {}
         readiness = video.get("delivery_readiness") or {}
         # Soft inventory adaptation keeps delivery_ready=true; only hard

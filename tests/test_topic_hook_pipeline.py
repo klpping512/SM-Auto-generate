@@ -170,6 +170,33 @@ def test_chat_transnet_topic_creates_discovery_job(tmp_db, monkeypatch):
     assert row["job_type"] == "topic_targeted_hotspot_intake"
 
 
+def test_chat_transnet_topic_falls_back_to_owned_only_when_inventory_is_ready(tmp_db, monkeypatch):
+    import asyncio
+    import app
+
+    monkeypatch.setattr(
+        app,
+        "_chat_video_delivery_readiness",
+        lambda *_args, **kwargs: (
+            {"status": "owned_only_ready", "delivery_ready": True, "adaptation": {"adapted": True}}
+            if kwargs.get("chain_mode") == "owned_only"
+            else {"status": "needs_hook", "delivery_ready": False}
+        ),
+    )
+    result = asyncio.run(app._retrieve_confirmed_chat_hooks(
+        TRANSNET_TOPIC,
+        1,
+        content_mode="hotspot",
+        event_anchor=chat_intent.assess_event_anchor(TRANSNET_TOPIC),
+    ))
+
+    assert result["status"] == "owned_fallback"
+    assert result["video"]["chain_mode"] == "owned_only"
+    assert result["video"]["hotspot_event_ids"] == []
+    assert result["request_id"] is None
+    assert tmp_db.list_hotspot_discovery_requests() == []
+
+
 def test_chat_transnet_ready_hook_binds_without_discovery(tmp_db, monkeypatch):
     import asyncio
     import app

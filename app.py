@@ -5547,6 +5547,40 @@ async def _retrieve_confirmed_chat_hooks(
         ready_events, limit=5, hotspots_by_id=hotspots_by_id,
     )
 
+    # A missing timely Hook no longer blocks production when Buffalo's own
+    # inventory can carry the topic. Keep the fallback explicit: it is an
+    # owned-only video, with no hotspot facts and no unrelated news filler.
+    owned_fallback_readiness = _chat_video_delivery_readiness(
+        normalized_topic, [], chain_mode="owned_only",
+    )
+    if owned_fallback_readiness.get("delivery_ready"):
+        return {
+            "status": "owned_fallback",
+            "topic": normalized_topic,
+            "hooks": [],
+            "request_id": None,
+            "video": {
+                "status": "ready",
+                "chain_mode": "owned_only",
+                "hotspot_event_ids": [],
+                "delivery_readiness": owned_fallback_readiness,
+            },
+            "failure_class": None,
+            "event_anchor": {**anchor, "topic_query": query},
+            "hook_kind": "owned_only_fallback",
+            "funnel": funnel,
+            "match_buckets": {
+                "matched_ready": buckets.get("matched_ready") or [],
+                "matched_audit_only": buckets.get("matched_audit_only") or [],
+            },
+            "producible_topics": producible if use_generic else [],
+            "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
+            "message": (
+                "当前没有匹配的时效 Hook，已直接切换 Buffalo 自有素材链路。"
+                "视频会围绕主题和可见物流动作生成，不伪装成热点追更，也不使用无关新闻。"
+            ),
+        }
+
     if use_generic or not chat_intent.should_enqueue_hotspot_discovery(content_mode, anchor):
         failure = "no_event_anchor" if use_generic else (
             "gate_blocked" if int(funnel.get("scanned") or 0) > 0 and int(funnel.get("passed") or 0) == 0
@@ -5708,19 +5742,25 @@ def _compose_owned_matching_diagnostics(
     return diagnostics
 
 
-def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dict:
+def _chat_video_delivery_readiness(
+    topic: str,
+    locked_events: list[dict],
+    *,
+    chain_mode: str = "hotspot_owned",
+) -> dict:
     """Preflight the formal 50–90s plan without creating a project or calling a model.
 
-    Hook absence remains a hard stop. Thin Buffalo inventory no longer blocks
-    create — the planner adapts and returns visible adaptation metadata.
+    Hotspot-owned production requires a locked Hook. The explicit owned_only
+    fallback may plan directly from Buffalo inventory when a topic has no
+    relevant Hook; it never fabricates a hotspot fact.
     """
-    if not locked_events:
+    if not locked_events and chain_mode != "owned_only":
         return {
             "status": "needs_hook", "delivery_ready": False,
             "message": "尚未锁定可用于正式成片的热点 Hook。",
             "adaptation": {"adapted": False, "strategies": []},
         }
-    primary = locked_events[0]
+    primary = locked_events[0] if locked_events else {}
     owned_segments = [
         item for item in db.list_asset_segments(limit=20_000)
         if not item.get("asset_hotspot_id")
@@ -5729,7 +5769,8 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         item for item in db.list_assets(file_type="image", status="active")
         if not item.get("hotspot_id")
     ]
-    source_hotspot = db.get_hotspot(int(primary["hotspot_id"])) or {}
+    source_hotspot = db.get_hotspot(int(primary["hotspot_id"])) if primary else {}
+    source_hotspot = source_hotspot or {}
     nodes = _chat_video_logistics_nodes(topic, locked_events)
     planning_brief = hotspot_logistics_planner.build_brief(
         {**source_hotspot, **primary},
@@ -5744,18 +5785,21 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
             "platforms": ["douyin"],
         },
     )
-    planning_brief.update({
-        "hotspot_id": primary["hotspot_id"],
-        "source_asset_id": primary["asset_id"],
-        "primary_event_id": primary["id"],
-        "approved_hook_event_ids": [int(event["id"]) for event in locked_events],
-    })
-    related_events = [
-        _with_soft_logistics_bridge(item)
-        for item in db.list_hotspot_event_clips(
-            asset_id=primary["asset_id"], hotspot_id=primary["hotspot_id"],
-        )
-    ]
+    if primary:
+        planning_brief.update({
+            "hotspot_id": primary["hotspot_id"],
+            "source_asset_id": primary["asset_id"],
+            "primary_event_id": primary["id"],
+            "approved_hook_event_ids": [int(event["id"]) for event in locked_events],
+        })
+    related_events = []
+    if primary:
+        related_events = [
+            _with_soft_logistics_bridge(item)
+            for item in db.list_hotspot_event_clips(
+                asset_id=primary["asset_id"], hotspot_id=primary["hotspot_id"],
+            )
+        ]
     # 批18：并入跨父 locked 事件（locked_events 可含不同父热点，之前被静默丢弃）。
     known_ids = {int(e.get("id") or 0) for e in related_events}
     for locked in locked_events:
@@ -5772,6 +5816,7 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
             target_duration_ms=60_000 - cta_duration_ms,
             owned_images=owned_images,
             allow_adaptation=True,
+            chain_mode=chain_mode,
         )
         planner_issue = ""
     except ValueError as exc:
@@ -5788,30 +5833,58 @@ def _chat_video_delivery_readiness(topic: str, locked_events: list[dict]) -> dic
         "image": image_count,
         "duration_ms": duration_ms,
     }
-    # Hard gate: locked Hook must yield at least one hotspot scene. Owned < 4
-    # is adaptation, not a block.
-    delivery_ready = bool(not planner_issue and hotspot_count >= 1)
-    if delivery_ready and not adaptation.get("adapted"):
-        message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
-        status = "delivery_ready"
-    elif delivery_ready:
-        message = (
-            f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
-            f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
-        )
-        status = "delivery_ready_adapted"
-    elif planner_issue:
-        message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
-        status = "needs_owned_media"
+    if chain_mode == "owned_only":
+        # This is an explicit no-Hook production mode: all factual claims must
+        # come from the topic copy and visible Buffalo-owned actions.
+        delivery_ready = bool(not planner_issue and scenes and hotspot_count == 0)
+        if delivery_ready and not adaptation.get("adapted"):
+            message = "未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出。"
+            status = "owned_only_ready"
+        elif delivery_ready:
+            message = (
+                f"未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出；当前自有动态 {owned_count} 段，"
+                "系统将按现有库存自适应规划。"
+            )
+            status = "owned_only_ready_adapted"
+        elif planner_issue:
+            message = "未匹配到热点 Hook，且当前 Buffalo 自有素材无法形成可渲染分镜。"
+            status = "needs_owned_media"
+        else:
+            message = "未匹配到热点 Hook，当前自有素材规划未产出可用分镜。"
+            status = "needs_owned_media"
     else:
-        message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
-        status = "needs_owned_media"
+        # Hard gate: locked Hook must yield at least one hotspot scene. Owned < 4
+        # is adaptation, not a block.
+        delivery_ready = bool(not planner_issue and hotspot_count >= 1)
+        if delivery_ready and not adaptation.get("adapted"):
+            message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
+            status = "delivery_ready"
+        elif delivery_ready:
+            message = (
+                f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
+                f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
+            )
+            status = "delivery_ready_adapted"
+        elif planner_issue:
+            message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
+            status = "needs_owned_media"
+        else:
+            message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
+            status = "needs_owned_media"
     result = {
         "status": status,
         "delivery_ready": delivery_ready,
         "coverage": coverage,
-        "required": {"hotspot_video": 1, "owned_video": "adaptive", "duration_ms": "50000–90000"},
-        "ideal": {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"},
+        "required": (
+            {"owned_video": 1, "duration_ms": "50000–90000"}
+            if chain_mode == "owned_only"
+            else {"hotspot_video": 1, "owned_video": "adaptive", "duration_ms": "50000–90000"}
+        ),
+        "ideal": (
+            {"owned_video": 4, "duration_ms": "50000–90000"}
+            if chain_mode == "owned_only"
+            else {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"}
+        ),
         "logistics_nodes": nodes,
         "message": message,
         "planner_issue": planner_issue or None,
@@ -6051,7 +6124,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
                 "ready"
                 if (
                     not generation_unavailable
-                    and (hotspot_retrieval or {}).get("status") == "matched"
+                    and (hotspot_retrieval or {}).get("status") in {"matched", "owned_fallback"}
                     and ((hotspot_retrieval or {}).get("video") or {}).get("status") == "ready"
                     and readiness.get("delivery_ready", True)
                 )
@@ -6103,8 +6176,23 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
                 })
     status = item.get("status") or "queued"
     payload = topic_hook_pipeline.discovery_payload(item, hooks=hooks)
+    if status in {"unmatched", "no_match", "failed"}:
+        fallback_readiness = _chat_video_delivery_readiness(
+            str(item.get("topic") or ""), [], chain_mode="owned_only",
+        )
+        payload["owned_fallback"] = {
+            "status": "owned_fallback" if fallback_readiness.get("delivery_ready") else "blocked",
+            "chain_mode": "owned_only",
+            "video": {
+                "status": "ready" if fallback_readiness.get("delivery_ready") else "blocked",
+                "chain_mode": "owned_only",
+                "hotspot_event_ids": [],
+                "delivery_readiness": fallback_readiness,
+            },
+            "message": fallback_readiness.get("message"),
+        }
     payload["recovery"] = (
-        "定向采集已完成，但没有合格物流 Hook；可查看失败原因后重试，不得用无关新闻成片"
+        "定向采集已完成，但没有合格物流 Hook；可直接切换 Buffalo 自有素材链路"
         if status in {"unmatched", "no_match", "failed"}
         else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
     )
@@ -6172,11 +6260,17 @@ def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:
 
 def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: dict) -> dict:
     """Persist the user request; planning begins only after the HTTP response."""
-    ordered_events = _validated_chat_video_events(body.hotspot_event_ids)
-    readiness = _chat_video_delivery_readiness(body.topic.strip(), ordered_events)
+    owned_only_fallback = body.chain_mode == "owned_only" and not body.hotspot_event_ids
+    ordered_events = [] if owned_only_fallback else _validated_chat_video_events(body.hotspot_event_ids)
+    readiness = _chat_video_delivery_readiness(
+        body.topic.strip(), ordered_events, chain_mode=body.chain_mode,
+    )
     if not readiness.get("delivery_ready"):
         raise HTTPException(409, {
-            "message": readiness.get("message") or "热点 Hook 未就绪，无法创建视频项目",
+            "message": readiness.get("message") or (
+                "当前 Buffalo 自有素材不足，无法创建直出视频项目"
+                if owned_only_fallback else "热点 Hook 未就绪，无法创建视频项目"
+            ),
             "delivery_readiness": readiness,
         })
     try:
@@ -6228,6 +6322,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "topic_brief_id": brief["id"],
         "matched_event_clip_ids": locked_hook_ids,
         "chain_mode": body.chain_mode,
+        "fallback_mode": "owned_only_no_matching_hook" if owned_only_fallback else None,
         "logistics_nodes": logistics_nodes,
         "platform": body.platform,
         "target_duration_ms": body.target_duration_ms,
@@ -6257,7 +6352,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         target_duration_ms=body.target_duration_ms,
         target_orientation="portrait",
     )
-    revision = db.create_video_project_revision(project["id"], {
+    revision_payload = {
         "source_type": "topic_brief_dual_library",
         "status": "awaiting_script",
         "title": brief_input,
@@ -6270,20 +6365,29 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "topic_brief_id": brief["id"],
             "logistics_topic": brief_input,
             "logistics_nodes": logistics_nodes,
-            "primary_event_id": int(ordered_events[0]["id"]),
             "approved_hook_event_ids": locked_hook_ids,
         },
         "scenes": [],
-    }, user["id"])
+    }
+    if ordered_events:
+        revision_payload["brief"]["primary_event_id"] = int(ordered_events[0]["id"])
+    revision = db.create_video_project_revision(project["id"], revision_payload, user["id"])
     job, created = db.create_or_get_video_generation_job(
         project["id"], revision["id"], user["id"], idempotency_key
     )
     if created:
         db.add_video_generation_event(job["id"], "job_created", "视频生成任务已创建，等待后台规划")
-        db.add_video_generation_event(
-            job["id"], "hooks_locked", "已锁定聊天匹配的热点 Hook",
-            {"hook_event_ids": locked_hook_ids, "topic_brief_id": brief["id"]},
-        )
+        if locked_hook_ids:
+            db.add_video_generation_event(
+                job["id"], "hooks_locked", "已锁定聊天匹配的热点 Hook",
+                {"hook_event_ids": locked_hook_ids, "topic_brief_id": brief["id"]},
+            )
+        else:
+            db.add_video_generation_event(
+                job["id"], "owned_only_fallback",
+                "未匹配到相关 Hook，已切换 Buffalo 自有素材直出",
+                {"topic_brief_id": brief["id"], "fallback_mode": "owned_only_no_matching_hook"},
+            )
     db.add_audit_log(
         user["id"], user["username"], "generate_chat_dual_library_video",
         target=project["id"],
@@ -6299,7 +6403,9 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "poll_url": f"/api/video-generation/jobs/{job['id']}",
         "status": "queued",
         "message": (
-            "视频项目已创建；将按现有库存自适应规划并后台生产"
+            "未匹配到相关 Hook，视频项目已创建；将按 Buffalo 自有素材自适应规划并后台生产"
+            if owned_only_fallback
+            else "视频项目已创建；将按现有库存自适应规划并后台生产"
             if adapted
             else "视频生成任务已创建，脚本规划和质检将在后台串行执行"
         ),

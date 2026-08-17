@@ -191,6 +191,10 @@ function autoResize(input){input.style.height='42px';input.style.height=Math.min
 function hotspotRetrievalMarkup(result, resultId){
   const retrieval=result?.hotspot_retrieval;
   if(!retrieval)return '';
+  if(retrieval.status==='owned_fallback'){
+    const readiness=retrieval.video?.delivery_readiness;
+    return `<div class="result-warning"><strong>未匹配到相关 Hook，已切换自有素材直出</strong><p>${escapeHtml(retrieval.message||readiness?.message||'本片不伪装成热点追更，也不使用无关新闻。')}</p><p>将围绕当前主题和 Buffalo 可见物流动作生成，可直接创建 60 秒视频项目。</p></div>`;
+  }
   if(retrieval.status==='matched'){
     const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
     const readiness=retrieval.video?.delivery_readiness;
@@ -336,7 +340,7 @@ function promptComparisonEvidence(){
 function resultCardMarkup(result,id){
   const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
   resultStore.set(id,result);
-  const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.result_state==='brand_assets_insufficient'||result?.result_state==='hook_selection_required';
+  const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.hotspot_retrieval?.status==='owned_fallback'||result?.result_state==='brand_assets_insufficient'||result?.result_state==='hook_selection_required';
   const degradedNotice=result?.degraded_from_comparison
     ?`<div class="result-warning"><strong>已自动切换科普视角</strong><p>对比评测需要真实报价/时效资料，已自动切换为科普视角生成视频；如手头有官方报价单或测试记录，可点『补充评测资料』生成正式对比评测。</p><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button></div>`
     :'';
@@ -370,14 +374,15 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
     return `<div class="douyin-video-entry"><p class="result-state-hint">对比框架证据不足，暂不可创建视频项目。</p></div>`;
   }
   const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
-  const videoReady=hotspotRetrieval?.status==='matched'&&hotspotRetrieval?.video?.status==='ready'&&(deliveryReadiness?.delivery_ready??true);
+  const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||hotspotRetrieval?.video?.chain_mode==='owned_only';
+  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&(deliveryReadiness?.delivery_ready??true);
   const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
   const scriptState=classifyDouyinScriptState({
     durationTarget: output.duration_target,
     scenes: output.scenes||[],
     videoWorkflow: {
       status: videoReady ? 'ready' : 'blocked',
-      block_reason: deliveryReadiness?.message || (hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过':'等待热点 Hook'),
+      block_reason: deliveryReadiness?.message || (ownedFallback?'Buffalo 自有素材直出规划未通过':(hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过':'等待热点 Hook')),
       target_duration_ms: 60000,
     },
     importedFromChat: true,
@@ -387,10 +392,12 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
       <a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center" href="/video-migrate.html?from=chat&result=${encodeURIComponent(resultId)}&index=${index}">打开历史草稿迁移</a></div>`;
   }
   if (!videoReady || !scriptState.canProduce) {
-    const reason=deliveryReadiness?.message || scriptState.blockReason || (hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过，暂不可创建':'等待热点 Hook 就绪后再创建视频项目');
+    const reason=deliveryReadiness?.message || scriptState.blockReason || (ownedFallback?'Buffalo 自有素材直出规划未通过，暂不可创建':(hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过，暂不可创建':'等待热点 Hook 就绪后再创建视频项目'));
     return `<div class="douyin-video-entry"><p class="result-state-hint">${escapeHtml(reason)}</p></div>`;
   }
-  const adaptHint=adapted
+  const adaptHint=ownedFallback
+    ? (deliveryReadiness?.message || '未匹配到相关 Hook，将只使用 Buffalo 自有素材直出')
+    : adapted
     ? (deliveryReadiness?.adaptation?.message || deliveryReadiness?.message || '将按现有库存自适应规划并继续出片')
     : '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划';
   const optionalAssets=adapted
@@ -431,6 +438,22 @@ async function scheduleDiscoveryPoll(resultId, requestId){
         return;
       }
       if(['unmatched','no_match','failed','cancelled_misrouted'].includes(payload.status)){
+        if(payload.status!=='cancelled_misrouted'&&payload.owned_fallback?.status==='owned_fallback'){
+          result.hotspot_retrieval={
+            ...(result.hotspot_retrieval||{}),
+            status:'owned_fallback',
+            discovery:payload,
+            message:payload.owned_fallback.message||'未匹配到相关 Hook，已切换 Buffalo 自有素材直出。',
+            video:payload.owned_fallback.video,
+          };
+          result.result_state='formal_content';
+          resultStore.set(resultId,result);
+          const card=document.getElementById(`result-${resultId}`);
+          if(card)card.outerHTML=resultCardMarkup(result,resultId);
+          clearInterval(discoveryPollers[resultId]);delete discoveryPollers[resultId];
+          showToast('没有匹配 Hook，已切换自有素材直出','info');
+          return;
+        }
         result.hotspot_retrieval={
           ...(result.hotspot_retrieval||{}),
           status:payload.status,
@@ -476,8 +499,9 @@ async function createSixtySecondVideoProject(resultId, index) {
     showToast('没有可创建的抖音内容', 'error');
     return;
   }
-  if (hotspotRetrieval?.status !== 'matched' || dualLibraryVideo?.status !== 'ready') {
-    showToast('正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目', 'error');
+  const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||dualLibraryVideo?.chain_mode==='owned_only';
+  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready') {
+    showToast(ownedFallback?'Buffalo 自有素材直出规划未就绪':'正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目', 'error');
     return;
   }
   if (dualLibraryVideo.delivery_readiness && !dualLibraryVideo.delivery_readiness.delivery_ready) {
@@ -503,10 +527,10 @@ async function createSixtySecondVideoProject(resultId, index) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         topic: hotspotRetrieval.topic || selectedTopic || output.title || '南非物流热点',
-        hotspot_event_ids: dualLibraryVideo.hotspot_event_ids,
+        hotspot_event_ids: dualLibraryVideo.hotspot_event_ids||[],
         platform: 'douyin',
         target_duration_ms: 60000,
-        chain_mode: 'hotspot_owned',
+        chain_mode: dualLibraryVideo.chain_mode || (ownedFallback ? 'owned_only' : 'hotspot_owned'),
         tts_provider: selection.tts_provider,
         voice: selection.voice,
         session_id: currentSessionId,

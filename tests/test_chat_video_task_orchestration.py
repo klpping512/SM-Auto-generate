@@ -77,3 +77,27 @@ def test_legacy_chat_video_task_endpoint_is_gone(tmp_db):
         headers=headers,
     )
     assert observed.status_code == 404
+
+
+def test_owned_only_fallback_can_create_project_without_hotspot_event(tmp_db, monkeypatch):
+    import json
+
+    app, client, headers, _event = _client_with_hook(tmp_db)
+    monkeypatch.setattr(
+        app,
+        "_chat_video_delivery_readiness",
+        lambda *_args, **_kwargs: {"status": "owned_only_ready", "delivery_ready": True},
+    )
+    response = client.post("/api/ai/chat/dual-library-video", headers=headers, json={
+        "topic": "Transnet 罢工影响评估",
+        "hotspot_event_ids": [], "chain_mode": "owned_only", "platform": "douyin",
+        "target_duration_ms": 60_000, "session_id": "owned-fallback-session",
+        "idempotency_key": "owned-fallback-idempotency",
+    })
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["created"] is True
+    snapshot = json.loads(payload["project"]["source_snapshot"])
+    assert snapshot["fallback_mode"] == "owned_only_no_matching_hook"
+    assert snapshot["matched_event_clip_ids"] == []

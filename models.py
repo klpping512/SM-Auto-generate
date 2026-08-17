@@ -171,7 +171,10 @@ class ChatRequest(BaseModel):
 class ChatDualLibraryVideoRequest(BaseModel):
     """Create a verified dual-library video from Hooks returned by AI chat."""
     topic: str = Field(..., min_length=1, max_length=300)
-    hotspot_event_ids: list[int] = Field(..., min_length=1, max_length=2)
+    # Empty only for the explicit owned_only fallback: when no relevant Hook
+    # exists, chat may still start a Buffalo-owned production without inventing
+    # or borrowing an unrelated hotspot event.
+    hotspot_event_ids: list[int] = Field(default_factory=list, max_length=2)
     platform: str = Field(default="douyin", max_length=32)
     target_duration_ms: int = Field(default=60_000, ge=50_000, le=90_000)
     chain_mode: str = Field(default="hotspot_owned", pattern=r"^(mix3|hotspot_owned|owned_only)$")
