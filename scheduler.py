@@ -395,24 +395,36 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             hotspot_fetcher.configured_video_channels(), query,
         )
         feeds = topic_hook_pipeline.prefer_official_feeds(hotspot_fetcher.configured_feeds(), query)
-        fetched = await hotspot_fetcher.fetch_hotspots(
-            static_dir=Path(__file__).with_name("static"),
-            created_by=admin["id"] if admin else None,
-            feeds=feeds,
-            video_channels=channels,
-            video_limit=min(
-                hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT,
-                int(query.get("max_candidates") or topic_hook_pipeline.autofetch_max_candidates()),
+        fetched = await asyncio.wait_for(
+            hotspot_fetcher.fetch_hotspots(
+                static_dir=Path(__file__).with_name("static"),
+                created_by=admin["id"] if admin else None,
+                feeds=feeds,
+                video_channels=channels,
+                video_limit=min(
+                    hotspot_video_sources.MAX_CHANNEL_VIDEO_LIMIT,
+                    int(query.get("max_candidates") or topic_hook_pipeline.autofetch_max_candidates()),
+                ),
             ),
+            timeout=topic_hook_pipeline.autofetch_timeout_seconds(),
         )
+        targeted_media_ids = [
+            int(item) for item in (fetched.get("media_ids") or [])
+            if str(item).isdigit()
+        ]
         for item in pending:
             db.update_hotspot_discovery_request(
                 int(item["id"]),
                 status="downloading",
                 stage="downloading",
-                candidate_count=int(fetched.get("video_media") or fetched.get("new") or 0),
+                candidate_count=len(targeted_media_ids),
             )
-        intake = await prewarm_authorized_hotspot_media()
+        # 定向补采只能物化本轮新发现的媒体，不能调用无参数全量预热，
+        # 否则一次聊天请求会越权启动三天/六小时全库补库。
+        intake = await asyncio.wait_for(
+            prewarm_authorized_hotspot_media(media_ids=targeted_media_ids),
+            timeout=topic_hook_pipeline.autofetch_timeout_seconds(),
+        )
         for item in pending:
             db.update_hotspot_discovery_request(int(item["id"]), status="analyzing", stage="analyzing")
         outcomes = []

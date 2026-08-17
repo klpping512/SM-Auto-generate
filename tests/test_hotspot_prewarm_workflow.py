@@ -155,6 +155,40 @@ async def test_targeted_prewarm_retries_legacy_prefiltered_media(tmp_db, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_targeted_discovery_only_materializes_fetched_media(tmp_db, monkeypatch):
+    import scheduler
+
+    admin_id = tmp_db.create_user("admin", "hash", "admin", "管理员")
+    tmp_db.enqueue_hotspot_discovery_request(
+        "Transnet又有动静！跨境卖家先别慌",
+        admin_id,
+        query={"entities": ["Transnet"], "source_classes": ["official_logistics"]},
+    )
+    monkeypatch.setenv("TOPIC_HOOK_AUTOFETCH_ENABLED", "1")
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_video_channels", lambda: [])
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_feeds", lambda: [])
+
+    async def fetch_hotspots(**_kwargs):
+        return {"new": 1, "video_media": 1, "media_ids": [41]}
+
+    seen = {}
+
+    async def targeted_prewarm(*, media_ids=None):
+        seen["media_ids"] = list(media_ids or [])
+        return {"status": "materialized", "summary": {"confirmed_hooks": 0}}
+
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "fetch_hotspots", fetch_hotspots)
+    monkeypatch.setattr(scheduler, "prewarm_authorized_hotspot_media", targeted_prewarm)
+
+    report = await scheduler.refresh_targeted_hotspot_hooks()
+
+    assert seen["media_ids"] == [41]
+    assert report["status"] == "completed"
+    row = tmp_db.list_hotspot_discovery_requests(limit=1)[0]
+    assert row["status"] == "no_match"
+
+
+@pytest.mark.asyncio
 async def test_targeted_prewarm_recurates_downloaded_mother_without_hooks(tmp_db, monkeypatch):
     import app
     import scheduler
@@ -419,10 +453,11 @@ async def test_chat_targeted_refresh_rescans_authorised_sources_before_hook_inta
 
     async def fetch_hotspots(**kwargs):
         captured["fetch"] = kwargs
-        return {"new": 2, "video_media": 3}
+        return {"new": 2, "video_media": 3, "media_ids": [media_id]}
 
-    async def prewarm():
+    async def prewarm(*, media_ids=None):
         captured["prewarm"] = True
+        captured["prewarm_media_ids"] = list(media_ids or [])
         return {"status": "materialized"}
 
     monkeypatch.setattr(scheduler.hotspot_fetcher, "fetch_hotspots", fetch_hotspots)
@@ -438,6 +473,7 @@ async def test_chat_targeted_refresh_rescans_authorised_sources_before_hook_inta
     assert "Transnet NPA" in names
     assert names.index("Transnet NPA") < names.index("eNCA")
     assert captured["prewarm"] is True
+    assert captured["prewarm_media_ids"] == [media_id]
 
 
 def test_intake_metadata_sample_round_robins_newest_records_without_keyword_ranking():

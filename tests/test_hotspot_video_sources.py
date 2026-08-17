@@ -239,6 +239,7 @@ def test_channel_discovery_reads_metadata_items_without_downloading(tmp_db):
     assert result["new"] == 5
     assert result["media"] == 5
     assert result["downloadable"] == 5
+    assert len(result["accepted_media_ids"]) == 5
     assert result["source_health"][0]["name"] == "YouTube · SA Today"
     assert result["source_health"][0]["status"] == "ok"
     assert result["source_health"][0]["items"] == 5

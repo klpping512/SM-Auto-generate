@@ -318,7 +318,7 @@ async def fetch_hotspots(
     video_runner=None,
 ) -> dict:
     feeds = configured_feeds() if feeds is None else feeds
-    result = {"feeds": len(feeds), "new": 0, "updated": 0, "assets": 0, "skipped": 0, "errors": [], "media_errors": [], "source_health": [], "packages": 0, "signals": 0, "media_candidates": 0}
+    result = {"feeds": len(feeds), "new": 0, "updated": 0, "assets": 0, "skipped": 0, "errors": [], "media_errors": [], "source_health": [], "packages": 0, "signals": 0, "media_candidates": 0, "media_ids": []}
     owns_client = client is None
     if client is None:
         _proxy = str(os.environ.get("SA_HOTSPOT_PROXY") or os.environ.get("SA_YOUTUBE_PROXY") or "").strip()
@@ -365,7 +365,7 @@ async def fetch_hotspots(
                         })
                     media_rights_tier, media_rights_note = configured_source_rights()
                     for candidate in hotspot_media.discover_media_candidates(article_response.text, final_url):
-                        db.upsert_hotspot_media({
+                        media_id, _media_created = db.upsert_hotspot_media({
                             **candidate,
                             "hotspot_id": hotspot_id,
                             "publisher": item["publisher"],
@@ -377,6 +377,8 @@ async def fetch_hotspots(
                             "download_status": "metadata_ready",
                             "processing_status": "not_started",
                         })
+                        if media_id:
+                            result["media_ids"].append(int(media_id))
                     if os.environ.get("HOTSPOT_INSPIRATION_SYNC_ENABLED", "0") == "1":
                         db.upsert_inspiration_item({
                             "source_type": "official_news",
@@ -493,6 +495,7 @@ async def fetch_hotspots(
                 "video_updated": video_result["updated"],
                 "video_media": video_result["media"],
             })
+            result["media_ids"].extend(int(item) for item in (video_result.get("accepted_media_ids") or []))
             result["errors"].extend(video_result["errors"])
             result["source_health"].extend(video_result["source_health"])
         signals = db.list_hotspot_signals(limit=500)
@@ -518,6 +521,7 @@ async def fetch_hotspots(
         result["packages"] = len(packages)
         result["signals"] = len(signals)
         result["media_candidates"] = len(db.list_hotspot_media(limit=500))
+        result["media_ids"] = sorted(set(result["media_ids"]))
     finally:
         if owns_client:
             await client.aclose()
