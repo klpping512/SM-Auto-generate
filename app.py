@@ -1557,6 +1557,38 @@ def _soft_bridge_context_allowed(event: dict) -> bool:
     return bool(_derive_soft_logistics_question(event))
 
 
+_HTTP_SOURCE_PREFIXES = ("http://", "https://")
+_EXTERNAL_ASSET_SOURCES = frozenset({"youtube", "tiktok", "remote", "hotspot", "official_news"})
+
+
+def _has_external_hotspot_provenance(event: dict) -> bool:
+    """Require a real external source before an event may become a Hook.
+
+    ``hotspot_event_clips`` are derived clips, not proof of origin by
+    themselves.  A legacy local Buffalo asset can otherwise be wrapped in a
+    ``generic_logistics`` event and later rendered as ``hotspot_evidence``.
+    Keep local files usable as owned proof, but require the parent hotspot or
+    asset provenance to carry an external URL before exposing the clip as a
+    Hook.
+    """
+    asset = db.get_asset(int(event.get("asset_id") or 0)) if event.get("asset_id") else None
+    parent = db.get_hotspot(int(event.get("hotspot_id") or 0)) if event.get("hotspot_id") else None
+    asset_source_url = str((asset or {}).get("source_url") or "").strip()
+    parent_source_url = str((parent or {}).get("source_url") or "").strip()
+    asset_source = str((asset or {}).get("source") or "").strip().casefold()
+    if asset_source in _EXTERNAL_ASSET_SOURCES:
+        return True
+    if asset_source_url.casefold().startswith(_HTTP_SOURCE_PREFIXES):
+        return True
+    if parent_source_url.casefold().startswith(_HTTP_SOURCE_PREFIXES):
+        # A locally materialized copy is acceptable only when it is explicitly
+        # linked back to the external parent.  An orphan local file with an
+        # invented/legacy hotspot row must not pass on the parent's name alone.
+        asset_hotspot_id = (asset or {}).get("hotspot_id")
+        return asset_hotspot_id is not None and int(asset_hotspot_id or 0) == int(event.get("hotspot_id") or 0)
+    return False
+
+
 def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
     """Only expose verified Hooks with a defensible logistics bridge and proxy.
 

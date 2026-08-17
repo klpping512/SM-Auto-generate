@@ -181,6 +181,68 @@ def test_soft_bridge_does_not_make_pure_sports_clip_renderable(tmp_db):
     assert app._is_confirmed_renderable_hotspot_hook(event) is False
 
 
+def test_local_buffalo_asset_cannot_be_promoted_to_a_hotspot_hook(tmp_db):
+    import app
+    import database as db
+
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "Legacy logistics opener", "summary": "",
+        "source_url": "", "publisher": "", "published_at": "",
+        "retrieved_at": "", "snapshot_sha256": "legacy-local-hook",
+    })
+    asset_id = db.create_asset({
+        "name": "Buffalo delivery truck", "filepath": "assets/buffalo-truck.mp4",
+        "file_type": "video", "category": "delivery", "duration": 17,
+        "size": 10, "source": "local_directory", "status": "active", "sha256": "b" * 64,
+    })
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 6_000,
+        "title_zh": "末端配送作业场景", "title_en": "Last-mile delivery operation scenes",
+        "review_status": "confirmed", "segments": [],
+        "evidence": {
+            "what_happened": "展示了末端配送与派送环节的典型作业画面。",
+            "hook_reason": "作为常青物流话题的通用开场画面。",
+            "logistics_question": "末端配送如何稳住最后三公里？",
+        },
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/local/event.mp4", None, "ready")
+
+    assert app._is_audited_hotspot_hook(event) is False
+    assert app._is_confirmed_renderable_hotspot_hook(event) is False
+
+
+def test_downloaded_hotspot_copy_passes_when_linked_to_external_parent(tmp_db):
+    import app
+    import database as db
+
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "External port update", "summary": "Cargo vehicles queue at the port",
+        "source_url": "https://news.example/port-update", "publisher": "SA Today",
+        "published_at": "2026-08-15T00:00:00Z", "retrieved_at": "2026-08-15T00:00:00Z",
+        "snapshot_sha256": "external-hotspot-source",
+    })
+    asset_id = db.create_asset({
+        "name": "Downloaded port footage", "filepath": "assets/hotspot-port.mp4",
+        "file_type": "video", "category": "other", "duration": 17,
+        "size": 10, "source": "local_directory", "status": "active", "sha256": "p" * 64,
+    })
+    db.update_asset_provenance(asset_id, "https://news.example/port-update/video", "", "SA Today", hotspot_id)
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 6_000,
+        "title_zh": "港口货车排队", "title_en": "Port truck queue",
+        "review_status": "confirmed", "segments": [],
+        "evidence": {
+            "what_happened": "货运卡车在港口入口排队。",
+            "hook_reason": "排队现场清晰可见。",
+            "logistics_question": "等待会先影响哪个订单节点？",
+        },
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/linked/event.mp4", None, "ready")
+    event = db.get_hotspot_event_clip(event["id"])
+
+    assert app._is_confirmed_renderable_hotspot_hook(event) is True
+
+
 def test_admin_can_delete_one_hook_without_deleting_mother_or_siblings(tmp_db):
     import database as db
 
