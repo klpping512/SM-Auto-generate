@@ -193,14 +193,21 @@ function hotspotRetrievalMarkup(result, resultId){
   if(!retrieval)return '';
   if(retrieval.status==='owned_fallback'){
     const readiness=retrieval.video?.delivery_readiness;
-    return `<div class="result-warning"><strong>未匹配到相关 Hook，已切换自有素材直出</strong><p>${escapeHtml(retrieval.message||readiness?.message||'本片不伪装成热点追更，也不使用无关新闻。')}</p><p>将围绕当前主题和 Buffalo 可见物流动作生成，可直接创建 60 秒视频项目。</p></div>`;
+    const ready=readiness?.delivery_ready===true;
+    const actionText=ready
+      ? '将围绕当前主题和 Buffalo 可见物流动作生成，可直接创建 60 秒视频项目。'
+      : (readiness?.message||'Buffalo 自有素材正式成片门禁尚未通过，暂不可创建视频项目。');
+    return `<div class="result-warning"><strong>未匹配到相关 Hook，已切换自有素材直出</strong><p>${escapeHtml(retrieval.message||readiness?.message||'本片不伪装成热点追更，也不使用无关新闻。')}</p><p>${escapeHtml(actionText)}</p></div>`;
   }
   if(retrieval.status==='matched'){
     const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
     const readiness=retrieval.video?.delivery_readiness;
     const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';
     const swap=producibleTopicsMarkup(result?.producible_topics||retrieval.producible_topics||[], resultId, true);
-    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>已绑定当前主题的匹配 Hook，可直接创建 60 秒视频项目。</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
+    const actionText=readiness?.delivery_ready===true
+      ? '已绑定当前主题的匹配 Hook，可直接创建 60 秒视频项目。'
+      : (readiness?.message||'已匹配 Hook，但正式成片素材门禁尚未通过，暂不可创建视频项目。');
+    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>${escapeHtml(actionText)}</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
   }
   if(retrieval.status==='not_requested')return '';
   if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor'||result?.result_state==='hook_selection_required')return '';
@@ -379,7 +386,9 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
   }
   const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||hotspotRetrieval?.video?.chain_mode==='owned_only';
-  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&(deliveryReadiness?.delivery_ready??true);
+  // Formal delivery readiness is mandatory.  An absent readiness object is
+  // unknown (typically an old/stale chat result), never an implicit approval.
+  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&deliveryReadiness?.delivery_ready===true;
   const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
   const scriptState=classifyDouyinScriptState({
     durationTarget: output.duration_target,
@@ -504,8 +513,8 @@ async function createSixtySecondVideoProject(resultId, index) {
     return;
   }
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||dualLibraryVideo?.chain_mode==='owned_only';
-  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready') {
-    showToast(ownedFallback?'Buffalo 自有素材直出规划未就绪':'正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目', 'error');
+  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready' || dualLibraryVideo?.delivery_readiness?.delivery_ready !== true) {
+    showToast(dualLibraryVideo?.delivery_readiness?.message || (ownedFallback?'Buffalo 自有素材直出规划未就绪':'正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目'), 'error');
     return;
   }
   if (dualLibraryVideo.delivery_readiness && !dualLibraryVideo.delivery_readiness.delivery_ready) {
