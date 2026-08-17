@@ -1942,7 +1942,7 @@ def _deterministic_hotspot_fact_line(what_happened: str) -> str:
     if any(term in text for term in ("积雪", "雪景", "大雪", "降雪", "暴雪")) and any(
         term in text for term in ("道路", "公路", "车辆", "交通")
     ):
-        return "现场可见积雪道路上车辆持续行驶，交通放慢但未中断。"
+        return "雪天公路上车辆通行放慢但未中断。"
     if any(term in text for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾")):
         return "现场可见火光和浓烟，设施周边出现燃烧风险。"
     if any(term in text for term in ("港口", "码头", "口岸", "边境")):

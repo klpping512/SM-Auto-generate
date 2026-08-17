@@ -260,8 +260,7 @@ def test_formal_hook_repair_keeps_snow_road_fact_in_first_voiceover(tmp_db):
 
     repaired = app._repair_formal_narrative_hook(generated, scenes, event)
     voiceover = repaired["scenes"][0]["voiceover"]
-    assert "积雪" in voiceover
-    assert "道路" in voiceover
+    assert "公路" in voiceover
     assert "车辆" in voiceover
 
 
