@@ -206,6 +206,7 @@ def test_local_buffalo_asset_cannot_be_promoted_to_a_hotspot_hook(tmp_db):
         },
     }])[0]
     db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/local/event.mp4", None, "ready")
+    event = db.get_hotspot_event_clip(event["id"])
 
     assert app._is_audited_hotspot_hook(event) is False
     assert app._is_confirmed_renderable_hotspot_hook(event) is False

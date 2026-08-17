@@ -1630,6 +1630,7 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
         str(event.get("review_status") or "") == "confirmed"
         and str(event.get("clip_status") or "") == "ready"
         and str(event.get("clip_path") or "").strip()
+        and _has_external_hotspot_provenance(event)
         and all(value and not value.casefold().startswith(placeholders) for value in values)
         and out_of_scope_allowed
         and not unsupported_cost_leap
@@ -1649,10 +1650,16 @@ def _is_audited_hotspot_hook(event: dict) -> bool:
     required = ("what_happened", "hook_reason")
     values = [str(evidence.get(key) or "").strip() for key in required]
     placeholders = ("未记录", "待确认", "unknown", "n/a")
+    # Database-backed event rows must carry external provenance even when they
+    # are only shown in the audited archive.  A few in-memory legacy callers
+    # provide no identity at all; keep those fact-only records available for
+    # diagnostics, while the renderable predicate remains strict.
+    has_identity = bool(event.get("asset_id") or event.get("hotspot_id"))
     return bool(
         str(event.get("review_status") or "") == "confirmed"
         and str(event.get("clip_status") or "") == "ready"
         and str(event.get("clip_path") or "").strip()
+        and (not has_identity or _has_external_hotspot_provenance(event))
         and all(value and not value.casefold().startswith(placeholders) for value in values)
     )
 
