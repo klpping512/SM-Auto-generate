@@ -5681,6 +5681,16 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
         node for node in candidates
         if node in {"清关", "末端", "配送", "仓储", "运输"}
     ]
+    # When there is no matched Hook, preserve the structured topic's logistics
+    # meaning instead of reducing an operator topic to a generic delivery line.
+    structured_nodes = set(
+        topic_hook_pipeline.structure_topic(topic).get("logistics_nodes") or []
+    )
+    structured_transport_context = structured_nodes & {"港口", "铁路", "集装箱", "跨境运输"}
+    if structured_transport_context:
+        nodes.append("运输")
+    if structured_transport_context and "仓储" in structured_nodes:
+        nodes.append("仓储")
     lowered_evidence = evidence_text.casefold()
     # The chat wording may only say “交期” or “运输”, while the approved Hook
     # curator has already verified a narrower logistics question such as
