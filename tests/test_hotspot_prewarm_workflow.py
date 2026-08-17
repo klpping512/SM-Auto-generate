@@ -167,9 +167,16 @@ async def test_targeted_discovery_only_materializes_fetched_media(tmp_db, monkey
     monkeypatch.setenv("TOPIC_HOOK_AUTOFETCH_ENABLED", "1")
     monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_video_channels", lambda: [])
     monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_feeds", lambda: [])
+    media_rows = {
+        media_id: {"id": media_id, "source_class": "general_news", "published_at": "2026-08-10"}
+        for media_id in range(1, 26)
+    }
+    media_rows[25]["source_class"] = "official_logistics"
+    media_rows[25]["published_at"] = "2026-08-01"
+    monkeypatch.setattr(scheduler.db, "get_hotspot_media", lambda media_id: media_rows.get(media_id))
 
     async def fetch_hotspots(**_kwargs):
-        return {"new": 1, "video_media": 1, "media_ids": [41]}
+        return {"new": 25, "video_media": 25, "media_ids": list(range(1, 26))}
 
     seen = {}
 
@@ -182,7 +189,8 @@ async def test_targeted_discovery_only_materializes_fetched_media(tmp_db, monkey
 
     report = await scheduler.refresh_targeted_hotspot_hooks()
 
-    assert seen["media_ids"] == [41]
+    assert len(seen["media_ids"]) == 20
+    assert seen["media_ids"][0] == 25
     assert report["status"] == "completed"
     row = tmp_db.list_hotspot_discovery_requests(limit=1)[0]
     assert row["status"] == "no_match"

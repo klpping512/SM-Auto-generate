@@ -408,10 +408,29 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             ),
             timeout=topic_hook_pipeline.autofetch_timeout_seconds(),
         )
-        targeted_media_ids = [
+        fetched_media_ids = [
             int(item) for item in (fetched.get("media_ids") or [])
             if str(item).isdigit()
         ]
+        target_limit = max(
+            1,
+            min(
+                int(query.get("max_candidates") or topic_hook_pipeline.autofetch_max_candidates()),
+                topic_hook_pipeline.autofetch_max_candidates(),
+            ),
+        )
+        targeted_media = [
+            db.get_hotspot_media(media_id)
+            for media_id in dict.fromkeys(fetched_media_ids)
+        ]
+        targeted_media = [item for item in targeted_media if item]
+        # 全局限制定向任务的媒体数；同一主题不得按“每信源 N 条”膨胀。
+        # 官方物流和物流新闻优先，综合新闻只用于填补剩余名额。
+        targeted_media.sort(key=lambda item: str(item.get("published_at") or ""), reverse=True)
+        targeted_media.sort(
+            key=lambda item: 0 if item.get("source_class") in {"official_logistics", "logistics_news"} else 1
+        )
+        targeted_media_ids = [int(item["id"]) for item in targeted_media[:target_limit]]
         for item in pending:
             db.update_hotspot_discovery_request(
                 int(item["id"]),
