@@ -25,6 +25,7 @@ BRAND_ENDCARD_SCENES = (
 )
 
 CONTEXT_IMAGE_DURATION_MS = 2_000
+MAX_CONTEXT_IMAGE_BRIDGES = 12
 
 
 def _usable_source_duration_ms(item: dict, *, start_ms: int | None = None, end_ms: int | None = None) -> int:
@@ -872,7 +873,7 @@ def plan_followup_scenes(
     # rhythm bridges only when the actual video slots cannot reach the formal
     # target; they never count as hotspot evidence or service-result proof.
     if allow_adaptation:
-        context_images = context_images[:6]
+        context_images = context_images[:MAX_CONTEXT_IMAGE_BRIDGES]
     else:
         context_images = []
 
@@ -915,7 +916,14 @@ def plan_followup_scenes(
     # The target passed by callers excludes the fixed 3s brand endcard, so this
     # comparison keeps the final 50–90s gate honest without padding good plans.
     video_only_duration_ms = sum(source_duration(slot) for slot in source_slots)
-    if video_only_duration_ms >= target_duration_ms:
+    if video_only_duration_ms < target_duration_ms:
+        duration_gap_ms = target_duration_ms - video_only_duration_ms
+        required_image_count = min(
+            MAX_CONTEXT_IMAGE_BRIDGES,
+            (duration_gap_ms + CONTEXT_IMAGE_DURATION_MS - 1) // CONTEXT_IMAGE_DURATION_MS,
+        )
+        context_images = context_images[:required_image_count]
+    else:
         context_images = []
 
     # 批18 动线化：不再"热点全堆开头"。

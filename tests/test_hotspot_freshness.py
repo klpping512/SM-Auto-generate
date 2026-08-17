@@ -211,8 +211,8 @@ def test_adaptive_image_bridges_fill_a_video_duration_gap_after_four_segments():
     images = [
         {"id": 100 + index, "asset_id": 100 + index, "file_type": "image",
          "asset_file_type": "image", "primary_category": "warehouse",
-         "source": "local_directory", "name": f"Buffalo 仓内图片 {index}"}
-        for index in range(1, 7)
+            "source": "local_directory", "name": f"Buffalo 仓内图片 {index}"}
+        for index in range(1, 13)
     ]
 
     scenes = plan_followup_scenes(
@@ -222,8 +222,9 @@ def test_adaptive_image_bridges_fill_a_video_duration_gap_after_four_segments():
 
     image_scenes = [scene for scene in scenes if scene["evidence_type"] == "image"]
     assert image_scenes
-    assert len(image_scenes) <= 6
+    assert len(image_scenes) <= 12
     assert all(int(scene["duration_ms"]) == 2_000 for scene in image_scenes)
+    assert sum(int(scene["duration_ms"]) for scene in scenes) >= 50_000
     assert sum(scene["scene_role"] == "hotspot_evidence" for scene in scenes) == 1
     assert all(scene["scene_role"] == "owned_context_image" for scene in image_scenes)
 
