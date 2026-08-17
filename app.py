@@ -1936,6 +1936,26 @@ def _compact_logistics_question(question: str) -> str:
     return text.rstrip("。！") + "？" if not text.endswith("？") else text
 
 
+def _deterministic_hotspot_fact_line(what_happened: str) -> str:
+    """Build a short factual opener when the planner omits the Hook fact."""
+    text = str(what_happened or "").strip()
+    if any(term in text for term in ("积雪", "雪景", "大雪", "降雪", "暴雪")) and any(
+        term in text for term in ("道路", "公路", "车辆", "交通")
+    ):
+        return "现场可见积雪道路上车辆持续行驶，交通放慢但未中断。"
+    if any(term in text for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾")):
+        return "现场可见火光和浓烟，设施周边出现燃烧风险。"
+    if any(term in text for term in ("港口", "码头", "口岸", "边境")):
+        if any(term in text for term in ("拥堵", "排队", "滞留", "卡车")):
+            return "口岸现场可见卡车排队，通行出现滞留。"
+        return "现场可见港口节点的车辆与货物正在周转。"
+    if any(term in text for term in ("拥堵", "排队", "滞留")):
+        return "现场可见车辆在道路上排队，通行出现滞留。"
+    if any(term in text for term in ("道路", "公路", "车辆", "卡车")):
+        return "现场可见道路上的车辆持续行驶，通行状态需要关注。"
+    return ""
+
+
 def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: dict | None) -> dict:
     """Keep the opening grounded in any verified Hook fact, not a fire-only lexicon."""
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
@@ -1961,7 +1981,10 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
         return repaired
     maximum = _scene_voiceover_max_chars(scenes[0])
     minimum = _scene_voiceover_min_chars(scenes[0])
-    candidates = [compact_question] if compact_question else []
+    deterministic_fact_line = _deterministic_hotspot_fact_line(what_happened)
+    candidates = [deterministic_fact_line] if deterministic_fact_line else []
+    if compact_question:
+        candidates.append(compact_question)
     candidates.append(what_happened)
     if any(term in what_happened for term in ("拥堵", "排队", "滞留")):
         candidates.append("现场可见人群聚集，车辆出现拥堵。")

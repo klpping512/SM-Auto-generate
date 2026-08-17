@@ -244,6 +244,27 @@ def test_downloaded_hotspot_copy_passes_when_linked_to_external_parent(tmp_db):
     assert app._is_confirmed_renderable_hotspot_hook(event) is True
 
 
+def test_formal_hook_repair_keeps_snow_road_fact_in_first_voiceover(tmp_db):
+    import app
+
+    generated = {"title": "南非道路天气变化", "angle": "物流风险", "scenes": [{
+        "voiceover": "先看现场。", "text_overlay": "先看现场",
+    }]}
+    scenes = [{
+        "scene_role": "hotspot_evidence", "evidence_type": "hotspot_video", "duration_ms": 12_000,
+    }]
+    event = {"evidence": {
+        "what_happened": "镜头记录下车辆在雪景覆盖的公路上持续行驶的状态，交通并未中断。",
+        "logistics_question": "天气变化时，运输通道要先核对什么？",
+    }}
+
+    repaired = app._repair_formal_narrative_hook(generated, scenes, event)
+    voiceover = repaired["scenes"][0]["voiceover"]
+    assert "积雪" in voiceover
+    assert "道路" in voiceover
+    assert "车辆" in voiceover
+
+
 def test_admin_can_delete_one_hook_without_deleting_mother_or_siblings(tmp_db):
     import database as db
 
