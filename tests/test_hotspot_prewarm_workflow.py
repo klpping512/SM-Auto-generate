@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -194,6 +195,30 @@ async def test_targeted_discovery_only_materializes_fetched_media(tmp_db, monkey
     assert report["status"] == "completed"
     row = tmp_db.list_hotspot_discovery_requests(limit=1)[0]
     assert row["status"] == "no_match"
+
+
+@pytest.mark.asyncio
+async def test_targeted_discovery_timeout_records_explicit_failure(tmp_db, monkeypatch):
+    import scheduler
+
+    admin_id = tmp_db.create_user("admin", "hash", "admin", "管理员")
+    tmp_db.enqueue_hotspot_discovery_request(
+        "Transnet又有动静！跨境卖家先别慌", admin_id,
+    )
+    monkeypatch.setenv("TOPIC_HOOK_AUTOFETCH_ENABLED", "1")
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_video_channels", lambda: [])
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "configured_feeds", lambda: [])
+
+    async def timeout_fetch(**_kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(scheduler.hotspot_fetcher, "fetch_hotspots", timeout_fetch)
+    report = await scheduler.refresh_targeted_hotspot_hooks()
+
+    assert report["status"] == "failed"
+    row = tmp_db.list_hotspot_discovery_requests(limit=1)[0]
+    assert row["status"] == "failed"
+    assert "超时" in row["error_message"]
 
 
 @pytest.mark.asyncio

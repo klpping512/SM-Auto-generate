@@ -431,6 +431,16 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             key=lambda item: 0 if item.get("source_class") in {"official_logistics", "logistics_news"} else 1
         )
         targeted_media_ids = [int(item["id"]) for item in targeted_media[:target_limit]]
+        excess_media_ids = [
+            int(item["id"]) for item in targeted_media[target_limit:]
+        ]
+        for media_id in excess_media_ids:
+            db.update_hotspot_media_state(
+                media_id,
+                download_status="prefiltered_skip",
+                processing_status="not_started",
+                progress_detail=f"定向主题候选超过上限 {target_limit}，保留为暂停候选；需人工重试才重新入队",
+            )
         for item in pending:
             db.update_hotspot_discovery_request(
                 int(item["id"]),
@@ -509,16 +519,29 @@ async def refresh_targeted_hotspot_hooks() -> dict:
             sum(1 for row in outcomes if row["status"] == "matched"),
         )
         return report
-    except Exception as exc:
-        logger.exception("聊天定向热点复扫失败")
+    except asyncio.TimeoutError:
+        timeout_seconds = topic_hook_pipeline.autofetch_timeout_seconds()
+        message = f"定向采集超时：超过 {timeout_seconds} 秒，未完成信源抓取或物化"
+        logger.warning(message)
         for item in pending:
             db.update_hotspot_discovery_request(
                 int(item["id"]),
                 status="failed",
                 stage="failed",
-                error_message=f"补采失败：{str(exc)[:180]}",
+                error_message=message,
             )
-        return {"status": "failed", "error": str(exc)[:300], "cancelled_misrouted": len(cancelled)}
+        return {"status": "failed", "error": message, "cancelled_misrouted": len(cancelled)}
+    except Exception as exc:
+        logger.exception("聊天定向热点复扫失败")
+        message = f"补采失败：{str(exc)[:180] or exc.__class__.__name__}"
+        for item in pending:
+            db.update_hotspot_discovery_request(
+                int(item["id"]),
+                status="failed",
+                stage="failed",
+                error_message=message,
+            )
+        return {"status": "failed", "error": message, "cancelled_misrouted": len(cancelled)}
 
 
 def _discovery_match_media_id_for_topic(topic: str) -> int | None:
