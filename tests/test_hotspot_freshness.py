@@ -198,7 +198,7 @@ def test_template_d_thin_inventory_image_bridges():
 
 
 def test_adaptive_image_bridges_fill_a_video_duration_gap_after_four_segments():
-    """视频段达到 4 段但仍不足正式时长时，图片仍可作为受控补位。"""
+    """视频段达到 4 段但仍不足正式时长时，图片只能在 10 镜头内受控补位。"""
     brief = {
         "hotspot_title": "港口作业变化", "hotspot_id": 10,
         "logistics_topic": "跨境履约准备", "hotspot_type": "infrastructure",
@@ -222,9 +222,12 @@ def test_adaptive_image_bridges_fill_a_video_duration_gap_after_four_segments():
 
     image_scenes = [scene for scene in scenes if scene["evidence_type"] == "image"]
     assert image_scenes
-    assert len(image_scenes) <= 12
+    assert len(image_scenes) <= 5
+    assert len(scenes) <= 10
     assert all(int(scene["duration_ms"]) == 2_000 for scene in image_scenes)
-    assert sum(int(scene["duration_ms"]) for scene in scenes) >= 50_000
+    # 四段实拍即使加满允许的图片桥也可能不足 50 秒；此时由正式时长
+    # 门禁明确拒绝，不能通过继续堆静态图伪造可交付成片。
+    assert sum(int(scene["duration_ms"]) for scene in scenes) < 50_000
     assert sum(scene["scene_role"] == "hotspot_evidence" for scene in scenes) == 1
     assert all(scene["scene_role"] == "owned_context_image" for scene in image_scenes)
 

@@ -311,6 +311,32 @@ def test_short_formal_voiceover_repair_uses_reviewed_copy_anchor_without_model_r
     assert fixed["scenes"][0]["voiceover"] == "工作人员正在仓内逐件核对包裹。"
 
 
+def test_repeated_formal_voiceovers_are_replaced_with_distinct_reviewed_actions():
+    import app
+
+    scenes = [
+        {"scene_role": "owned_proof", "primary_category": "warehouse", "duration_ms": 6_000},
+        {"scene_role": "owned_proof", "primary_category": "warehouse", "duration_ms": 6_000},
+        {"scene_role": "owned_context_image", "duration_ms": 2_000},
+        {"scene_role": "owned_context_image", "duration_ms": 2_000},
+    ]
+    generated = {"scenes": [
+        {"voiceover": "清关前的仓内备货：单证与货物正在备齐，等待海关放行。"},
+        {"voiceover": "清关前的仓内备货：单证与货物正在备齐，等待海关放行。"},
+        {"voiceover": "把仓内准备和外部变化分开看。"},
+        {"voiceover": "把仓内准备和外部变化分开看。"},
+    ]}
+
+    fixed = app._repair_repeated_formal_voiceovers(
+        generated, scenes, [12, 12, 6, 6], [20, 20, 7, 7],
+    )
+
+    lines = [scene["voiceover"] for scene in fixed["scenes"]]
+    assert len(set(map(app._formal_voiceover_key, lines))) == 4
+    assert "仓内工作人员逐件核对包裹。" in lines
+    assert lines[2] != lines[3]
+
+
 def test_formal_narrative_hook_repair_carries_generic_logistics_question_into_opening():
     import app
 

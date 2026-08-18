@@ -26,6 +26,9 @@ BRAND_ENDCARD_SCENES = (
 
 CONTEXT_IMAGE_DURATION_MS = 2_000
 MAX_CONTEXT_IMAGE_BRIDGES = 12
+# 正式脚本的质量门禁最多接受 10 个完整分镜（CTA 不计入规划槽位）。
+# 图片只能填补时长缺口，不能把分镜数量推过这个上限。
+FORMAL_MAX_SCENES = 10
 
 
 def _usable_source_duration_ms(item: dict, *, start_ms: int | None = None, end_ms: int | None = None) -> int:
@@ -949,12 +952,21 @@ def plan_followup_scenes(
     #   4) 其余热点不再强制进片头（避免新闻纪录片感）；用户锁定的跨父事件保底进片。
     mid_roll_clip_id: int | None = None
     slots.extend(hotspot_slots[:1])
+    planned_hotspot_count = min(1, len(hotspot_slots))
     if hotspot_slots:
         primary_asset = _slot_asset(hotspot_slots[0])
-        slots.extend([item for item in hotspot_slots[1:] if _slot_asset(item) == primary_asset][:1])
+        same_source = [item for item in hotspot_slots[1:] if _slot_asset(item) == primary_asset][:1]
+        slots.extend(same_source)
+        planned_hotspot_count += len(same_source)
         cross_parent = next((item for item in hotspot_slots[1:] if _slot_asset(item) != primary_asset), None)
         if cross_parent is not None:
             mid_roll_clip_id = int(_slot_event(cross_parent).get("id") or 0)
+            planned_hotspot_count += 1
+    # 图片桥接不能把正式规划推到 10 个分镜以上。此前先按时长补图、
+    # 再把异源热点插入中段，导致 1 个 Hook + 7 个自有视频 + 4 张图
+    # 变成 12 个分镜，最终必然在 script_quality_check 被拒绝。
+    max_context_images = max(0, FORMAL_MAX_SCENES - planned_hotspot_count - len(owned_slots))
+    context_images = context_images[:max_context_images]
     image_index = 0
     for position, item in enumerate(owned_slots):
         slots.append(item)

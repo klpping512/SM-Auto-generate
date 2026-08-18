@@ -2496,6 +2496,99 @@ def _repair_short_formal_voiceovers(
     return repaired
 
 
+def _formal_voiceover_key(value: object) -> str:
+    """Normalize a narration line for the formal anti-template gate."""
+    return "".join(char for char in str(value or "") if char.isalnum())
+
+
+def _repair_repeated_formal_voiceovers(
+    generated: dict,
+    scenes: list[dict],
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+) -> dict:
+    """Give repeated model lines distinct, reviewed, visible-action wording.
+
+    The model is allowed to describe several warehouse clips, but it cannot
+    reuse one template sentence for all of them. Candidates stay within the
+    scene's measured character window and describe only the already reviewed
+    category/action; this is a copy repair, not a new service claim.
+    """
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if len(repaired["scenes"]) != len(scenes):
+        raise ValueError("内容规划模型返回的分镜数量无法进行旁白去重")
+
+    category_candidates = {
+        "warehouse": (
+            "仓内工作人员逐件核对包裹。",
+            "货物进入仓内后按序分拣。",
+            "包裹在仓内依次完成核对。",
+            "分拣准备按流程逐项展开。",
+            "仓内货物逐件完成分拣准备。",
+            "仓内作业按区域逐步展开。",
+            "每件货物先核对再分拣。",
+        ),
+        "staff": (
+            "工作人员正在现场协同作业。",
+            "现场人员按流程核对作业。",
+            "工作人员逐项确认现场动作。",
+            "现场协同围绕货物逐步展开。",
+        ),
+        "facility": (
+            "仓内设备按区域配合作业。",
+            "设施现场保持分区作业。",
+            "设备动作围绕货物逐项展开。",
+            "现场设备配合分拣准备。",
+        ),
+        "delivery": (
+            "配送车辆正在按动线作业。",
+            "车辆出发前先按流程核对。",
+            "配送交接按现场动线展开。",
+            "车辆作业围绕交接逐步展开。",
+        ),
+    }
+    image_candidates = (
+        "先看外部变化。",
+        "再看仓内准备。",
+        "画面切入仓内。",
+        "节奏转入仓内。",
+        "外部变化暂作背景。",
+    )
+    seen: set[str] = set()
+    for index, (item, scene) in enumerate(zip(repaired["scenes"], scenes)):
+        voiceover = str(item.get("voiceover") or "").strip()
+        current_key = _formal_voiceover_key(voiceover)
+        if current_key and current_key not in seen:
+            seen.add(current_key)
+            continue
+        minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+        maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        role = str(scene.get("scene_role") or "")
+        category = str(scene.get("primary_category") or "").casefold()
+        candidates = list(image_candidates) if role == "owned_context_image" else list(
+            category_candidates.get(category, ("镜头中的作业动作清晰可见。",))
+        )
+        # 已审核的 copy_anchor 优先保留，但只有不重复且在时长窗口内才可用。
+        anchor = str(scene.get("copy_anchor") or "").strip()
+        if anchor:
+            candidates.insert(0, anchor)
+        replacement = next(
+            (
+                candidate for candidate in candidates
+                if _formal_voiceover_key(candidate) not in seen
+                and (minimum is None or len("".join(candidate.split())) >= minimum)
+                and (maximum is None or len("".join(candidate.split())) <= maximum)
+            ),
+            None,
+        )
+        if replacement is None:
+            raise ValueError(f"内容规划模型第 {index + 1} 个分镜无法在时长窗口内去除重复旁白")
+        item["voiceover"] = replacement
+        item["text_overlay"] = replacement.rstrip("。")[:24]
+        seen.add(_formal_voiceover_key(replacement))
+    return repaired
+
+
 def _compact_long_formal_voiceovers(generated: dict, voiceover_limits: list[int | None]) -> dict:
     """Trim an otherwise-valid model line to its locked real-video beat.
 
@@ -3425,6 +3518,9 @@ async def _generate_topic_brief_video(
     generated = _compact_long_formal_voiceovers(generated, voiceover_limits)
     generated = _repair_short_formal_voiceovers(
         generated, scenes, voiceover_minimums, voiceover_limits, event,
+    )
+    generated = _repair_repeated_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits,
     )
     try:
         _validate_formal_copy_specificity(generated)
