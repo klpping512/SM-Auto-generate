@@ -175,6 +175,56 @@ def test_risk_windows_expand_merge_and_clamp():
     assert windows == [{"start_second": 0.0, "end_second": 2.5}]
 
 
+def test_merge_reports_bounds_combined_model_advice():
+    from video_quality.service import _merge_reports
+    from video_quality.schemas import EvaluationIssue
+
+    global_report = _report(82, False, "high")
+    focused_report = _report(78, False, "high")
+    global_report.issues = [
+        EvaluationIssue.model_validate({
+            "start_second": float(index),
+            "end_second": float(index) + 0.5,
+            "severity": "high",
+            "category": f"global-{index}",
+            "description": "全局检查问题",
+            "evidence_frame": "FRAME_0001@1.000s",
+            "suggested_fix": "替换为匹配素材",
+        })
+        for index in range(3)
+    ]
+    focused_report.issues = [
+        EvaluationIssue.model_validate({
+            "start_second": float(index),
+            "end_second": float(index) + 0.5,
+            "severity": "medium",
+            "category": f"focused-{index}",
+            "description": "局部检查问题",
+            "evidence_frame": "FRAME_0001@1.000s",
+            "suggested_fix": "替换为匹配素材",
+        })
+        for index in range(3)
+    ]
+    focused_report.regeneration.storyboard_changes = [
+        {"change": index} for index in range(6)
+    ]
+    focused_report.regeneration.segments_to_regenerate = [
+        {"start_second": index, "end_second": index + 0.5}
+        for index in range(6)
+    ]
+    focused_report.regeneration.parameter_changes = {
+        f"parameter-{index}": index for index in range(6)
+    }
+
+    merged = _merge_reports(global_report, focused_report)
+
+    assert len(merged.issues) == 3
+    assert all(issue.severity == "high" for issue in merged.issues)
+    assert len(merged.regeneration.storyboard_changes) == 3
+    assert len(merged.regeneration.segments_to_regenerate) == 3
+    assert len(merged.regeneration.parameter_changes) == 5
+
+
 def test_regeneration_is_manual_by_default():
     from video_quality.regeneration_controller import decide_regeneration
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import mimetypes
 import re
 from pathlib import Path
@@ -17,6 +18,8 @@ from .schemas import VideoEvaluationReport
 
 # 质检项目增加终片重复源/转场时间线门禁后变更版本，避免复用旧结论。
 PROMPT_VERSION = "qwen-video-quality-v10"
+
+logger = logging.getLogger(__name__)
 
 
 class EvaluationResponseError(RuntimeError):
@@ -108,6 +111,93 @@ _BANNED_REMEDIATION_TERMS = ("地图", "信息图", "流程图", "PPT", "文字�
 
 def _scene_count(storyboard) -> int:
     return len(storyboard.get("scenes") or []) if isinstance(storyboard, dict) else 0
+
+
+_MAX_EVALUATION_ITEMS = 3
+_MAX_PARAMETER_CHANGES = 5
+_SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _bounded_model_items(value, limit: int, *, prioritize_severity: bool = False):
+    """Keep model output within the public schema without changing its meaning.
+
+    The model is instructed to return bounded arrays, but it can still emit a
+    longer list. Selecting the most important entries at this boundary avoids
+    converting a usable quality report into ``evaluation_status=unavailable``.
+    Direct schema validation remains strict for all other callers.
+    """
+    if not isinstance(value, list) or len(value) <= limit:
+        return value
+    indexed = list(enumerate(value))
+    if prioritize_severity:
+        indexed.sort(key=lambda pair: (
+            -_SEVERITY_RANK.get(
+                str(pair[1].get("severity", "")).casefold()
+                if isinstance(pair[1], dict)
+                else "",
+                0,
+            ),
+            -int(bool(pair[1].get("evidence_frame")))
+            if isinstance(pair[1], dict)
+            else 0,
+            pair[0],
+        ))
+        selected_indexes = {index for index, _ in indexed[:limit]}
+        return [item for index, item in enumerate(value) if index in selected_indexes]
+    return value[:limit]
+
+
+def normalize_evaluation_payload(
+    payload: dict,
+    *,
+    job_id: str = "",
+    review_stage: str = "",
+) -> dict:
+    """Normalize bounded arrays emitted by the model before strict validation.
+
+    This is intentionally narrower than a schema relaxation: it only handles
+    overlong arrays at the model boundary. Invalid item shapes, evidence,
+    time windows, banned remediation, and the actual score/pass decision still
+    go through the existing validators.
+    """
+    normalized = dict(payload)
+    overflow: dict[str, int] = {}
+
+    for field, prioritize in (
+        ("technical_issues", True),
+        ("issues", True),
+    ):
+        value = normalized.get(field)
+        if isinstance(value, list) and len(value) > _MAX_EVALUATION_ITEMS:
+            overflow[field] = len(value)
+            normalized[field] = _bounded_model_items(
+                value, _MAX_EVALUATION_ITEMS, prioritize_severity=prioritize,
+            )
+
+    regeneration = normalized.get("regeneration")
+    if isinstance(regeneration, dict):
+        regeneration = dict(regeneration)
+        normalized["regeneration"] = regeneration
+        for field in ("storyboard_changes", "segments_to_regenerate"):
+            value = regeneration.get(field)
+            if isinstance(value, list) and len(value) > _MAX_EVALUATION_ITEMS:
+                overflow[f"regeneration.{field}"] = len(value)
+                regeneration[field] = value[:_MAX_EVALUATION_ITEMS]
+        parameter_changes = regeneration.get("parameter_changes")
+        if isinstance(parameter_changes, dict) and len(parameter_changes) > _MAX_PARAMETER_CHANGES:
+            overflow["regeneration.parameter_changes"] = len(parameter_changes)
+            regeneration["parameter_changes"] = dict(
+                list(parameter_changes.items())[:_MAX_PARAMETER_CHANGES]
+            )
+
+    if overflow:
+        logger.warning(
+            "质检模型输出超过有界契约，已在严格校验前归一化: job_id=%s stage=%s overflow=%s",
+            job_id or "unknown",
+            review_stage or "unknown",
+            overflow,
+        )
+    return normalized
 
 
 def _renderer_subtitle_sync_verified(storyboard) -> bool:
@@ -715,6 +805,9 @@ async def evaluate_video(
                 "frame_index": frame_index,
                 "transcript_status": transcript_status,
             })
+            payload = normalize_evaluation_payload(
+                payload, job_id=job_id, review_stage=review_stage,
+            )
             report = VideoEvaluationReport.model_validate(payload)
             duration_value = (technical_report.get("metadata") or {}).get("duration_seconds")
             last_report = report

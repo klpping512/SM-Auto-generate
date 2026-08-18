@@ -75,6 +75,64 @@ def test_evaluator_prompt_keeps_context_images_and_brand_cta_out_of_freeze_penal
     assert "单张关键帧不能证明冻结" in SYSTEM_PROMPT
 
 
+@pytest.mark.asyncio
+async def test_model_overflow_is_bounded_before_strict_validation(tmp_path):
+    from video_quality.video_evaluator import evaluate_video
+
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"jpeg")
+    payload = _report()
+    payload["technical_issues"] = [
+        {"category": f"technical-{index}", "description": "机器候选"}
+        for index in range(6)
+    ]
+    payload["issues"] = [
+        {
+            "start_second": 1.2,
+            "end_second": 1.8,
+            "severity": severity,
+            "category": f"content-{index}",
+            "description": f"有证据的问题 {index}",
+            "evidence_frame": "FRAME_0001@1.500s",
+            "suggested_fix": "替换为更匹配的真实素材",
+        }
+        for index, severity in enumerate(("low", "medium", "high", "high", "medium", "high"))
+    ]
+    payload["regeneration"]["storyboard_changes"] = [
+        {"change": index} for index in range(6)
+    ]
+    payload["regeneration"]["segments_to_regenerate"] = [
+        {"start_second": 1.0, "end_second": 1.5 + index / 10}
+        for index in range(6)
+    ]
+    calls = 0
+
+    async def caller(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"content": json.dumps(payload, ensure_ascii=False), "usage": {}}
+
+    report = await evaluate_video(
+        job_id="evaluation-test-bounded-overflow",
+        original_prompt="南非仓库履约",
+        storyboard={"scenes": []},
+        target_platform="抖音",
+        technical_report={"metadata": {"duration_seconds": 3}, "issues": []},
+        transcript_status="storyboard",
+        transcript_segments=[],
+        frames=[{"path": str(image), "timestamp_seconds": 1.5, "reason": "keyframe"}],
+        reference_images=[],
+        caller=caller,
+    )
+
+    assert calls == 1
+    assert len(report.technical_issues) == 3
+    assert len(report.issues) == 3
+    assert [issue.severity for issue in report.issues] == ["high", "high", "high"]
+    assert len(report.regeneration.storyboard_changes) == 3
+    assert len(report.regeneration.segments_to_regenerate) == 3
+
+
 def test_freeze_claim_without_technical_candidate_is_retried():
     from video_quality.video_evaluator import _validate_evidence
     from video_quality.schemas import VideoEvaluationReport

@@ -9,7 +9,7 @@ from uuid import uuid4
 from .frame_extractor import extract_frames
 from .regeneration_controller import decide_regeneration
 from .schemas import VideoEvaluationReport, VideoQualityInput
-from .video_evaluator import evaluate_video
+from .video_evaluator import evaluate_video, normalize_evaluation_payload
 from .video_preprocessor import PreprocessedVideo, preprocess_video, write_json
 
 
@@ -71,7 +71,9 @@ def _merge_reports(
             payload["regeneration"][field] += focused_regeneration[field]
         payload["regeneration"]["parameter_changes"].update(focused_regeneration["parameter_changes"])
         payload["regeneration"]["required"] = True
-    return VideoEvaluationReport.model_validate(payload)
+    return VideoEvaluationReport.model_validate(
+        normalize_evaluation_payload(payload, review_stage="focused-merge")
+    )
 
 
 async def run_quality_mvp(
