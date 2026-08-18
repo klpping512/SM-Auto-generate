@@ -337,6 +337,23 @@ def test_repeated_formal_voiceovers_are_replaced_with_distinct_reviewed_actions(
     assert lines[2] != lines[3]
 
 
+def test_repeated_formal_warehouse_voiceovers_cover_seven_owned_beats():
+    import app
+
+    scenes = [
+        {"scene_role": "owned_proof", "primary_category": "warehouse", "duration_ms": 6_000}
+        for _ in range(7)
+    ]
+    repeated = "清关前的仓内备货：单证与货物正在备齐，等待海关放行。"
+    fixed = app._repair_repeated_formal_voiceovers(
+        {"scenes": [{"voiceover": repeated} for _ in scenes]},
+        scenes, [12] * len(scenes), [20] * len(scenes),
+    )
+
+    lines = [scene["voiceover"] for scene in fixed["scenes"]]
+    assert len(set(map(app._formal_voiceover_key, lines))) == 7
+
+
 def test_formal_narrative_hook_repair_carries_generic_logistics_question_into_opening():
     import app
 
