@@ -200,14 +200,16 @@ function hotspotRetrievalMarkup(result, resultId){
     return `<div class="result-warning"><strong>未匹配到相关 Hook，已切换自有素材直出</strong><p>${escapeHtml(retrieval.message||readiness?.message||'本片不伪装成热点追更，也不使用无关新闻。')}</p><p>${escapeHtml(actionText)}</p></div>`;
   }
   if(retrieval.status==='matched'){
-    const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||'热点 Hook')}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
+    const genericHook=retrieval.hook_kind==='generic_logistics';
+    const hookLabel=genericHook?'常青物流 Hook':'热点 Hook';
+    const hooks=(retrieval.hooks||[]).map(h=>`<li>${escapeHtml(h.title||hookLabel)}：${escapeHtml(h.description||'已确认现场片段')}</li>`).join('');
     const readiness=retrieval.video?.delivery_readiness;
     const readinessText=readiness?.message?`<p>${escapeHtml(readiness.message)}</p>`:'';
     const swap=producibleTopicsMarkup(result?.producible_topics||retrieval.producible_topics||[], resultId, true);
     const actionText=readiness?.delivery_ready===true
-      ? '已绑定当前主题的匹配 Hook，可直接创建 60 秒视频项目。'
+      ? `已绑定当前主题的${hookLabel}，可直接创建 60 秒视频项目。`
       : (readiness?.message||'已匹配 Hook，但正式成片素材门禁尚未通过，暂不可创建视频项目。');
-    return `<div class="result-warning"><strong>热点 Hook 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>${escapeHtml(actionText)}</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
+    return `<div class="result-warning"><strong>${hookLabel} 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>${escapeHtml(actionText)}</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
   }
   if(retrieval.status==='not_requested')return '';
   if(retrieval.failure_class==='no_event_anchor'||result?.result_state==='topic_needs_event_anchor'||result?.result_state==='hook_selection_required')return '';
@@ -477,7 +479,9 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
     ? (deliveryReadiness?.message || '未匹配到相关 Hook，将只使用 Buffalo 自有素材直出')
     : adapted
     ? (deliveryReadiness?.adaptation?.message || deliveryReadiness?.message || '将按现有库存自适应规划并继续出片')
-    : '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划';
+    : (hotspotRetrieval?.hook_kind==='generic_logistics'
+      ? '主题结论已生成 · 常青物流 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划'
+      : '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划');
   const optionalAssets=adapted
     ? `<a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center;margin-left:8px" href="/assets.html">可选：补充素材</a>`
     : '';

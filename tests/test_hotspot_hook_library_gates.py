@@ -212,6 +212,41 @@ def test_local_buffalo_asset_cannot_be_promoted_to_a_hotspot_hook(tmp_db):
     assert app._is_confirmed_renderable_hotspot_hook(event) is False
 
 
+def test_confirmed_generic_logistics_opener_is_renderable_without_news_provenance(tmp_db):
+    import app
+    import database as db
+
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "Buffalo evergreen warehouse opener", "summary": "",
+        "source_url": "", "publisher": "", "published_at": "",
+        "retrieved_at": "", "snapshot_sha256": "generic-local-opener",
+    })
+    asset_id = db.create_asset({
+        "name": "Buffalo 常青仓储开场", "filepath": "assets/generic-warehouse.mp4",
+        "file_type": "video", "category": "warehouse", "duration": 7,
+        "size": 10, "source": "local_directory", "status": "active", "sha256": "g" * 64,
+    })
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 7_000,
+        "title_zh": "仓库仓储作业场景", "title_en": "Warehouse storage and sorting scenes",
+        "hook_kind": "generic_logistics", "logistics_scenes": ["warehouse"],
+        "review_status": "confirmed", "segments": [],
+        "evidence": {
+            "what_happened": "展示了仓库内仓储、分拣与货架作业的典型画面。",
+            "hook_reason": "作为常青物流话题的通用开场画面。",
+            "logistics_question": "海外仓与本地仓的仓储、分拣环节如何运作？",
+            "event_identity": "generic-warehouse-local",
+        },
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/generic/event.mp4", None, "ready")
+    event = db.get_hotspot_event_clip(event["id"])
+
+    assert app._is_confirmed_renderable_hotspot_hook(event) is True
+    # The audited archive remains the external/fact-backed library; this local
+    # generic opener is renderable only in the evergreen Hook lane.
+    assert app._is_audited_hotspot_hook(event) is False
+
+
 def test_downloaded_hotspot_copy_passes_when_linked_to_external_parent(tmp_db):
     import app
     import database as db

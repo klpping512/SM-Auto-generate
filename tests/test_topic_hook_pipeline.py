@@ -197,6 +197,52 @@ def test_chat_transnet_topic_falls_back_to_owned_only_when_inventory_is_ready(tm
     assert tmp_db.list_hotspot_discovery_requests() == []
 
 
+def test_chat_evergreen_topic_binds_confirmed_generic_logistics_hook(tmp_db, monkeypatch):
+    import asyncio
+    import app
+    import database as db
+
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "Buffalo evergreen warehouse opener", "summary": "",
+        "source_url": "", "publisher": "", "published_at": "",
+        "retrieved_at": "", "snapshot_sha256": "generic-chat-opener",
+    })
+    asset_id = db.create_asset({
+        "name": "Buffalo 常青仓储开场", "filepath": "assets/generic-chat-opener.mp4",
+        "file_type": "video", "category": "warehouse", "duration": 7,
+        "size": 10, "source": "local_directory", "status": "active", "sha256": "h" * 64,
+    })
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 7_000,
+        "title_zh": "仓库仓储作业场景", "title_en": "Warehouse storage and sorting scenes",
+        "hook_kind": "generic_logistics", "logistics_scenes": ["warehouse"],
+        "review_status": "confirmed", "segments": [],
+        "evidence": {
+            "what_happened": "展示了仓库内仓储、分拣与货架作业的典型画面。",
+            "hook_reason": "作为常青物流话题的通用开场画面。",
+            "logistics_question": "海外仓与本地仓的仓储、分拣环节如何运作？",
+            "event_identity": "generic-warehouse-chat",
+        },
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/generic-chat/event.mp4", None, "ready")
+
+    async def choose_first(_brief, candidates, *_args, **_kwargs):
+        return candidates[:1], {"used": False, "fallback": "test_first_generic"}
+
+    monkeypatch.setattr(app, "_model_decide_marketing_hooks", choose_first)
+    monkeypatch.setattr(app, "_chat_video_delivery_readiness", lambda *_args, **_kwargs: {
+        "status": "delivery_ready", "delivery_ready": True,
+    })
+
+    result = asyncio.run(app._retrieve_confirmed_chat_hooks(
+        "卖家出海实战经验分享", 1, content_mode="evergreen",
+    ))
+
+    assert result["status"] == "matched"
+    assert result["hook_kind"] == "generic_logistics"
+    assert result["video"]["hotspot_event_ids"] == [event["id"]]
+
+
 def test_chat_transnet_ready_hook_binds_without_discovery(tmp_db, monkeypatch):
     import asyncio
     import app

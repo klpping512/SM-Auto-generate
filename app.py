@@ -1668,6 +1668,33 @@ def _is_legacy_ready_hotspot_hook(event: dict) -> bool:
     )
 
 
+def _is_confirmed_generic_logistics_hook(event: dict) -> bool:
+    """Allow reviewed evergreen logistics openers without calling them news.
+
+    Generic logistics Hooks are Buffalo-owned operational openers materialized
+    into the Hook library for evergreen topics.  They intentionally have no
+    external news provenance.  Keep their gate separate from timely events so
+    this exception cannot promote an arbitrary local asset into a news Hook.
+    """
+    if str(event.get("hook_kind") or "") != "generic_logistics":
+        return False
+    evidence = event.get("evidence") or {}
+    required = ("what_happened", "hook_reason", "logistics_question")
+    values = [str(evidence.get(key) or "").strip() for key in required]
+    placeholders = ("未记录", "待确认", "unknown", "n/a")
+    identity = str(evidence.get("event_identity") or "").strip().casefold()
+    scenes = event.get("logistics_scenes") or []
+    return bool(
+        identity.startswith("generic-")
+        and str(event.get("review_status") or "") == "confirmed"
+        and str(event.get("clip_status") or "") == "ready"
+        and str(event.get("clip_path") or "").strip()
+        and scenes
+        and hotspot_intake_policy.has_real_logistics_scene(event)
+        and all(value and not value.casefold().startswith(placeholders) for value in values)
+    )
+
+
 def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
     """Only expose verified Hooks with a defensible logistics bridge and proxy.
 
@@ -1676,6 +1703,8 @@ def _is_confirmed_renderable_hotspot_hook(event: dict) -> bool:
     records still need the cautious in-memory bridge below; pure politics,
     sports, interviews and public-affairs footage remain audited archive items.
     """
+    if _is_confirmed_generic_logistics_hook(event):
+        return True
     if _is_legacy_ready_hotspot_hook(event):
         return True
     candidate = _with_soft_logistics_bridge(event)
@@ -5905,6 +5934,8 @@ async def _retrieve_confirmed_chat_hooks(
                 "producible_topics": [] if not use_generic else producible,
                 "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
                 "message": (
+                    "已自动锁定常青物流 Hook（Buffalo 可见仓配开场，非时效新闻）；可直接创建 60 秒视频项目。"
+                    if hook_kind == "generic_logistics" else
                     "已自动锁定热点 Hook；可在卡片中更换，或直接创建 60 秒视频项目。"
                     if use_generic else
                     (
