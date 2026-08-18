@@ -920,8 +920,12 @@ def _scene_command(ffmpeg: str, ffprobe: str, source: Path, is_video: bool,
         command += ["-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", f"{audio_index}:a"]
     preset = "ultrafast" if fast else RENDER_FINAL_PRESET
     crf_args = ["-crf", "28"] if fast else ["-crf", RENDER_INTERMEDIATE_CRF]
+    # Every scene must expose the same audio contract to the concat stage.
+    # Video-source scenes are stereo after amix, while TTS-only image scenes
+    # are otherwise mono. Stream-copy concatenation of those mixed layouts
+    # can keep a valid-looking MP4 while replaying one AAC packet range.
     return command + ["-r", "30", "-c:v", "libx264", "-preset", preset, *crf_args,
-                      "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", str(segment)]
+                      "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-ac", "2", str(segment)]
 
 
 def _clip_source_command(
@@ -1029,21 +1033,57 @@ def _transition_concat_command(
     return command
 
 
-def _safe_concat_command(ffmpeg: str, segments: list[Path], output: Path) -> list[str]:
-    """Compatibility fallback when a long xfade graph is rejected by local FFmpeg builds.
+def _safe_concat_command(
+    ffmpeg: str,
+    segments: list[Path],
+    output: Path,
+    durations: list[float] | None = None,
+    *,
+    fast: bool = False,
+) -> list[str]:
+    """Hard-cut fallback that re-encodes a normalized audio/video concat.
 
-    All scene files are normalized before this point, so a hard cut is preferable to
-    failing an otherwise valid internal preview. The report records this fallback.
+    The old concat-demuxer/``-c copy`` fallback assumed every segment had the
+    same audio layout. That was false for mixed video+TTS (stereo) and image
+    +TTS (mono) scenes, and produced a playable file with a repeated AAC range.
+    Keep the hard-cut behavior, but normalize every input and use the concat
+    filter so timestamps, duration, sample rate, and channel layout are rebuilt.
     """
-    manifest = output.with_suffix(".concat.txt")
-    manifest.write_text(
-        "".join(f"file '{segment.as_posix()}'\n" for segment in segments), encoding="utf-8"
+    if not segments:
+        raise ValueError("硬切拼接至少需要一个分镜")
+    if durations is not None and len(durations) != len(segments):
+        raise ValueError("硬切拼接的分镜时长数量不匹配")
+
+    command = [ffmpeg, "-y"]
+    filters = []
+    concat_inputs = []
+    for index, segment in enumerate(segments):
+        command += ["-i", str(segment)]
+        filters.append(
+            f"[{index}:v]fps=30,settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v{index}]"
+        )
+        audio = (
+            f"[{index}:a]aresample=async=1:first_pts=0,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            "asetpts=PTS-STARTPTS"
+        )
+        if durations is not None:
+            segment_duration = max(0.1, float(durations[index]))
+            audio += f",apad=whole_dur={segment_duration:.3f},atrim=duration={segment_duration:.3f}"
+        filters.append(audio + f"[a{index}]")
+        concat_inputs.extend([f"[v{index}]", f"[a{index}]"])
+    filters.append(
+        "".join(concat_inputs)
+        + f"concat=n={len(segments)}:v=1:a=1[vout][aout]"
     )
-    # The segments have identical H.264/AAC settings, so the concat demuxer avoids
-    # another long filter graph and is substantially more portable on macOS FFmpeg.
-    return [
-        ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(manifest),
-        "-c", "copy", "-movflags", "+faststart", str(output),
+    preset = "ultrafast" if fast else RENDER_FINAL_PRESET
+    crf = "28" if fast else RENDER_FINAL_CRF
+    return command + [
+        "-filter_complex", ";".join(filters),
+        "-map", "[vout]", "-map", "[aout]",
+        "-r", "30", "-c:v", "libx264", "-preset", preset, "-crf", crf,
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(output),
     ]
 
 
@@ -1750,7 +1790,9 @@ def render_job(
         transition_fallback = preview
         if preview:
             run_cancelable_process(
-                job_id, _safe_concat_command(ffmpeg, segments, output), timeout=240,
+                job_id,
+                _safe_concat_command(ffmpeg, segments, output, segment_durations, fast=True),
+                timeout=240,
                 cancel_check=is_canceled,
             )
             output.with_suffix(".concat.txt").unlink(missing_ok=True)
@@ -1770,7 +1812,9 @@ def render_job(
                 # fully rendered, source-verified preview solely for that reason.
                 transition_fallback = True
                 run_cancelable_process(
-                    job_id, _safe_concat_command(ffmpeg, segments, output), timeout=240,
+                    job_id,
+                    _safe_concat_command(ffmpeg, segments, output, segment_durations),
+                    timeout=240,
                     cancel_check=is_canceled,
                 )
                 output.with_suffix(".concat.txt").unlink(missing_ok=True)

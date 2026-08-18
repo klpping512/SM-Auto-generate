@@ -95,6 +95,35 @@ def test_preview_and_final_commands_use_explicit_output_sizes(tmp_path, monkeypa
     assert "crop=1080:1920" in " ".join(final)
 
 
+def test_scene_command_normalizes_every_segment_to_stereo_audio(tmp_path):
+    import video_renderer
+
+    command = video_renderer._scene_command(
+        "ffmpeg", "ffprobe", tmp_path / "source.png", False, tmp_path / "voice.wav", [], 3.0,
+        tmp_path / "segment.mp4", tmp_path, 0,
+    )
+
+    assert command[command.index("-ac") + 1] == "2"
+    assert command[command.index("-ar") + 1] == "48000"
+
+
+def test_safe_concat_reencodes_and_normalizes_audio_layout(tmp_path):
+    import video_renderer
+
+    segments = [tmp_path / "segment-0.mp4", tmp_path / "segment-1.mp4"]
+    command = video_renderer._safe_concat_command(
+        "ffmpeg", segments, tmp_path / "output.mp4", [5.0, 6.0], fast=True,
+    )
+    filters = command[command.index("-filter_complex") + 1]
+
+    assert "concat=n=2:v=1:a=1" in filters
+    assert filters.count("channel_layouts=stereo") == 2
+    assert filters.count("apad=whole_dur=") == 2
+    assert "-c" not in command
+    assert "-c:v" in command
+    assert command[command.index("-ac") + 1] == "2"
+
+
 def test_scene_command_adds_gentle_motion_only_when_requested(tmp_path):
     import video_renderer
 
