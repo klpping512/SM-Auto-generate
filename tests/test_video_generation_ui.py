@@ -31,6 +31,7 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "deliveryReadiness?.delivery_ready===true" in page
     assert "readinessBlocked" in page
     assert "parseStructuredChatValue" in page
+    assert "parseLooseStructuredChatValue" in page
     assert "normalizeChatOutput" in page
     assert "readiness.delivery_ready !== true" in page
     assert "正式成片素材门禁尚未通过" in page

@@ -351,10 +351,19 @@ function parseStructuredChatValue(value){
   try{return JSON.parse(text);}catch(e){return value;}
 }
 
+function parseLooseStructuredChatValue(value){
+  if(typeof value!=='string')return value;
+  const text=value.trim();
+  const match=text.match(/^\s*\{\s*"title"\s*:\s*"([\s\S]*?)"\s*,\s*"body"\s*:\s*"([\s\S]*)"\s*\}\s*$/);
+  if(!match)return value;
+  const decode=(item)=>item.replace(/\\n/g,'\n').replace(/\\r/g,'\r').replace(/\\t/g,'\t').replace(/\\"/g,'"');
+  return {title:decode(match[1]),body:decode(match[2])};
+}
+
 function normalizeChatOutput(output){
   const base={...(output||{})};
-  const titleValue=parseStructuredChatValue(base.title);
-  const bodyValue=parseStructuredChatValue(base.body||base.content);
+  const titleValue=parseLooseStructuredChatValue(parseStructuredChatValue(base.title));
+  const bodyValue=parseLooseStructuredChatValue(parseStructuredChatValue(base.body||base.content));
   const nested=(titleValue&&typeof titleValue==='object'&&!Array.isArray(titleValue))
     ?titleValue
     :(bodyValue&&typeof bodyValue==='object'&&!Array.isArray(bodyValue)?bodyValue:null);
