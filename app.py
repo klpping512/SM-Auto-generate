@@ -2135,6 +2135,7 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
     # truck fleet, and it also fails the two-term factual gate for mixed scenes
     # such as “卡车 + 仓库”.
     if len(terms) >= 2:
+        candidates.append(f"画面先有{terms[0]}，后见{terms[1]}。")
         candidates.append(f"现场画面记录{terms[0]}，并可见{terms[1]}等现场元素。")
     for candidate in candidates:
         compact_length = len("".join(candidate.split()))

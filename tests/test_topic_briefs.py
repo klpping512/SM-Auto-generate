@@ -278,6 +278,23 @@ def test_formal_narrative_hook_repair_keeps_parked_truck_and_warehouse_facts():
     assert "持续行驶" not in fixed["scenes"][0]["voiceover"]
 
 
+def test_formal_narrative_hook_repair_fits_two_facts_into_a_short_hook_clip():
+    import app
+
+    scenes = [{
+        "scene_role": "hotspot_evidence", "evidence_type": "hotspot_video", "duration_ms": 4_409,
+    }]
+    generated = {"scenes": [{"voiceover": "现场变化需要关注。", "text_overlay": "现场变化"}]}
+    event = {"evidence": {
+        "what_happened": "多排卡车停放，随后切换至仓库内部行走交谈。",
+    }}
+
+    fixed = app._repair_formal_narrative_hook(generated, scenes, event)
+
+    assert fixed["scenes"][0]["voiceover"] == "画面先有卡车，后见仓库。"
+    assert 9 <= len(fixed["scenes"][0]["voiceover"]) <= 15
+
+
 def test_short_formal_voiceover_repair_uses_reviewed_copy_anchor_without_model_retry():
     import app
 
