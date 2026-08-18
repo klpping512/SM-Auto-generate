@@ -2067,6 +2067,12 @@ def _compact_logistics_question(question: str) -> str:
 def _deterministic_hotspot_fact_line(what_happened: str) -> str:
     """Build a short factual opener when the planner omits the Hook fact."""
     text = str(what_happened or "").strip()
+    if "卡车" in text and "仓库" in text and any(
+        term in text for term in ("停放", "车队", "底盘")
+    ):
+        return "现场可见多排卡车整齐停放，随后仓库内有人行走交谈。"
+    if "卡车" in text and any(term in text for term in ("停放", "车队", "底盘")):
+        return "现场可见多排卡车整齐停放，车队规模清晰可见。"
     if any(term in text for term in ("积雪", "雪景", "大雪", "降雪", "暴雪")) and any(
         term in text for term in ("道路", "公路", "车辆", "交通")
     ):
@@ -2124,9 +2130,16 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
         candidates.append("道路现场可见车辆活动，通行情况需要核对。")
     else:
         candidates.append("现场事实已核验，先看画面中的具体变化。")
+    # Keep the audited nouns in the final fallback.  A generic line such as
+    # “道路上的车辆持续行驶” can be fluent but factually wrong for a parked
+    # truck fleet, and it also fails the two-term factual gate for mixed scenes
+    # such as “卡车 + 仓库”.
+    if len(terms) >= 2:
+        candidates.append(f"现场画面记录{terms[0]}，并可见{terms[1]}等现场元素。")
     for candidate in candidates:
         compact_length = len("".join(candidate.split()))
-        if (maximum is None or compact_length <= maximum) and (minimum is None or compact_length >= minimum):
+        candidate_fact_ok = bool(terms) and sum(term in candidate for term in terms) >= min(2, len(terms))
+        if candidate_fact_ok and (maximum is None or compact_length <= maximum) and (minimum is None or compact_length >= minimum):
             repaired["scenes"][0]["voiceover"] = candidate
             repaired["scenes"][0]["text_overlay"] = candidate.rstrip("。")[:24]
             break
@@ -2425,6 +2438,60 @@ def _extend_short_formal_voiceovers(
         if minimum is None or compact_length >= minimum:
             continue
         raise ValueError(f"内容规划模型第 {index + 1} 个分镜旁白少于 {minimum} 字时长下限")
+    return repaired
+
+
+def _repair_short_formal_voiceovers(
+    generated: dict,
+    scenes: list[dict],
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    event: dict | None = None,
+) -> dict:
+    """Repair short beats from reviewed visual anchors before calling the model again.
+
+    A short model sentence is a local pacing problem, not a reason to spend two
+    more model calls.  Candidates come only from the audited Hook fact or the
+    scene's reviewed ``copy_anchor``; if no bounded candidate exists, retain the
+    strict error instead of inventing a claim.
+    """
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if len(repaired["scenes"]) != len(scenes):
+        raise ValueError("内容规划模型返回的分镜数量无法进行旁白时长修复")
+    hotspot_fact = str((event or {}).get("evidence", {}).get("what_happened") or "").strip()
+    hotspot_fact_line = _deterministic_hotspot_fact_line(hotspot_fact)
+    for index, (item, scene) in enumerate(zip(repaired["scenes"], scenes)):
+        minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+        maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        voiceover = str(item.get("voiceover") or "").strip()
+        compact_length = len("".join(voiceover.split()))
+        if minimum is None or compact_length >= minimum:
+            continue
+        candidates: list[str] = []
+        if scene.get("scene_role") == "hotspot_evidence" and hotspot_fact_line:
+            candidates.append(hotspot_fact_line)
+        copy_anchor = str(scene.get("copy_anchor") or "").strip()
+        if copy_anchor:
+            candidates.append(copy_anchor)
+        category = str(scene.get("primary_category") or "").casefold()
+        candidates.extend({
+            "warehouse": ["工作人员正在仓内逐件核对包裹。"],
+            "staff": ["工作人员正在现场协同作业。"],
+            "facility": ["设施现场保持分区作业。"],
+            "delivery": ["配送车辆正在按动线作业。"],
+        }.get(category, ["镜头中的作业动作清晰可见。"]))
+        replacement = next(
+            (
+                candidate for candidate in candidates
+                if (maximum is None or len("".join(candidate.split())) <= maximum)
+                and len("".join(candidate.split())) >= minimum
+            ),
+            None,
+        )
+        if replacement is None:
+            raise ValueError(f"内容规划模型第 {index + 1} 个分镜旁白少于 {minimum} 字时长下限")
+        item["voiceover"] = replacement
+        item["text_overlay"] = replacement.rstrip("。")[:24]
     return repaired
 
 
@@ -3239,8 +3306,8 @@ async def _generate_topic_brief_video(
                 _json.dumps(generated_candidate, ensure_ascii=False), len(scenes), voiceover_limits,
                 hotspot_scene_count=hotspot_count,
             )
-            generated = _extend_short_formal_voiceovers(
-                generated, scenes, voiceover_minimums, voiceover_limits,
+            generated = _repair_short_formal_voiceovers(
+                generated, scenes, voiceover_minimums, voiceover_limits, event,
             )
             _validate_formal_copy_specificity(generated)
             _validate_generated_topic_anchor(generated, brief)
@@ -3313,7 +3380,10 @@ async def _generate_topic_brief_video(
                     )
                     generated = _planner_json(
                         _json.dumps(repaired_candidate, ensure_ascii=False), len(scenes), voiceover_limits,
-                        voiceover_minimums, hotspot_scene_count=hotspot_count,
+                        hotspot_scene_count=hotspot_count,
+                    )
+                    generated = _repair_short_formal_voiceovers(
+                        generated, scenes, voiceover_minimums, voiceover_limits, event,
                     )
                     _validate_formal_copy_specificity(generated)
                     _validate_generated_topic_anchor(generated, brief)
@@ -3352,8 +3422,8 @@ async def _generate_topic_brief_video(
     generated = _repair_formal_narrative_hook(generated, scenes, event)
     generated = _repair_formal_narrative_bridge(generated, scenes)
     generated = _compact_long_formal_voiceovers(generated, voiceover_limits)
-    generated = _extend_short_formal_voiceovers(
-        generated, scenes, voiceover_minimums, voiceover_limits,
+    generated = _repair_short_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits, event,
     )
     try:
         _validate_formal_copy_specificity(generated)

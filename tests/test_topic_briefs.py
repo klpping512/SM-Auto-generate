@@ -261,6 +261,39 @@ def test_formal_narrative_hook_repair_supports_non_fire_road_congestion_facts():
     assert fixed["scenes"][0]["voiceover"] == event["evidence"]["what_happened"]
 
 
+def test_formal_narrative_hook_repair_keeps_parked_truck_and_warehouse_facts():
+    import app
+
+    scenes = [{
+        "scene_role": "hotspot_evidence", "evidence_type": "hotspot_video", "duration_ms": 10_500,
+    }]
+    generated = {"scenes": [{"voiceover": "现场变化需要关注。", "text_overlay": "现场变化"}]}
+    event = {"evidence": {
+        "what_happened": "泥地上整齐停放着多排白色卡车底盘，随后画面切换至仓库内部行走交谈。",
+    }}
+
+    fixed = app._repair_formal_narrative_hook(generated, scenes, event)
+
+    assert fixed["scenes"][0]["voiceover"] == "现场可见多排卡车整齐停放，随后仓库内有人行走交谈。"
+    assert "持续行驶" not in fixed["scenes"][0]["voiceover"]
+
+
+def test_short_formal_voiceover_repair_uses_reviewed_copy_anchor_without_model_retry():
+    import app
+
+    generated = {"scenes": [{"voiceover": "仓内核对。", "text_overlay": "核对"}]}
+    scenes = [{
+        "scene_role": "owned_proof", "evidence_type": "owned_video", "primary_category": "warehouse",
+        "copy_anchor": "工作人员正在仓内逐件核对包裹。", "duration_ms": 6_000,
+    }]
+
+    fixed = app._repair_short_formal_voiceovers(
+        generated, scenes, [12], [21], None,
+    )
+
+    assert fixed["scenes"][0]["voiceover"] == "工作人员正在仓内逐件核对包裹。"
+
+
 def test_formal_narrative_hook_repair_carries_generic_logistics_question_into_opening():
     import app
 
