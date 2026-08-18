@@ -344,25 +344,53 @@ function promptComparisonEvidence(){
   showToast('请把带来源的资料填进输入框后发送','info');
 }
 
+function parseStructuredChatValue(value){
+  if(typeof value!=='string')return value;
+  const text=value.trim();
+  if(!text||(!text.startsWith('{')&&!text.startsWith('[')))return value;
+  try{return JSON.parse(text);}catch(e){return value;}
+}
+
+function normalizeChatOutput(output){
+  const base={...(output||{})};
+  const titleValue=parseStructuredChatValue(base.title);
+  const bodyValue=parseStructuredChatValue(base.body||base.content);
+  const nested=(titleValue&&typeof titleValue==='object'&&!Array.isArray(titleValue))
+    ?titleValue
+    :(bodyValue&&typeof bodyValue==='object'&&!Array.isArray(bodyValue)?bodyValue:null);
+  if(nested&&('title' in nested||'body' in nested||'content' in nested)){
+    return {...base,...nested,
+      title:String(nested.title||base.title||'AI 生成内容'),
+      body:String(nested.body||nested.content||base.body||base.content||''),
+    };
+  }
+  return {...base,
+    title:typeof titleValue==='string'?titleValue:base.title,
+    body:typeof bodyValue==='string'?bodyValue:(base.body||base.content||''),
+  };
+}
+
 function resultCardMarkup(result,id){
-  const outputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
-  resultStore.set(id,result);
-  const showHotspotBanner=result?.result_state==='hotspot_retrieval_pending'||result?.hotspot_retrieval?.status==='matched'||result?.hotspot_retrieval?.status==='owned_fallback'||result?.result_state==='brand_assets_insufficient'||result?.result_state==='hook_selection_required';
-  const degradedNotice=result?.degraded_from_comparison
+  const rawOutputs=result.outputs?.length?result.outputs:[{platform:Array.from(selectedPlatforms)[0]||'xiaohongshu',title:result.title,body:result.body||result.content,hashtags:result.hashtags||[]}];
+  const outputs=rawOutputs.map(normalizeChatOutput);
+  const displayResult={...result,outputs,title:outputs[0]?.title||result.title,body:outputs[0]?.body||result.body};
+  resultStore.set(id,displayResult);
+  const showHotspotBanner=displayResult?.result_state==='hotspot_retrieval_pending'||displayResult?.hotspot_retrieval?.status==='matched'||displayResult?.hotspot_retrieval?.status==='owned_fallback'||displayResult?.result_state==='brand_assets_insufficient'||displayResult?.result_state==='hook_selection_required';
+  const degradedNotice=displayResult?.degraded_from_comparison
     ?`<div class="result-warning"><strong>已自动切换科普视角</strong><p>对比评测需要真实报价/时效资料，已自动切换为科普视角生成视频；如手头有官方报价单或测试记录，可点『补充评测资料』生成正式对比评测。</p><button class="btn btn-secondary btn-sm" onclick="promptComparisonEvidence()">补充评测资料</button></div>`
     :'';
-  const platformErrors=Array.isArray(result.platform_errors)?result.platform_errors:[];
+  const platformErrors=Array.isArray(displayResult.platform_errors)?displayResult.platform_errors:[];
   const errorBanner=platformErrors.length
     ?`<div class="result-warning"><strong>${escapeHtml(platformErrors[0].message||'文案已生成，小红书配图失败，请重试配图')}</strong></div>`
     :'';
   const tabs=outputs.map((o,i)=>`<button class="result-tab ${i===0?'active':''}" onclick="selectResultTab('${id}',${i},this)">${escapeHtml(platformNames[o.platform]||o.platform)}</button>`).join('');
-  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const isDouyin=o.platform==='douyin';const douyinCta=isDouyin?douyinVideoEntryMarkup(o,id,i,result.hotspot_retrieval,result):'';const editorLabel=(result.result_state==='framework_pending_evidence'||result.result_state==='authenticity_blocked')?'编辑对比框架':'发送到编辑器';const actions=isDouyin
+  const panels=outputs.map((o,i)=>{const tags=Array.isArray(o.hashtags)?o.hashtags:[];const warnings=Array.isArray(o.quality_warnings)?o.quality_warnings:[];const isDouyin=o.platform==='douyin';const douyinCta=isDouyin?douyinVideoEntryMarkup(o,id,i,displayResult.hotspot_retrieval,displayResult):'';const editorLabel=(displayResult.result_state==='framework_pending_evidence'||displayResult.result_state==='authenticity_blocked')?'编辑对比框架':'发送到编辑器';const actions=isDouyin
     ?`${douyinCta}<div class="result-actions" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制摘要</button></div>`
     :`<div class="result-actions"><button class="btn btn-primary btn-sm" onclick="sendToEditor('${id}',${i})">${editorLabel}</button><button class="btn btn-secondary btn-sm" onclick="copyResult('${id}',${i})">复制</button></div>`;
   const bodyText=isDouyin?((o.body||o.content||'').slice(0,220)+((o.body||o.content||'').length>220?'…':'')):(o.body||o.content||'');
   return `<div class="result-panel ${i===0?'active':''}" data-index="${i}"><div class="result-title">${escapeHtml(o.title||'AI 生成内容')}</div><div class="result-body">${escapeHtml(bodyText)}</div>${tags.length?`<div class="result-tags">${tags.map(t=>'#'+escapeHtml(String(t).replace(/^#/,''))).join(' ')}</div>`:''}${warnings.length?`<div class="result-warning">提示：${warnings.map(escapeHtml).join('；')}</div>`:''}${actions}</div>`}).join('');
   if(result?.hotspot_retrieval?.request_id)scheduleDiscoveryPoll(id,result.hotspot_retrieval.request_id);
-  return `<div class="result-card" id="result-${id}">${degradedNotice}${errorBanner}${resultStateCard(result,id)}${showHotspotBanner?hotspotRetrievalMarkup(result,id):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
+  return `<div class="result-card" id="result-${id}">${degradedNotice}${errorBanner}${resultStateCard(displayResult,id)}${showHotspotBanner?hotspotRetrievalMarkup(displayResult,id):''}<div class="result-tabs">${tabs}</div>${panels}</div>`;
 }
 function selectResultTab(id,index,btn){const card=document.getElementById(`result-${id}`);if(!card)return;card.querySelectorAll('.result-tab').forEach(b=>b.classList.toggle('active',b===btn));card.querySelectorAll('.result-panel').forEach(p=>p.classList.toggle('active',Number(p.dataset.index)===index));}
 // 抖音：需求入口 → 创建项目后跳转视频工作台（不在聊天内生产）
@@ -386,9 +414,13 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
   }
   const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||hotspotRetrieval?.video?.chain_mode==='owned_only';
+  const readinessStatus=String(deliveryReadiness?.status||'').trim();
+  const readinessMessage=String(deliveryReadiness?.message||'');
+  const readinessBlocked=['needs_owned_media','blocked','failed','pending'].includes(readinessStatus)
+    || /素材不足|无法形成|门禁尚未通过|暂不可创建|未产出可用/.test(readinessMessage);
   // Formal delivery readiness is mandatory.  An absent readiness object is
   // unknown (typically an old/stale chat result), never an implicit approval.
-  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&deliveryReadiness?.delivery_ready===true;
+  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&deliveryReadiness?.delivery_ready===true&&!readinessBlocked;
   const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
   const scriptState=classifyDouyinScriptState({
     durationTarget: output.duration_target,
@@ -513,7 +545,11 @@ async function createSixtySecondVideoProject(resultId, index) {
     return;
   }
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||dualLibraryVideo?.chain_mode==='owned_only';
-  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready' || dualLibraryVideo?.delivery_readiness?.delivery_ready !== true) {
+  const readiness=dualLibraryVideo?.delivery_readiness||{};
+  const readinessMessage=String(readiness.message||'');
+  const readinessBlocked=['needs_owned_media','blocked','failed','pending'].includes(String(readiness.status||'').trim())
+    || /素材不足|无法形成|门禁尚未通过|暂不可创建|未产出可用/.test(readinessMessage);
+  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready' || readiness.delivery_ready !== true || readinessBlocked) {
     showToast(dualLibraryVideo?.delivery_readiness?.message || (ownedFallback?'Buffalo 自有素材直出规划未就绪':'正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目'), 'error');
     return;
   }

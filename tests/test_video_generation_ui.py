@@ -29,7 +29,10 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "owned_only" in page
     assert "未匹配到相关 Hook，已切换自有素材直出" in page
     assert "deliveryReadiness?.delivery_ready===true" in page
-    assert "dualLibraryVideo?.delivery_readiness?.delivery_ready !== true" in page
+    assert "readinessBlocked" in page
+    assert "parseStructuredChatValue" in page
+    assert "normalizeChatOutput" in page
+    assert "readiness.delivery_ready !== true" in page
     assert "正式成片素材门禁尚未通过" in page
     assert "等待热点 Hook" in page
     assert "任务 ID" in page
