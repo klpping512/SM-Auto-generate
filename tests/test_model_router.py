@@ -579,7 +579,10 @@ async def test_multimodal_json_call_uses_image_content_and_json_mode(tmp_db, mon
     assert body["max_tokens"] == model_router.get_route("video_evaluator")["max_tokens"]
     assert "max_completion_tokens" not in body
     assert result["content"] == '{"passed":true}'
-    assert tmp_db.get_model_budget("video-eval-call")["calls_used"] == 1
+    budget = tmp_db.get_model_budget("video-eval-call")
+    assert budget["calls_used"] == 1
+    assert budget["max_input_tokens"] == 120_000
+    assert budget["max_output_tokens"] == 16_000
 
 
 async def test_multimodal_json_retries_on_empty_content_then_succeeds(tmp_db, monkeypatch):

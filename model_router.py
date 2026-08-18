@@ -107,6 +107,25 @@ COST_PER_MILLION = {
 }
 BUDGET_POLICY_VERSION = "thinking-output-v1"
 
+# A video review has two possible multimodal passes: a global review (including
+# a validation retry) and a focused review over the risk windows.  The old
+# generic 50k input ceiling was enough for a single vision call, but it could
+# reject a valid focused pass before the provider was even contacted.  Keep
+# the larger allowance scoped to this role; hotspot curation and other visual
+# jobs should retain their tighter budgets.
+MULTIMODAL_BUDGETS = {
+    "video_evaluator": {
+        "max_calls": 4,
+        "max_input_tokens": 120_000,
+        "max_output_tokens": 16_000,
+    },
+    "default": {
+        "max_calls": 4,
+        "max_input_tokens": 50_000,
+        "max_output_tokens": 12_000,
+    },
+}
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -630,12 +649,10 @@ async def call_multimodal_json(
     if not api_key:
         raise RuntimeError(f"缺少模型密钥环境变量：{route['api_key_env']}")
     cache_key = make_cache_key(role, {"messages": messages}, prompt_version)
-    create_budget(
-        job_id,
-        max_calls=4,
-        max_input_tokens=50_000,
-        max_output_tokens=12_000,
+    budget_limits = MULTIMODAL_BUDGETS.get(
+        role, MULTIMODAL_BUDGETS["default"],
     )
+    create_budget(job_id, **budget_limits)
     cached = db.get_model_cache(cache_key)
     # 防御：命中内容为空则当未命中，继续走线上（不把空结果当有效缓存）。
     if cached and not str((cached.get("response") or {}).get("content") or "").strip():
