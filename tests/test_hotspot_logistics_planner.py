@@ -216,6 +216,29 @@ def test_formal_plan_drops_duplicate_visible_actions_instead_of_padding_duration
     assert anchors.count("叉车正在仓内搬运包裹。") == 1
 
 
+def test_hotspot_source_is_not_reused_as_owned_proof_scene():
+    from hotspot_video_planner import plan_followup_scenes
+    from video_composition_policy import source_usage_report
+
+    scenes = plan_followup_scenes(
+        {"approved_hook_event_ids": [1], "logistics_topic": "配送"},
+        [{"id": 1, "asset_id": 90, "hotspot_id": 12, "title_zh": "道路货车排队",
+          "start_ms": 0, "end_ms": 7_000, "clip_status": "ready"}],
+        [
+            {"id": 90, "asset_id": 90, "asset_file_type": "video", "primary_category": "delivery",
+             "description": "同一母片的其他分析段", "start_ms": 7_000, "end_ms": 14_000},
+            {"id": 91, "asset_id": 91, "asset_file_type": "video", "primary_category": "warehouse",
+             "description": "Buffalo 仓内分拣", "start_ms": 0, "end_ms": 7_000},
+        ],
+        target_duration_ms=50_000,
+    )
+
+    owned = [scene for scene in scenes if scene.get("scene_role") == "owned_proof"]
+    assert all(scene.get("asset_id") != 90 for scene in owned)
+    assert any(scene.get("asset_id") == 91 for scene in owned)
+    assert source_usage_report(scenes)["passed"] is True
+
+
 def test_transport_topic_can_use_branded_truck_at_warehouse_without_reclassifying_it():
     from hotspot_video_planner import _owned_candidates
 

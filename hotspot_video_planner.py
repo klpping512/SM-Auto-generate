@@ -806,6 +806,21 @@ def plan_followup_scenes(
         )
     selected_events = _limit_distinct_hotspot_hooks(selected_events)
     owned = _diversify_owned_candidates(_owned_candidates(owned_segments, brief))
+    # A confirmed Hook is already a visual use of its original mother video.
+    # Do not let the same source re-enter as a Buffalo proof scene: the final
+    # usage gate correctly rejects that timeline, but filtering it here keeps
+    # the planner from producing an apparently valid plan that later collapses
+    # into the generic "素材不足" readiness message.
+    hotspot_source_asset_ids = {
+        int(item[1].get("asset_id") or 0)
+        for item in selected_events
+        if int(item[1].get("asset_id") or 0)
+    }
+    if hotspot_source_asset_ids:
+        owned = [
+            item for item in owned
+            if int(item.get("asset_id") or 0) not in hotspot_source_asset_ids
+        ]
     # A candidate whose reviewed range is under 3s can never become a scene
     # (see the >=3_000 check below). Dropping it here, before the owned_limit
     # slice, lets a deep candidate pool backfill that slot with the next
