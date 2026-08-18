@@ -333,7 +333,7 @@ def test_repeated_formal_voiceovers_are_replaced_with_distinct_reviewed_actions(
 
     lines = [scene["voiceover"] for scene in fixed["scenes"]]
     assert len(set(map(app._formal_voiceover_key, lines))) == 4
-    assert "仓内工作人员逐件核对包裹。" in lines
+    assert "工作人员在仓内逐件核对包裹。" in lines
     assert lines[2] != lines[3]
 
 
@@ -347,7 +347,7 @@ def test_repeated_formal_warehouse_voiceovers_cover_seven_owned_beats():
     repeated = "清关前的仓内备货：单证与货物正在备齐，等待海关放行。"
     fixed = app._repair_repeated_formal_voiceovers(
         {"scenes": [{"voiceover": repeated} for _ in scenes]},
-        scenes, [12] * len(scenes), [20] * len(scenes),
+        scenes, [14] * len(scenes), [20] * len(scenes),
     )
 
     lines = [scene["voiceover"] for scene in fixed["scenes"]]
