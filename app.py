@@ -6217,6 +6217,15 @@ def _chat_video_delivery_readiness(
     image_count = sum(scene.get("evidence_type") == "image" for scene in scenes)
     duration_ms = sum(int(scene.get("duration_ms") or 0) for scene in scenes) + cta_duration_ms
     adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
+    owned_matching_mode = next(
+        (
+            str(scene.get("owned_match_mode") or "")
+            for scene in scenes
+            if scene.get("evidence_type") == "owned_video"
+            and scene.get("owned_match_mode")
+        ),
+        "strict_category",
+    )
     duration_ok = video_renderer.formal_duration_in_range(duration_ms)
     coverage = {
         "hotspot_video": hotspot_count,
@@ -6232,10 +6241,16 @@ def _chat_video_delivery_readiness(
             message = "未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出。"
             status = "owned_only_ready"
         elif delivery_ready:
-            message = (
-                f"未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出；当前自有动态 {owned_count} 段，"
-                "系统将按现有库存自适应规划。"
-            )
+            if owned_matching_mode == "broad_operational_fallback":
+                message = (
+                    "未匹配到可用热点 Hook，已切换 Buffalo 自有履约动作链路；"
+                    f"当前使用 {owned_count} 段可见仓配素材，系统不会把它们冒充为热点事实。"
+                )
+            else:
+                message = (
+                    f"未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出；当前自有动态 {owned_count} 段，"
+                    "系统将按现有库存自适应规划。"
+                )
             status = "owned_only_ready_adapted"
         elif planner_issue:
             message = "未匹配到热点 Hook，且当前 Buffalo 自有素材无法形成可渲染分镜。"
@@ -6254,10 +6269,16 @@ def _chat_video_delivery_readiness(
             message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
             status = "delivery_ready"
         elif delivery_ready:
-            message = (
-                f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
-                f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
-            )
+            if owned_matching_mode == "broad_operational_fallback":
+                message = (
+                    "热点 Hook 已锁定；同节点自有视频不足，已切换到 Buffalo 可见仓配动作桥接，"
+                    f"当前 {owned_count} 段，不把自有画面冒充为热点事实。"
+                )
+            else:
+                message = (
+                    f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
+                    f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
+                )
             status = "delivery_ready_adapted"
         elif planner_issue:
             message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
@@ -6285,6 +6306,7 @@ def _chat_video_delivery_readiness(
         "logistics_nodes": nodes,
         "message": message,
         "planner_issue": planner_issue or None,
+        "owned_matching_mode": owned_matching_mode,
         "adaptation": adaptation,
     }
     # Observation only when inventory looks thin or delivery is blocked.
@@ -6587,6 +6609,31 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
                 })
     status = item.get("status") or "queued"
     payload = topic_hook_pipeline.discovery_payload(item, hooks=hooks)
+    if status == "matched" and hooks:
+        # The polling endpoint must return the same formal readiness decision
+        # as the create endpoint.  A hook being found is not equivalent to a
+        # 50--90s plan being renderable; the old UI used to hard-code ready
+        # here and only discovered the contradiction after the button click.
+        locked_events = []
+        for hook in hooks:
+            clip = db.get_hotspot_event_clip(int(hook["event_clip_id"]))
+            if clip:
+                locked_events.append(_with_soft_logistics_bridge(clip))
+        readiness = _chat_video_delivery_readiness(
+            str(item.get("topic") or ""), locked_events,
+        )
+        payload["video"] = {
+            "status": "ready" if readiness.get("delivery_ready") else "blocked",
+            "chain_mode": "hotspot_owned",
+            "hotspot_event_ids": [int(hook["event_clip_id"]) for hook in hooks],
+            "source_asset_id": int(hooks[0]["asset_id"]) if hooks and hooks[0].get("asset_id") else None,
+            "delivery_readiness": readiness,
+        }
+        payload["message"] = (
+            "定向采集完成，已确认匹配 Hook；正式成片素材门禁已通过。"
+            if readiness.get("delivery_ready")
+            else readiness.get("message") or "Hook 已找到，但当前素材尚不足以形成正式成片。"
+        )
     if status in {"unmatched", "no_match", "failed"}:
         fallback_readiness = _chat_video_delivery_readiness(
             str(item.get("topic") or ""), [], chain_mode="owned_only",
@@ -6820,6 +6867,26 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             if adapted
             else "视频生成任务已创建，脚本规划和质检将在后台串行执行"
         ),
+        "delivery_readiness": readiness,
+    }
+
+@app.get("/api/ai/chat/dual-library-video/readiness")
+async def get_chat_dual_library_video_readiness(
+    topic: str,
+    hotspot_event_id: int,
+    user=Depends(get_current_user),
+):
+    """Recheck a manually selected Hook without creating a generation job."""
+    event = db.get_hotspot_event_clip(int(hotspot_event_id))
+    if not event or not _is_confirmed_renderable_hotspot_hook(event):
+        raise HTTPException(409, "匹配的热点 Hook 已失效，请重新选择可播放 Hook。")
+    event = _with_soft_logistics_bridge(event)
+    readiness = _chat_video_delivery_readiness(str(topic or "").strip(), [event])
+    return {
+        "status": "ready" if readiness.get("delivery_ready") else "blocked",
+        "chain_mode": "hotspot_owned",
+        "hotspot_event_ids": [int(event["id"])],
+        "source_asset_id": int(event["asset_id"]),
         "delivery_readiness": readiness,
     }
 

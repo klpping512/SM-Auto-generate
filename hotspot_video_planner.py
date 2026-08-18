@@ -653,6 +653,34 @@ def _owned_image_candidates(images: Iterable[dict], brief: dict) -> list[dict]:
     return result
 
 
+_OPERATIONAL_FALLBACK_CATEGORIES = frozenset({
+    "warehouse", "delivery", "staff", "facility", "brand",
+})
+
+
+def _broad_operational_owned_candidates(
+    segments: Iterable[dict], brief: dict,
+) -> list[dict]:
+    """Return reviewed Buffalo operational footage for a controlled fallback.
+
+    A topic-specific category gate is still the first choice.  When it cannot
+    provide enough footage for a formal 50--90s cut, a brand video may bridge
+    from the verified Hook to visible warehouse/dispatch actions.  This is not
+    a factual match to a port, road or delivery event: ``other`` footage is
+    deliberately excluded and the scene copy remains action-only.
+    """
+    broad_brief = {
+        **brief,
+        "topic_brief_id": None,
+        "logistics_nodes": [],
+        "logistics_topic": "",
+    }
+    return [
+        item for item in _owned_candidates(segments, broad_brief)
+        if _functional_categories(item) & _OPERATIONAL_FALLBACK_CATEGORIES
+    ]
+
+
 def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
                                   min_chars: int | None = None) -> str:
     """清关 preparation 模式的安全兼底文案：只说准备、绝不含完成词。
@@ -809,6 +837,7 @@ def plan_followup_scenes(
         )
     selected_events = _limit_distinct_hotspot_hooks(selected_events)
     owned = _diversify_owned_candidates(_owned_candidates(owned_segments, brief))
+    owned_match_mode = "strict_category"
     # A confirmed Hook is already a visual use of its original mother video.
     # Do not let the same source re-enter as a Buffalo proof scene: the final
     # usage gate correctly rejects that timeline, but filtering it here keeps
@@ -841,6 +870,36 @@ def plan_followup_scenes(
     # 计划仅 7 段会让 _planner_json 场景数硬校验失败（repair 同输出）→ 502。
     # owned_only 放宽到 8，与模型稳定行为对齐；含热点 Hook 的 mix3/hotspot_owned 保持原逻辑不变。
     owned_limit = 8 if chain_mode == "owned_only" else (7 if target_duration_ms <= 60_000 else 8)
+    # A strict node match can be empty even when the Buffalo library has a
+    # complete set of visible warehouse/dispatch footage.  Images can bridge
+    # rhythm, but cannot honestly turn an 8s pool into a 60s formal video.
+    # Use the controlled operational fallback only for the two production
+    # chains, and only when the strict pool cannot reach the target even with
+    # the maximum number of image bridges.
+    strict_capacity_ms = sum(
+        _usable_source_duration_ms(item) for item in owned[:owned_limit]
+    )
+    image_bridge_capacity_ms = MAX_CONTEXT_IMAGE_BRIDGES * CONTEXT_IMAGE_DURATION_MS
+    if (
+        chain_mode in {"owned_only", "hotspot_owned"}
+        and strict_capacity_ms < max(0, target_duration_ms - image_bridge_capacity_ms)
+    ):
+        broad_owned = _broad_operational_owned_candidates(owned_segments, brief)
+        if hotspot_source_asset_ids:
+            broad_owned = [
+                item for item in broad_owned
+                if int(item.get("asset_id") or 0) not in hotspot_source_asset_ids
+            ]
+        broad_owned = [
+            item for item in broad_owned
+            if _usable_source_duration_ms(item) >= 3_000
+        ]
+        broad_capacity_ms = sum(
+            _usable_source_duration_ms(item) for item in broad_owned[:owned_limit]
+        )
+        if broad_capacity_ms > strict_capacity_ms:
+            owned = _diversify_owned_candidates(broad_owned)
+            owned_match_mode = "broad_operational_fallback"
     # Similar assets from different files are not genuinely different proof.
     # A formal user video may show each reviewed action once; when the library
     # cannot support the requested duration after this filter, the caller must
@@ -1046,7 +1105,12 @@ def plan_followup_scenes(
                 "flow_role": flow_role,
                 "match_reasons": [f"素材分类匹配：{category or '已审核视频'}"]
                     + ([f"可见品牌露出：{'、'.join(visible_brands)}"] if visible_brands else [])
-                    + ["仅作为可见执行动作证据，不替代不可见服务承诺"],
+                    + ([
+                        "自有素材宽兜底：仅作可见仓配动作，不替代热点事实或不可见服务承诺",
+                    ] if owned_match_mode == "broad_operational_fallback" else [
+                        "仅作为可见执行动作证据，不替代不可见服务承诺",
+                    ]),
+                "owned_match_mode": owned_match_mode,
             })
             continue
         if kind == "image":
@@ -1106,6 +1170,9 @@ def describe_plan_adaptation(
     if len(scenes) < ideal_min_scenes:
         adapted = True
         strategies.append("shorten_structure")
+    if any(scene.get("owned_match_mode") == "broad_operational_fallback" for scene in scenes):
+        adapted = True
+        strategies.append("broad_operational_owned_fallback")
     if adapted:
         strategies.append("brand_endcard_close")
     return {

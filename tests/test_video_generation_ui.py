@@ -9,6 +9,8 @@ def test_chat_creates_project_and_redirects_to_workbench():
 
     assert "/api/ai/chat/dual-library-video" in page
     assert "createSixtySecondVideoProject" in page
+    assert "/api/ai/chat/dual-library-video/readiness?topic=" in page
+    assert "正在核验正式成片素材" in page
     assert "创建60秒视频项目" in page
     assert "video-project.html?id=" in page
     assert "stage=brief" in page
@@ -19,6 +21,22 @@ def test_chat_creates_project_and_redirects_to_workbench():
     assert "pollRenderStatus" not in page
     assert "pollChatVideoTask" not in page
     assert "douyinScenesMarkup" not in page
+
+
+def test_chat_reconciles_server_readiness_after_stale_create_attempt():
+    page = (ROOT / "static" / "chat.html").read_text()
+    common = (ROOT / "static" / "common.js").read_text()
+
+    # Discovery polling and the create endpoint must share the same gate; a
+    # stale card must become blocked after a 409 instead of leaving a dead
+    # button that can be clicked repeatedly.
+    assert "const videoPayload=payload.video||{}" in page
+    assert "readiness.delivery_ready===true?'ready':'blocked'" in page
+    assert "e?.status===409&&serverReadiness" in page
+    assert "current.result_state='brand_assets_insufficient'" in page
+    assert "button.disabled=true" in page
+    assert "error.status = resp.status" in common
+    assert "error.detail = detail" in common
 
 
 def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video():

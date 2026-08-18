@@ -256,7 +256,7 @@ function producibleTopicsMarkup(topics, resultId, asSwap){
   return `<div class="producible-topics" style="margin-top:10px"><strong>${title}</strong><p style="font-size:12px;margin:4px 0 8px">${hint}</p>${buttons}</div>`;
 }
 
-function bindHookToOriginalTopic(resultId, eventId, btn){
+async function bindHookToOriginalTopic(resultId, eventId, btn){
   const result=resultStore.get(resultId);
   if(!result||!eventId)return;
   const title=btn?.getAttribute('data-hook-title')||'已选 Hook';
@@ -265,21 +265,45 @@ function bindHookToOriginalTopic(resultId, eventId, btn){
     ...(result.hotspot_retrieval||{}),
     status:'matched',
     failure_class:null,
-    message:`已绑定 Hook「${title}」到原主题，可直接创建视频项目。`,
+    message:`已绑定 Hook「${title}」；正在核验正式成片素材。`,
     hooks:[{event_clip_id:eventId,title,description:'用户点选绑定的开场 Hook'}],
     video:{
-      status:'ready',
+      status:'blocked',
       hotspot_event_ids:[Number(eventId)],
-      delivery_readiness:{delivery_ready:true,status:'delivery_ready',message:'已绑定可用 Hook，可创建项目。'},
+      delivery_readiness:{delivery_ready:false,status:'pending',message:'正在核验正式成片素材。'},
     },
     topic:originalTopic,
   };
-  result.result_state='formal_content';
+  result.result_state='brand_assets_insufficient';
   result.failure_class=null;
   resultStore.set(resultId,result);
   const card=document.getElementById(`result-${resultId}`);
   if(card)card.outerHTML=resultCardMarkup(result,resultId);
-  showToast('已绑定 Hook 到原主题，可创建视频项目','success');
+  try{
+    const response=await apiFetch(`/api/ai/chat/dual-library-video/readiness?topic=${encodeURIComponent(originalTopic)}&hotspot_event_id=${encodeURIComponent(eventId)}`,{cache:'no-store'});
+    const readinessPayload=await response.json();
+    const current=resultStore.get(resultId);
+    if(!current)return;
+    current.hotspot_retrieval={
+      ...(current.hotspot_retrieval||{}),
+      status:'matched',
+      message:readinessPayload.delivery_readiness?.message||'Hook 已绑定。',
+      video:{
+        ...(current.hotspot_retrieval?.video||{}),
+        ...readinessPayload,
+      },
+    };
+    current.result_state=readinessPayload.delivery_readiness?.delivery_ready===true?'formal_content':'brand_assets_insufficient';
+    resultStore.set(resultId,current);
+    const updatedCard=document.getElementById(`result-${resultId}`);
+    if(updatedCard)updatedCard.outerHTML=resultCardMarkup(current,resultId);
+    showToast(
+      readinessPayload.delivery_readiness?.delivery_ready===true?'已绑定 Hook，可创建视频项目':(readinessPayload.delivery_readiness?.message||'Hook 已绑定，但正式成片素材门禁未通过'),
+      readinessPayload.delivery_readiness?.delivery_ready===true?'success':'error',
+    );
+  }catch(e){
+    showToast(e.message||'Hook 绑定后的素材核验失败','error');
+  }
 }
 
 function resultStateCard(result,id){
@@ -475,20 +499,34 @@ async function scheduleDiscoveryPoll(resultId, requestId){
       const result=resultStore.get(resultId);
       if(!result){clearInterval(discoveryPollers[resultId]);delete discoveryPollers[resultId];return;}
       if(payload.status==='matched'&&payload.hooks?.length){
+        const videoPayload=payload.video||{};
+        const readiness=videoPayload.delivery_readiness||{
+          status:'pending',
+          delivery_ready:false,
+          message:'已找到 Hook，正在核验正式成片素材。',
+        };
         result.hotspot_retrieval={
           ...(result.hotspot_retrieval||{}),
           status:'matched',
           hooks:payload.hooks,
           discovery:payload,
-          message:'定向采集完成，已确认匹配 Hook 可用。',
-          video:{status:'ready',hotspot_event_ids:payload.hooks.map(item=>item.event_clip_id),delivery_readiness:{delivery_ready:true}},
+          message:payload.message||readiness.message||'定向采集完成，已确认匹配 Hook。',
+          video:{
+            ...videoPayload,
+            status:readiness.delivery_ready===true?'ready':'blocked',
+            hotspot_event_ids:videoPayload.hotspot_event_ids||payload.hooks.map(item=>item.event_clip_id),
+            delivery_readiness:readiness,
+          },
         };
-        result.result_state='formal_content';
+        result.result_state=readiness.delivery_ready===true?'formal_content':'brand_assets_insufficient';
         resultStore.set(resultId,result);
         const card=document.getElementById(`result-${resultId}`);
         if(card)card.outerHTML=resultCardMarkup(result,resultId);
         clearInterval(discoveryPollers[resultId]);delete discoveryPollers[resultId];
-        showToast('热点 Hook 已就绪，可创建视频项目','success');
+        showToast(
+          readiness.delivery_ready===true?'热点 Hook 已就绪，可创建视频项目':(readiness.message||'Hook 已找到，但正式成片素材门禁未通过'),
+          readiness.delivery_ready===true?'success':'error',
+        );
         return;
       }
       if(['unmatched','no_match','failed','cancelled_misrouted'].includes(payload.status)){
@@ -604,6 +642,33 @@ async function createSixtySecondVideoProject(resultId, index) {
     showToast(taskResult.created ? '视频项目已创建，正在进入工作台' : '已恢复视频项目，正在进入工作台', 'success');
     location.href = `/video-project.html?id=${encodeURIComponent(taskResult.project.id)}&stage=brief`;
   } catch (e) {
+    const detail=e?.detail;
+    const serverReadiness=detail&&typeof detail==='object' ? detail.delivery_readiness : null;
+    if(e?.status===409&&serverReadiness){
+      const current=resultStore.get(resultId);
+      if(current){
+        const retrieval=current.hotspot_retrieval||{};
+        current.hotspot_retrieval={
+          ...retrieval,
+          video:{
+            ...(retrieval.video||{}),
+            status:'blocked',
+            delivery_readiness:serverReadiness,
+          },
+          message:serverReadiness.message||e.message,
+        };
+        current.result_state='brand_assets_insufficient';
+        resultStore.set(resultId,current);
+        const card=document.getElementById(`result-${resultId}`);
+        if(card)card.outerHTML=resultCardMarkup(current,resultId);
+      }
+    }
+    const button=document.getElementById(`generate-video-${resultId}-${index}`);
+    if(button){
+      button.disabled=true;
+      button.textContent='当前素材门禁未通过';
+      button.setAttribute('aria-disabled','true');
+    }
     if (statusDiv) statusDiv.textContent = e.message;
     showToast(e.message, 'error');
   }

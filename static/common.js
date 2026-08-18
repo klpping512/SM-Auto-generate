@@ -28,9 +28,10 @@ async function apiFetch(url, options = {}) {
     }
     if (!resp.ok) {
         let msg = `请求失败 (${resp.status})`;
+        let detail = null;
         try {
             const err = await resp.json();
-            const detail = err.detail;
+            detail = err.detail;
             if (typeof detail === 'string' && detail.trim()) msg = detail;
             else if (detail && typeof detail.message === 'string' && detail.message.trim()) msg = detail.message;
             else if (Array.isArray(detail)) {
@@ -39,7 +40,12 @@ async function apiFetch(url, options = {}) {
             }
             else if (detail != null) msg = JSON.stringify(detail);
         } catch {}
-        throw new Error(msg);
+        const error = new Error(msg);
+        // Preserve structured backend gates so callers can reconcile stale UI
+        // state instead of showing a toast while leaving an invalid button.
+        error.status = resp.status;
+        error.detail = detail;
+        throw error;
     }
     return resp;
 }

@@ -79,6 +79,25 @@ def test_legacy_chat_video_task_endpoint_is_gone(tmp_db):
     assert observed.status_code == 404
 
 
+def test_manual_hook_readiness_endpoint_rechecks_without_creating_job(tmp_db, monkeypatch):
+    app, client, headers, event = _client_with_hook(tmp_db)
+    monkeypatch.setattr(app, "_chat_video_delivery_readiness", lambda *_args, **_kwargs: {
+        "status": "needs_owned_media", "delivery_ready": False,
+        "message": "Hook 已找到，但自有素材不足以形成正式成片。",
+    })
+
+    response = client.get(
+        "/api/ai/chat/dual-library-video/readiness",
+        params={"topic": "南非仓配准备", "hotspot_event_id": event["id"]},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "blocked"
+    assert payload["delivery_readiness"]["delivery_ready"] is False
+
+
 def test_owned_only_fallback_can_create_project_without_hotspot_event(tmp_db, monkeypatch):
     import json
 

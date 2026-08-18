@@ -388,6 +388,66 @@ def test_discovery_status_api_and_misrouted_archive(tmp_db):
     assert tmp_db.get_hotspot_discovery_request(foreign["id"])["status"] == "queued"
 
 
+def test_discovery_status_matched_returns_formal_delivery_readiness(tmp_db, monkeypatch):
+    admin_id = tmp_db.create_user(
+        "disc-matched-admin", auth.hash_password("pw12345"), "admin", "Disc Matched"
+    )
+    client = TestClient(app.app)
+    token = client.post("/api/auth/login", json={
+        "username": "disc-matched-admin", "password": "pw12345",
+    }).json()["access_token"]
+    hotspot_id, _ = tmp_db.upsert_hotspot({
+        "title": "南非仓配现场", "summary": "仓内作业",
+        "source_url": "https://example.com/matched-discovery", "publisher": "SA Today",
+        "published_at": "2026-08-01T00:00:00Z", "retrieved_at": "2026-08-01T00:00:00Z",
+        "snapshot_sha256": "matched-discovery",
+    })
+    asset_id = tmp_db.create_asset({
+        "name": "已匹配母片", "filepath": "assets/matched-discovery.mp4", "file_type": "video",
+        "category": "other", "duration": 20, "size": 1, "source": "youtube",
+        "status": "active", "sha256": "d" * 64,
+    })
+    event = tmp_db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 7_000,
+        "title_zh": "仓内作业现场", "title_en": "Warehouse operation",
+        "segments": [], "confidence": 0.9, "review_status": "confirmed",
+        "evidence": {
+            "what_happened": "仓内正在进行作业",
+            "hook_reason": "现场可核验",
+            "logistics_question": "仓内作业会影响哪个交接节点？",
+        },
+    }])[0]
+    tmp_db.update_hotspot_event_clip_media(
+        event["id"], "assets/events/matched-discovery.mp4", None, "ready"
+    )
+    media_id, _ = tmp_db.upsert_hotspot_media({
+        "hotspot_id": hotspot_id, "asset_id": asset_id, "media_kind": "video_link",
+        "platform": "youtube", "platform_media_id": "matched-discovery",
+        "source_page_url": "https://www.youtube.com/watch?v=matched-discovery",
+        "original_media_url": "https://www.youtube.com/watch?v=matched-discovery",
+        "download_status": "downloaded", "rights_tier": "authorized",
+    })
+    request = tmp_db.enqueue_hotspot_discovery_request("匹配状态正式门禁", requested_by=admin_id)
+    tmp_db.update_hotspot_discovery_request(
+        request["id"], status="matched", stage="hooks_ready", matched_media_id=media_id,
+    )
+    monkeypatch.setattr(app, "_chat_video_delivery_readiness", lambda *_args, **_kwargs: {
+        "status": "needs_owned_media", "delivery_ready": False,
+        "message": "Hook 已找到，但自有素材不足以形成正式成片。",
+    })
+
+    response = client.get(
+        f"/api/hotspot-discovery-requests/{request['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["video"]["status"] == "blocked"
+    assert payload["video"]["delivery_readiness"]["delivery_ready"] is False
+    assert "自有素材不足" in payload["message"]
+
+
 def test_chat_ui_uses_result_state_card_without_conflicting_peer_status():
     page = Path("static/chat.html").read_text(encoding="utf-8")
     assert "function resultStateCard" in page
