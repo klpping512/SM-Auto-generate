@@ -193,6 +193,17 @@ def test_formal_content_gate_rejects_repeated_actions_and_generic_checks():
     assert "自有镜头存在重复可见动作，不能用相似叉车/拖车镜头凑时长" in issues
 
 
+def test_formal_content_gate_ignores_brand_endcard_for_repetition_checks():
+    from video_generation import formal_content_repetition_issues
+
+    assert formal_content_repetition_issues([
+        {"scene_role": "owned_proof", "evidence_type": "owned_video",
+         "voiceover": "仓内逐件核对包裹。"},
+        {"scene_role": "brand_endcard", "evidence_type": "brand_endcard",
+         "voiceover": "仓内逐件核对包裹。"},
+    ]) == []
+
+
 def test_render_progress_is_mapped_to_the_parent_pipeline():
     from video_generation import render_progress_to_pipeline
 

@@ -135,6 +135,10 @@ def _normalized_copy(value: object) -> str:
 
 def formal_content_repetition_issues(scenes: list[dict]) -> list[str]:
     """Reject a formal video when narration or visible actions are repetitive."""
+    scenes = [
+        scene for scene in scenes
+        if str(scene.get("evidence_type") or "") != "brand_endcard"
+    ]
     voiceovers = [_normalized_copy(scene.get("voiceover")) for scene in scenes]
     issues: list[str] = []
     if any(line and voiceovers.count(line) > 1 for line in voiceovers):
@@ -700,12 +704,18 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         report = dict(job.get("quality_report") or {})
         script = report.get("script") or {}
         scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+        # 品牌 CTA 是固定结尾，不是内容分镜；它不能把 10 个有效内容镜头
+        # 推成 11 个而触发“分镜过多”门禁。
+        content_scenes = [
+            scene for scene in scenes
+            if str(scene.get("evidence_type") or "") != "brand_endcard"
+        ]
         issues = list(report.get("planning_issues") or [])
         hard_failures = []
         target_ms = int(script.get("duration_target_ms") or 60_000)
         adapted = bool((script.get("adaptation") or {}).get("adapted"))
         min_scenes, max_scenes = video_renderer.formal_scene_bounds(target_ms, adapted=adapted)
-        if not min_scenes <= len(scenes) <= max_scenes:
+        if not min_scenes <= len(content_scenes) <= max_scenes:
             hard_failures.append(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
         if str(script.get("source_type") or "") == "topic_brief_dual_library":
             if adapted:
@@ -718,14 +728,14 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             ):
                 hard_failures.append("正式双素材成片必须在 50–90 秒之间")
             if adapted:
-                if not (4 <= len(scenes) <= video_renderer.FORMAL_MAX_SCENES):
+                if not (4 <= len(content_scenes) <= video_renderer.FORMAL_MAX_SCENES):
                     hard_failures.append(
                         f"自适应双素材成片需要 4–"
                         f"{video_renderer.FORMAL_MAX_SCENES} 个完整分镜"
                     )
             elif not (
                 video_renderer.FORMAL_MIN_SCENES
-                <= len(scenes)
+                <= len(content_scenes)
                 <= video_renderer.FORMAL_MAX_SCENES
             ):
                 hard_failures.append(
@@ -744,7 +754,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         if not source_usage["passed"]:
             hard_failures.extend(source_usage["issues"])
         if str(script.get("source_type") or "") == "topic_brief_dual_library":
-            hard_failures.extend(formal_content_repetition_issues(scenes))
+            hard_failures.extend(formal_content_repetition_issues(content_scenes))
         issues.extend(hard_failures)
         score = max(0, 100 - len(issues) * 30)
         await asyncio.to_thread(

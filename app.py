@@ -3541,6 +3541,18 @@ async def _generate_topic_brief_video(
     overclaim_records = hotspot_preview_narration.apply_overclaim_guard(
         generated["scenes"], scenes, planning_brief.get("logistics_nodes") or [],
     )
+    # 清关安全门禁会在最后阶段把借用清关上下文的仓库镜头统一收敛到
+    # preparation 兜底句。安全性不能撤掉，但同一句不能继续占满正式成片：
+    # 用已审核的可见动作候选做一次最终去重，并继续服从每镜真实字数窗口。
+    generated = _repair_repeated_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits,
+    )
+    for record in overclaim_records:
+        scene_index = int(record.get("scene") or 0) - 1
+        if 0 <= scene_index < len(generated["scenes"]):
+            final_voiceover = generated["scenes"][scene_index].get("voiceover") or ""
+            record["final_voiceover"] = final_voiceover
+            record["distinct_safe_repair"] = final_voiceover != record.get("replaced_voiceover")
     for scene, generated_scene in zip(scenes, generated["scenes"]):
         scene.update(generated_scene)
     scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
