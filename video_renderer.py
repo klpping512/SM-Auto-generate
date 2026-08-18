@@ -499,7 +499,15 @@ def normalize_script(
         target,
         adapted=bool((script.get("adaptation") or {}).get("adapted")),
     )
-    if not min_scenes <= len(scenes) <= max_scenes:
+    # 固定品牌 CTA 是正式成片结尾，不是内容分镜；它参与总时长和渲染，
+    # 但不能把 10 个有效内容镜头算成 11 个而触发内容数量门禁。
+    content_scenes = [
+        scene for scene in scenes
+        if str(scene.get("evidence_type") or "") != "brand_endcard"
+        and str(scene.get("scene_role") or "") != "brand_cta"
+        and not scene.get("brand_endcard_path")
+    ]
+    if not min_scenes <= len(content_scenes) <= max_scenes:
         raise ValueError(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
     if asset_lookup is not None:
         for scene in scenes:

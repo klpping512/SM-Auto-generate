@@ -438,6 +438,31 @@ def test_normalize_script_preserves_short_owned_context_images():
     assert sum(scene["duration_ms"] for scene in script["scenes"]) == 17_000
 
 
+def test_normalize_script_does_not_count_brand_endcard_as_content_scene():
+    import video_renderer
+
+    script = video_renderer.normalize_script(
+        {
+            "duration_target_ms": 60_000,
+            "adaptation": {"adapted": True},
+            "scenes": [
+                {"duration": 5, "voiceover": f"仓内动作{i}", "evidence_type": "owned_video"}
+                for i in range(10)
+            ] + [{
+                "duration": 3,
+                "voiceover": "Buffalo 南非物流",
+                "evidence_type": "brand_endcard",
+                "scene_role": "brand_cta",
+                "brand_endcard_path": "uploads/brand-endcards/cta.png",
+            }],
+        },
+        set(),
+    )
+
+    assert len(script["scenes"]) == 11
+    assert script["scenes"][-1]["evidence_type"] == "brand_endcard"
+
+
 def test_normalize_script_rejects_hotspot_mother_without_event_ref():
     import video_renderer
 
