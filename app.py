@@ -3584,7 +3584,7 @@ async def _generate_topic_brief_video(
             record["distinct_safe_repair"] = final_voiceover != record.get("replaced_voiceover")
     for scene, generated_scene in zip(scenes, generated["scenes"]):
         scene.update(generated_scene)
-    scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
+    scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes, context=planning_brief)
     duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     if duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
         raise HTTPException(409, _formal_duration_insufficient_detail(

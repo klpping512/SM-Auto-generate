@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 from video_composition_policy import source_usage_report
 from video_duration_budget import rebalance_scenes_to_budget
 import asset_taxonomy
+import brand_outro_corpus
 import hotspot_lexicon
 
 
@@ -19,8 +20,10 @@ OWNED_CATEGORIES = {"warehouse", "delivery", "staff", "facility", "brand", "cust
 BRAND_ENDCARD_SCENES = (
     {
         "scene_role": "brand_cta", "evidence_type": "brand_endcard", "duration_ms": 3_000,
-        "visual": "Buffalo 南非配送车辆", "voiceover": "南非发货，先理清订单信息。",
-        "text_overlay": "Buffalo｜发货前先理清订单", "brand_endcard_path": "uploads/brand-endcards/buffalo-cape-town-van.png",
+        "visual": "Buffalo 南非配送车辆",
+        "voiceover": brand_outro_corpus.BRAND_OUTRO_CORPUS[0]["voiceover"],
+        "text_overlay": brand_outro_corpus.BRAND_OUTRO_CORPUS[0]["text_overlay"],
+        "brand_endcard_path": "uploads/brand-endcards/buffalo-cape-town-van.png",
     },
 )
 
@@ -1199,11 +1202,15 @@ def describe_plan_adaptation(
     }
 
 
-def append_brand_endcard_scenes(scenes: list[dict]) -> list[dict]:
-    """Append the user-provided Buffalo CTA endcard to every rendered topic video."""
+def append_brand_endcard_scenes(
+    scenes: list[dict], *, context: dict | None = None,
+) -> list[dict]:
+    """Append one Buffalo CTA endcard selected from the structured logistics brief."""
     combined = [dict(scene) for scene in scenes]
+    outro = brand_outro_corpus.select_brand_outro(context)
     for template in BRAND_ENDCARD_SCENES:
-        combined.append({**template, "scene": len(combined) + 1,
+        combined.append({**template, **outro, "outro_id": outro["id"],
+                         "scene": len(combined) + 1,
                          "duration": template["duration_ms"] / 1000})
     return combined
 

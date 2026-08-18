@@ -97,7 +97,7 @@ def main() -> int:
             scene.update(generated_scene)
         brief["narration_title"] = generated["title"]
         brief["narration_angle"] = generated["angle"]
-    scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes)
+    scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes, context=brief)
     job_id = f"acceptance-{uuid4().hex}"
     # 预览与正式成片都固定移动端 9:16；横版新闻源由渲染器满版居中裁切，
     # 不能在同一用户视频中切换为横屏画幅。
