@@ -117,6 +117,40 @@ def test_hotspot_library_exposes_only_confirmed_factful_ready_hooks_and_can_clea
     assert db.get_hotspot_event_clip(valid["id"]) is not None
 
 
+def test_hotspot_library_restores_existing_timed_hooks_with_scene_evidence(tmp_db):
+    import database as db
+
+    client, headers = _admin_client(tmp_db)
+    hotspot_id, _ = db.upsert_hotspot({
+        "title": "Port queue footage", "summary": "Cargo vehicles wait at the port",
+        "source_url": "https://example.com/legacy-timed-hook", "publisher": "SA Today",
+        "published_at": "2026-08-10T00:00:00Z", "retrieved_at": "2026-08-10T00:00:00Z",
+        "snapshot_sha256": "legacy-timed-hook",
+    })
+    asset_id = db.create_asset({
+        "name": "已有物流事件母片", "filepath": "assets/legacy-timed-hook.mp4", "file_type": "video",
+        "category": "other", "duration": 40, "size": 10, "source": "youtube", "status": "active",
+        "sha256": "t" * 64,
+    })
+    event = db.replace_hotspot_event_clips(asset_id, hotspot_id, [{
+        "event_index": 1, "start_ms": 0, "end_ms": 8_000,
+        "title_zh": "港口货车排队", "title_en": "Port trucks queue",
+        "review_status": "confirmed", "segments": [],
+        "logistics_scenes": [{"scene_type": "port", "visible_objects": ["货车"]}],
+        "evidence": {
+            "what_happened": "货运卡车在港口入口排队。",
+            "hook_reason": "排队现场清晰可见。",
+        },
+    }])[0]
+    db.update_hotspot_event_clip_media(event["id"], "assets/hotspot-events/legacy/event.mp4", None, "ready")
+
+    listed = client.get("/api/hotspot-events", headers=headers)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [event["id"]]
+    assert listed.json()[0]["library_status"] == "ready"
+    assert listed.json()[0]["quota_held"] is False
+
+
 def test_hotspot_library_derives_soft_bridge_for_logistics_adjacent_audited_hooks(tmp_db):
     import database as db
 
@@ -309,6 +343,29 @@ def test_hotspot_library_can_list_audit_only_without_mixing_ready_default(tmp_db
     assert audit.status_code == 200
     assert all(item["library_status"] == "audit_only" for item in audit.json())
     assert {item["title_zh"] for item in audit.json()} == {"球队训练现场"}
+
+
+def test_hotspot_event_library_list_skips_segment_matches_until_asset_detail(tmp_db):
+    import database as db
+
+    client, headers = _admin_client(tmp_db)
+    _create_ready_chat_hook(
+        db,
+        title="边境货车排队",
+        summary="口岸筛查",
+        event_title="卡车在口岸入口排队",
+        what_happened="货运卡车在口岸入口排队等待筛查",
+        logistics_question="等待会先影响哪个订单节点？",
+        snapshot="list-skip-matches-hook",
+    )
+    listed = client.get("/api/hotspot-events", headers=headers)
+    assert listed.status_code == 200
+    item = listed.json()[0]
+    assert item["virtual_asset"]["name"]
+    assert item["matches"]["owned_candidates"] == []
+    detailed = client.get(f"/api/hotspot-events?asset_id={item['asset_id']}", headers=headers)
+    assert detailed.status_code == 200
+    assert "owned_candidates" in (detailed.json()[0].get("matches") or {})
 
 
 def test_formal_hook_repair_keeps_snow_road_fact_in_first_voiceover(tmp_db):

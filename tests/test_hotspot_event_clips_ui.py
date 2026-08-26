@@ -14,6 +14,17 @@ def test_assets_page_defaults_to_ready_hook_library():
     assert "不可成片原因" in page
 
 
+def test_assets_page_renders_shell_before_blocking_on_hotspot_events():
+    page = (ROOT / "static/assets.html").read_text(encoding="utf-8")
+    assert "function renderShell(" in page
+    assert "async function loadHotspotEvents()" in page
+    assert "async function openHotspotLibrary()" in page
+    assert "正在加载内容资产" in page
+    assert "MATERIALS_PAGE_SIZE=48" in page
+    assert "iconify-icon.min.js\" defer" in page
+    assert "apiFetch('/api/assets?'+p),apiFetch('/api/hotspot-events?'" not in page
+
+
 def test_assets_page_exposes_event_clips_and_source_labels():
     page = (ROOT / "static/assets.html").read_text(encoding="utf-8")
     assert "事件片段" in page

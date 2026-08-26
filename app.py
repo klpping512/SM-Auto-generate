@@ -1839,6 +1839,7 @@ def _event_source_class(event: dict) -> str:
 async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | None = None,
                               eligible_only: bool = True, audited_only: bool = False,
                               library_status: str | None = None,
+                              include_matches: bool | None = None,
                               user=Depends(get_current_user)):
     events = db.list_hotspot_event_clips(asset_id=asset_id, hotspot_id=hotspot_id)
     for event in events:
@@ -1848,7 +1849,12 @@ async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | Non
         is_hard_ready=_is_confirmed_renderable_hotspot_hook,
         source_class_of=lambda event: str(event.get("source_class") or "general_news"),
     )
-    segments = db.list_asset_segments(limit=20_000)
+    # Library cards only need Hook metadata. Matching 20k segments here made
+    # /assets.html wait several seconds on a white empty shell.
+    compute_matches = True if include_matches is True else (
+        False if include_matches is False else asset_id is not None
+    )
+    segments = db.list_asset_segments(limit=20_000) if compute_matches else []
     for event in events:
         status = flags.get(int(event.get("id") or 0), {})
         legacy_ready = _is_legacy_ready_hotspot_hook(event)
@@ -1861,7 +1867,7 @@ async def list_hotspot_events(asset_id: int | None = None, hotspot_id: int | Non
         event["ineligible_reason"] = "" if event["is_renderable"] else (
             status.get("ineligible_reason") or "未通过可成片门禁"
         )
-        _decorate_hotspot_event(event, segments)
+        _decorate_hotspot_event(event, segments, include_matches=compute_matches)
     if library_status in {"ready", "audit_only"}:
         events = [event for event in events if event.get("library_status") == library_status]
     elif audited_only:
@@ -1885,7 +1891,8 @@ async def cleanup_ineligible_hotspot_events(user=Depends(require_role(UserRole.A
     return {"status": "cleaned", **result, **file_result}
 
 
-def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> dict:
+def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None,
+                            include_matches: bool = True) -> dict:
     """Expose a hotspot event as a previewable virtual asset without copying its mother video."""
     bridged = _with_soft_logistics_bridge(event)
     if bridged is not event:
@@ -1907,7 +1914,12 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
     preview_url = "/static/" + event["clip_path"] if has_proxy else public.get("url")
     preview_start = 0 if has_proxy else start_second
     preview_end = (int(event.get("duration_ms") or 0) / 1000) if has_proxy else end_second
-    event["matches"] = hotspot_event_matching.match_event(event, segments or db.list_asset_segments(limit=20_000))
+    if include_matches:
+        event["matches"] = hotspot_event_matching.match_event(
+            event, segments or db.list_asset_segments(limit=20_000)
+        )
+    else:
+        event["matches"] = {"owned_candidates": [], "owned_match_reason": ""}
     event["virtual_asset"] = {
         "id": event["virtual_asset_id"],
         "name": event["title_zh"],
