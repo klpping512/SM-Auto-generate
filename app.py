@@ -1903,6 +1903,10 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None,
     # 批17：卡片时效徽标取父热点真实发布时间（RSS 为 RFC2822 / YouTube 经回填为 ISO）
     parent = db.get_hotspot(int(event["hotspot_id"])) if event.get("hotspot_id") else {}
     event["published_at"] = (parent or {}).get("published_at")
+    # Library cards only load 200 hotspots for the filter dropdown; embed the
+    # parent title here so 所属热点 does not fall back to「未绑定」.
+    event["hotspot_title"] = str((parent or {}).get("title") or "").strip()
+    event["hotspot_title_zh"] = str((parent or {}).get("title_zh") or "").strip()
     start_second = max(0, int(event.get("start_ms") or 0)) / 1000
     end_second = max(start_second, int(event.get("end_ms") or 0) / 1000)
     thumbnail = (

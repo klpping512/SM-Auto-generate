@@ -362,6 +362,8 @@ def test_hotspot_event_library_list_skips_segment_matches_until_asset_detail(tmp
     assert listed.status_code == 200
     item = listed.json()[0]
     assert item["virtual_asset"]["name"]
+    assert item["hotspot_title"] == "边境货车排队"
+    assert item["hotspot_title_zh"] == ""
     assert item["matches"]["owned_candidates"] == []
     detailed = client.get(f"/api/hotspot-events?asset_id={item['asset_id']}", headers=headers)
     assert detailed.status_code == 200
