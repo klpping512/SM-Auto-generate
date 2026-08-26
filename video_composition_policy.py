@@ -6,6 +6,7 @@ source or turn a short real clip into a loop.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Iterable
 
@@ -47,6 +48,22 @@ def scene_voiceover_char_limit(scene: dict) -> int:
     if duration_seconds <= 0:
         return 150
     return max(8, min(52, int(max(0.0, duration_seconds - 0.25) * 5.0)))
+
+
+def formal_voiceover_char_bounds(scene: dict) -> tuple[int | None, int | None]:
+    """Match the formal scripting min/max window used by app.py before TTS."""
+    if str(scene.get("evidence_type") or "") == "brand_endcard":
+        return None, None
+    try:
+        duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)
+    except (TypeError, ValueError):
+        return None, None
+    if not duration_seconds:
+        return None, None
+    rate = 2.6 if duration_seconds <= 4.5 else 2.8
+    minimum = max(8, int(math.ceil(duration_seconds * rate)))
+    maximum = max(8, int(duration_seconds * 3.6))
+    return minimum, maximum
 
 
 def _range(scene: dict) -> tuple[int, int] | None:

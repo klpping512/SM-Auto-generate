@@ -2260,12 +2260,12 @@ def _repair_generated_topic_contract(
             "出车和配送衔接顺不顺，决定同城路线时效。",
             "签收完成后记录时长，才算送达闭环。",
         ),
-        "local_courier_comparison": (
-            "取件和揽收，是比较同城快递的第一步。",
-            "分拣和仓内交接，决定流程是否清楚。",
-            "末端配送和交接，才看得出服务差异。",
-            "对比要看完整维度，不能只看一个报价。",
-        ),
+            "local_courier_comparison": (
+                "取件和揽收，是比较同城快递的第一步，先核对。",
+                "分拣和仓内交接，决定流程是否清楚。",
+                "末端配送和交接，才看得出服务差异。",
+                "对比要看完整维度，不能只看一个报价。",
+            ),
         "peak_overflow_response": (
             "库位和库容，决定旺季仓储能否装得下。",
             "分拣一旦失序，后续配送就会被拖慢。",
@@ -2965,6 +2965,7 @@ def _repair_formal_narrative_bridge(
     contrast_lead = _hotspot_risk_lead(first_voiceover)
     exact_candidates = {
         "warehouse": [
+            "风险影响仓储，Buffalo分拣可核对。",
             "风险影响仓配，Buffalo分拣更可核对。",
             "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
             "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
@@ -2972,6 +2973,7 @@ def _repair_formal_narrative_bridge(
             "物流波动传到仓内，Buffalo分区核对，让异常处理更可控。",
         ],
         "staff": [
+            "风险影响协同，Buffalo分拣可核对。",
             "风险影响协同，Buffalo分拣更可核对。",
             "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
             "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
@@ -2979,6 +2981,7 @@ def _repair_formal_narrative_bridge(
             "物流风险传到作业端，Buffalo逐项确认，让责任更清楚。",
         ],
         "facility": [
+            "风险影响作业，Buffalo分区可核对。",
             "风险影响作业，Buffalo分区核对更可控。",
             "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
             "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
@@ -2986,6 +2989,7 @@ def _repair_formal_narrative_bridge(
             "物流波动传到作业区，Buffalo分区确认，让状态更清楚。",
         ],
         "delivery": [
+            "风险影响配送，Buffalo交接可核对。",
             "风险影响配送，Buffalo交接更可核对。",
             "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
             "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
@@ -2995,18 +2999,22 @@ def _repair_formal_narrative_bridge(
     }
     industry_candidates = {
         "warehouse": [
+            "风险传到仓内，Buffalo分拣可核对。",
             "现场只作提醒，Buffalo分拣更可核对。",
             "行业现场只作提醒，Buffalo逐件核对，让异常更早留痕。",
         ],
         "staff": [
+            "风险传到现场，Buffalo分拣可核对。",
             "现场只作提醒，Buffalo协同更可核对。",
             "行业现场只作提醒，Buffalo分工核对，让处理更可控。",
         ],
         "facility": [
+            "风险传到作业，Buffalo分区可核对。",
             "现场只作提醒，Buffalo分区核对更可控。",
             "行业现场只作提醒，Buffalo检查设施，让动作可留痕。",
         ],
         "delivery": [
+            "风险传到末端，Buffalo交接可核对。",
             "现场只作提醒，Buffalo交接更可核对。",
             "行业现场只作提醒，Buffalo逐项交接，让状态更清楚。",
         ],
@@ -3121,11 +3129,11 @@ def _deterministic_formal_script(
         "主题结论要由可见动作承接。", "最后把核对落到每个环节。",
     )
     topic_lines_by_intent = {
-        "local_courier_comparison": (
-            "取件、分拣和末端交接要用同一口径对比。",
-            "现场分拣动作可见，再看包裹如何进入末端。",
-            "同路线再比较交接记录，结果才有可比性。",
-        ),
+            "local_courier_comparison": (
+                "取件、分拣和末端交接都要用同一口径对比。",
+                "现场分拣动作可见，再看包裹如何进入末端。",
+                "同路线再比较交接记录，结果才有可比性。",
+            ),
         "same_city_delivery_sla": (
             "接单、分拣、出车和签收都要统一计时。",
             "分拣和交接用时也要算进同城配送全程。",
@@ -3173,6 +3181,9 @@ def _deterministic_formal_script(
             "现场动作正在按流程逐项展开。",
             "画面中的物流动作正在按流程展开。",
             "画面中的物流作业动作正在现场逐项展开。",
+            "现场动作逐项核对。",
+            "仓内核对正在进行。",
+            "逐项核对并记录。",
         )
         for candidate in fallbacks:
             length = len("".join(candidate.split()))
@@ -3203,24 +3214,28 @@ def _deterministic_formal_script(
             bridge_done = True
             category_bridges = {
                 "warehouse": [
+                    "风险影响仓储，Buffalo分拣可核对。",
                     "风险影响仓配，Buffalo分拣更可核对。",
                     "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
                     "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
                     "现场风险提醒仓内先核对，Buffalo让每件货的状态更清楚。",
                 ],
                 "staff": [
+                    "风险影响协同，Buffalo分拣可核对。",
                     "风险影响协同，Buffalo分拣更可核对。",
                     "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
                     "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
                     "现场变化越突然，Buffalo越要分工核对，让处理更可控。",
                 ],
                 "facility": [
+                    "风险影响作业，Buffalo分区可核对。",
                     "风险影响作业，Buffalo分区核对更可控。",
                     "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
                     "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
                     "现场风险提醒设施先检查，Buffalo把关键动作留痕。",
                 ],
                 "delivery": [
+                    "风险影响配送，Buffalo交接可核对。",
                     "风险影响配送，Buffalo交接更可核对。",
                     "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
                     "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
@@ -3614,6 +3629,12 @@ def _repair_short_formal_voiceovers(
             "画面正在说明当前物流环节，相关动作需要逐项看清。",
             "先看清画面中的物流动作，再回到当前主题逐项核对。",
         ]))
+        candidates.extend((
+            "逐项核对并记录。",
+            "现场动作逐项核对。",
+            "仓内核对正在进行。",
+            "Buffalo逐项核对并记录。",
+        ))
         replacement = next(
             (
                 candidate for candidate in candidates
@@ -3626,6 +3647,51 @@ def _repair_short_formal_voiceovers(
             raise ValueError(f"内容规划模型第 {index + 1} 个分镜旁白少于 {minimum} 字时长下限")
         item["voiceover"] = replacement
         item["text_overlay"] = replacement.rstrip("。")[:24]
+    return repaired
+
+
+def _coerce_fallback_voiceovers_into_window(
+    generated: dict,
+    scenes: list[dict],
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+) -> dict:
+    """Last-resort length pad for the offline evidence script only.
+
+    Formal beats have a measured 8-character floor.  If earlier repairs still
+    leave a line shorter than that window, keep a complete visible-action
+    sentence instead of failing the user's production job.
+    """
+    filler = "逐项核对并记录。"
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    for index, (item, scene) in enumerate(zip(repaired["scenes"], scenes)):
+        if str(scene.get("evidence_type") or "") == "brand_endcard":
+            continue
+        minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+        maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        voiceover = str(item.get("voiceover") or "").strip()
+        compact_length = len("".join(voiceover.split()))
+        if voiceover and (minimum is None or compact_length >= minimum) and (
+            maximum is None or compact_length <= maximum
+        ):
+            continue
+        candidate = filler
+        compact_length = len("".join(candidate.split()))
+        while minimum is not None and compact_length < minimum:
+            next_candidate = candidate.rstrip("。") + "，" + filler
+            next_length = len("".join(next_candidate.split()))
+            if maximum is not None and next_length > maximum:
+                break
+            candidate = next_candidate
+            compact_length = next_length
+        if maximum is not None and compact_length > maximum:
+            clipped = "".join(candidate.split())[:maximum]
+            candidate = clipped.rstrip("，、；") + "。"
+            compact_length = len("".join(candidate.split()))
+        if minimum is not None and compact_length < minimum:
+            continue
+        item["voiceover"] = candidate
+        item["text_overlay"] = candidate.rstrip("。")[:24]
     return repaired
 
 
@@ -3653,6 +3719,7 @@ def _repair_dangling_formal_voiceovers(
     # reviewed visible-action statements, not new service claims.
     safe_by_category = {
         "warehouse": (
+            "逐项核对并记录。",
             "仓内人员按区域逐件核对包裹。",
             "分拣台前工作人员按路线逐件核对包裹。",
             "现场人员按区域逐件核对包裹并完成分拣准备。",
@@ -3660,16 +3727,19 @@ def _repair_dangling_formal_voiceovers(
             "仓内工作人员按顺序核对货物并逐项记录分拣结果。",
         ),
         "staff": (
+            "逐项核对并记录。",
             "工作人员按流程逐项核对现场包裹。",
             "现场人员协同核对包裹并完成作业准备。",
             "现场工作人员协同核对货物并逐项记录当前作业结果。",
         ),
         "facility": (
+            "逐项核对并记录。",
             "仓内设备按区域配合包裹分拣作业。",
             "设施现场按分区完成作业准备。",
             "仓内设备按区域配合作业并逐项记录可见处理动作。",
         ),
         "delivery": (
+            "逐项核对并记录。",
             "配送车辆按既定动线完成发运准备。",
             "车辆出发前按流程核对交接信息。",
             "配送车辆按现场动线完成交接准备并逐项记录结果。",
@@ -3981,6 +4051,10 @@ def _finalize_formal_script_candidate(
     generated = _repair_formal_narrative_bridge(
         generated, scenes, hook_binding_mode=hook_binding_mode,
     )
+    if allow_fallback_bridge:
+        generated = _coerce_fallback_voiceovers_into_window(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
     _validate_formal_copy_specificity(generated)
     _validate_complete_formal_voiceovers(generated)
     _validate_generated_topic_anchor(generated, brief, has_event_anchor=bool(event))

@@ -91,6 +91,29 @@ def test_zastock_scene_forced_safe_copy():
     assert generated[1]["voiceover"] == "已清关完成，货物顺利放行。"
 
 
+def test_zastock_non_customs_topic_does_not_inject_customs_copy():
+    scenes = [
+        {
+            "scene": 1,
+            "scene_role": "owned_proof",
+            "evidence_type": "owned_video",
+            "duration_ms": 8_000,
+            "primary_category": "delivery",
+            "asset_source": "za_stock_license",
+            "asset_id": 866,
+        },
+    ]
+    original = "风险影响配送，Buffalo交接更可核对。"
+    generated = [
+        {"voiceover": original, "text_overlay": "仓配核对"},
+    ]
+    records = narration.apply_overclaim_guard(generated, scenes, ["仓储", "末端"])
+    assert records == []
+    assert generated[0]["voiceover"] == original
+    for term in ("清关", "海关", "放行", "报关", "通关"):
+        assert term not in generated[0]["voiceover"]
+
+
 def test_zastock_diag_passed_category():
     brief = _customs_brief()
     segments = [

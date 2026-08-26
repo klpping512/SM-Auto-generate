@@ -378,8 +378,8 @@ def test_whitelist_diversity_cost_is_bounded_and_visible():
         assert item["voiceover"] in variant_pool[category]
         assert item["text_overlay"] == item["voiceover"].rstrip("。")[:24]
     total_variants = sum(len(pool) for pool in variant_pool.values())
-    # 如实记录：4 个危险类别共 16 个安全变体（每类 4 档）——代价有限且可见
-    assert total_variants == 16
+    # 长句 4 档 + 短镜头 8 字档；代价仍限定在危险 scene
+    assert 16 <= total_variants <= 24
     # 同一类别的多条危险 scene 会收敛到同一变体（多样性的代价本身）
     scenes2 = [_warehouse_scene(), {**_warehouse_scene(), "scene": 3}]
     generated2 = [
@@ -388,3 +388,44 @@ def test_whitelist_diversity_cost_is_bounded_and_visible():
     ]
     narration.apply_overclaim_guard(generated2, scenes2, CUSTOMS_NODES)
     assert generated2[0]["voiceover"] == generated2[1]["voiceover"]
+
+
+def test_voiceover_ignores_retrieval_customs_nodes_when_contract_is_cangpei():
+    """仓配契约不能因为 retrieval 塞进清关节点就改写成清关准备稿。"""
+    brief = {
+        "logistics_topic": "客户临时要求周日送一台咖啡机，仓配怎么安排",
+        "logistics_nodes": ["仓储", "清关", "配送"],
+        "topic_contract": {"nodes": ["仓储", "末端"]},
+    }
+    copy = planner._voiceover(brief, "owned_proof", 2, "", "delivery")
+    assert "清关" not in copy
+    assert "海关" not in copy
+    assert "放行" not in copy
+
+
+def test_off_topic_customs_pollution_is_stripped_from_cangpei_copy():
+    """第一轮咖啡机成片污染句：非清关主题必须剥掉清关准备稿。"""
+    scenes = [{
+        **_warehouse_scene(),
+        "primary_category": "delivery",
+        "asset_source": "upload",
+    }]
+    polluted = "清关前的发运准备：单证与货物正在备齐，等待海关放行。"
+    generated = [{"voiceover": polluted, "text_overlay": "清关前"}]
+    records = narration.apply_overclaim_guard(generated, scenes, ["仓储", "末端"])
+    assert records and records[0]["mode"] == "off_topic_customs_strip"
+    replaced = generated[0]["voiceover"]
+    assert replaced != polluted
+    for term in ("清关", "海关", "放行", "报关", "通关"):
+        assert term not in replaced
+        assert term not in generated[0]["text_overlay"]
+    assert not narration.off_topic_customs_pollution_issues(replaced, ["仓储", "末端"])
+
+
+def test_policy_topic_still_forces_customs_preparation_copy():
+    """政策法规话题仍走清关准备稿，不能被仓配剥离误伤。"""
+    scenes = [_warehouse_scene()]
+    generated = [{"voiceover": "仓内核对货物。", "text_overlay": "仓内核对"}]
+    records = narration.apply_overclaim_guard(generated, scenes, ["清关"])
+    assert records and records[0]["mode"] == "whitelist_forced"
+    assert "清关前" in generated[0]["voiceover"]

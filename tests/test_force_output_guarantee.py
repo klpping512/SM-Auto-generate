@@ -277,3 +277,34 @@ def test_road_truck_hook_is_not_exact_evidence_for_cangpei_topic(tmp_db):
     assert app._hook_fact_supports_exact_topic_intent(topic, event) is False
     assessment = app._hook_binding_assessment(topic, [event])
     assert assessment["mode"] != "exact"
+
+
+def test_immutable_nodes_keep_zastock_from_polluting_cangpei_with_customs_copy():
+    import app
+    import hotspot_preview_narration as narration
+
+    brief = {
+        "requested_topic": "客户临时要求周日送一台咖啡机，仓配怎么安排",
+        "logistics_nodes": ["仓储", "清关", "配送"],
+        "topic_contract": {"nodes": ["仓储", "末端"]},
+    }
+    nodes = app._immutable_topic_guard_nodes(brief)
+    assert "清关" not in nodes
+    scenes = [{
+        "scene": 1,
+        "scene_role": "owned_proof",
+        "evidence_type": "owned_video",
+        "duration_ms": 8_000,
+        "primary_category": "delivery",
+        "asset_source": "za_stock_license",
+        "asset_id": 866,
+    }]
+    generated = [{
+        "voiceover": "仓配先核对接货和出车。",
+        "text_overlay": "仓配核对",
+    }]
+    records = narration.apply_overclaim_guard(generated, scenes, nodes)
+    assert records == []
+    assert generated[0]["voiceover"] == "仓配先核对接货和出车。"
+    for term in ("清关", "海关", "放行"):
+        assert term not in generated[0]["voiceover"]

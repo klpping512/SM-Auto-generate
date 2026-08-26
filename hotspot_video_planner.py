@@ -298,7 +298,8 @@ def _owned_node_tag_relevance(item: dict, brief: dict) -> float:
 _OWNED_ASSET_SOURCES = frozenset({
     "upload", "directory", "local_directory", "manual", "local",
     # 受控放行：za-stock 免版权通用背景。仅用于补视觉洞，口播由文案门禁
-    # (apply_overclaim_guard) 强制走安全模板，不构成 Buffalo 能力证明。
+    # (apply_overclaim_guard) 强制走主题匹配的安全模板，不构成 Buffalo 能力证明。
+    # 清关准备稿只在用户原主题含清关时使用；仓配等非清关话题改走通用背景稿。
     "za_stock_license",
 })
 
@@ -311,7 +312,8 @@ def _is_buffalo_usable_source(item: dict) -> bool:
     # Licensed stock or a generic library must not be represented as Buffalo
     # proof.  Existing legacy rows omit asset_source and remain usable.
     # za_stock_license 是受控例外：通用背景素材，仅补视觉洞；scene 带
-    # asset_source 标记，文案门禁据此强制走安全模板（不宣称南非现场/自有能力）。
+    # asset_source 标记，文案门禁据此强制走主题匹配的安全模板
+    # （不宣称南非现场/自有能力；非清关话题不得写成清关准备）。
     source = item.get("asset_source")
     return not source or str(source) in _OWNED_ASSET_SOURCES
 
@@ -684,22 +686,12 @@ def _broad_operational_owned_candidates(
     ]
 
 
-def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
-                                  min_chars: int | None = None) -> str:
-    """清关 preparation 模式的安全兼底文案：只说准备、绝不含完成词。
-
-    纯确定性、无模型调用；供规划模板与过度宣称门禁回退共用。
-    长句在前、短句在后，按字数边界选最长可用档位。
-    """
-    labels = {"warehouse": "仓内备货", "delivery": "发运准备",
-              "staff": "分拣与核对", "facility": "现场准备"}
-    label = labels.get(str(category or "").casefold(), "仓内准备")
-    variants = (
-        f"清关前的{label}：先在仓内把单证与货物备齐，等待海关放行。",
-        f"清关前的{label}：单证与货物正在备齐，等待海关放行。",
-        f"清关前的{label}：先把单证与货物备齐。",
-        f"清关前的{label}：单证与货物备齐中。",
-    )
+def _bounded_template_copy(
+    variants: tuple[str, ...],
+    max_chars: int | None = None,
+    min_chars: int | None = None,
+) -> str:
+    """Pick the longest variant that still fits the compact-character bounds."""
     fallback = variants[-1]
     for copy in variants:
         compact_length = len("".join(copy.split()))
@@ -709,6 +701,80 @@ def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
             continue
         return copy
     return fallback
+
+
+def safe_customs_preparation_copy(category: str, max_chars: int | None = None,
+                                  min_chars: int | None = None) -> str:
+    """清关 preparation 模式的安全兼底文案：只说准备、绝不含完成词。
+
+    纯确定性、无模型调用；供规划模板与过度宣称门禁回退共用。
+    长句在前、短句在后，按字数边界选最长可用档位。
+    只允许在用户原主题真含清关节点时使用。
+    """
+    labels = {"warehouse": "仓内备货", "delivery": "发运准备",
+              "staff": "分拣与核对", "facility": "现场准备"}
+    label = labels.get(str(category or "").casefold(), "仓内准备")
+    variants = (
+        f"清关前的{label}：先在仓内把单证与货物备齐，等待海关放行。",
+        f"清关前的{label}：单证与货物正在备齐，等待海关放行。",
+        f"清关前的{label}：先把单证与货物备齐。",
+        f"清关前的{label}：单证与货物备齐中。",
+        "清关前备货中。",
+        "待清关备货中。",
+    )
+    return _bounded_template_copy(variants, max_chars=max_chars, min_chars=min_chars)
+
+
+def safe_zastock_background_copy(category: str, max_chars: int | None = None,
+                                 min_chars: int | None = None) -> str:
+    """za-stock 通用背景在非清关话题下的安全口播：不宣称自有能力，也不写成清关。"""
+    del category  # 通用背景不按作业分类宣称能力
+    variants = (
+        "这是通用作业背景，具体核对仍要回到仓内记录。",
+        "通用画面只作背景，不代表本单已经完成。",
+        "作业背景正在展开，细节以仓内记录为准。",
+        "通用作业背景正在展开。",
+    )
+    return _bounded_template_copy(variants, max_chars=max_chars, min_chars=min_chars)
+
+
+def safe_visible_owned_copy(category: str, max_chars: int | None = None,
+                            min_chars: int | None = None) -> str:
+    """非清关主题下，被清关句污染后的就地替换稿。
+
+    必须能点明 Buffalo，避免把热点后的承接镜改成无品牌动作后被叙事门禁打回。
+    """
+    labels = {
+        "warehouse": "仓内核对",
+        "delivery": "交接准备",
+        "staff": "分拣核对",
+        "facility": "现场核对",
+    }
+    label = labels.get(str(category or "").casefold(), "仓配核对")
+    variants = (
+        f"Buffalo工作人员正在做{label}：逐件核对货物并留下可查记录。",
+        f"Buffalo正在做{label}，货物与记录同步核对。",
+        f"Buffalo{label}进行中，货物逐项核对。",
+        "Buffalo逐项核对并记录。",
+        "逐项核对并记录。",
+    )
+    return _bounded_template_copy(variants, max_chars=max_chars, min_chars=min_chars)
+
+
+def _brief_topic_guard_nodes(brief: dict) -> list[str]:
+    """User-topic nodes only; retrieval-enriched logistics_nodes cannot activate customs copy."""
+    contract = brief.get("topic_contract") if isinstance(brief, dict) else None
+    if isinstance(contract, dict):
+        nodes = [
+            str(node) for node in (contract.get("nodes") or [])
+            if str(node).strip()
+        ]
+        if nodes:
+            return nodes
+    return [
+        str(node) for node in ((brief or {}).get("logistics_nodes") or [])
+        if str(node).strip()
+    ]
 
 
 def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "", *, event: dict | None = None, flow_role: str = "") -> str:
@@ -763,11 +829,12 @@ def _voiceover(brief: dict, role: str, index: int, title: str, category: str = "
             return f"{openings[(index - 1) % len(openings)]}配送前的{labels.get(category, '仓内准备')}，先把异常留在仓内。"
         if category in {"warehouse", "delivery"} and any(
             str(node).casefold() in {"清关", "customs", "关税"}
-            for node in (brief.get("logistics_nodes") or [])
+            for node in _brief_topic_guard_nodes(brief)
         ):
             # preparation 模式安全基线：非真 customs 素材只能作清关前准备
             # 上下文；文案只用准备词，绝不宣称已清关/已放行。不加开场
             # 前缀，避免叠加后突破预览链的单镜字数上限。
+            # 节点必须来自用户原主题契约，不能因为 retrieval 补了清关就改写仓配片。
             return safe_customs_preparation_copy(category)
         return f"{openings[(index - 1) % len(openings)]}Buffalo把{labels.get(category, '仓配流程')}做细，动作更好核对。"
     return "热点会变化，履约准备要先到位。"

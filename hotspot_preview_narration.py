@@ -14,7 +14,7 @@ from uuid import uuid4
 import model_router
 import douyin_copywriting_sop
 import hotspot_video_planner
-from video_composition_policy import scene_voiceover_char_limit
+from video_composition_policy import formal_voiceover_char_bounds, scene_voiceover_char_limit
 
 
 PROMPT_VERSION = "dual-library-preview-narration-v7"
@@ -334,13 +334,32 @@ def requires_safe_customs_copy(primary_category: str, logistics_nodes: list[str]
     return bool(nodes & CUSTOMS_NODES)
 
 
-# 受控开闸：za-stock 免版权通用背景，即使 primary_category=='customs' 也必须走
-# 安全准备模板——画面是通用空镜，口播不得宣称南非现场或 Buffalo 自有能力。
+# 受控开闸：za-stock 免版权通用背景，口播不得宣称南非现场或 Buffalo 自有能力。
+# 清关准备稿只在用户原主题含清关时使用；非清关话题改走通用背景稿，避免仓配片被污染。
 _ZASTOCK_SOURCES = frozenset({"za_stock_license"})
+_CUSTOMS_POLLUTION_TERMS = ("清关", "海关", "报关", "通关", "关税", "放行")
 
 
 def is_zastock_context(source: str) -> bool:
     return str(source or "").casefold() in _ZASTOCK_SOURCES
+
+
+def topic_requests_customs(logistics_nodes: list[str] | None) -> bool:
+    nodes = {str(node).casefold() for node in (logistics_nodes or [])}
+    return bool(nodes & CUSTOMS_NODES)
+
+
+def off_topic_customs_pollution_issues(
+    text: str,
+    logistics_nodes: list[str] | None,
+) -> list[str]:
+    """Non-customs topics cannot keep customs/clearance wording in voiceover or overlay."""
+    if topic_requests_customs(logistics_nodes):
+        return []
+    hits = [term for term in _CUSTOMS_POLLUTION_TERMS if term in str(text or "")]
+    if not hits:
+        return []
+    return [f"非清关主题不得出现清关表述：{'/'.join(hits)}"]
 
 
 def overclaim_completion_issues(voiceover: str, primary_category: str, logistics_nodes: list[str]) -> list[str]:
@@ -363,68 +382,115 @@ def overclaim_completion_issues(voiceover: str, primary_category: str, logistics
     return issues
 
 
+def _replace_guarded_copy(
+    item: dict,
+    *,
+    scene: int,
+    category: str,
+    source: str,
+    mode: str,
+    issues: list[str],
+    original_voiceover: str,
+    safe_copy: str,
+) -> dict:
+    item["voiceover"] = safe_copy
+    item["text_overlay"] = safe_copy.rstrip("。")[:24]
+    return {
+        "scene": scene,
+        "primary_category": category,
+        "asset_source": source,
+        "mode": mode,
+        "issues": issues,
+        "original_voiceover": original_voiceover,
+        "replaced_voiceover": safe_copy,
+    }
+
+
 def apply_overclaim_guard(
     generated_scenes: list[dict],
     scenes: list[dict],
     logistics_nodes: list[str],
 ) -> list[dict]:
-    """对模型产出的逐镜文案做后置确定性拦截，两层防线：
+    """对模型产出的逐镜文案做后置确定性拦截：
 
-    1. 白名单正向强制（whitelist_forced）：借用清关上下文的非-customs scene
-       命中危险场景即无条件替换为安全准备模板，不看模型文本——真气密。
-    2. 黑名单兜底（blacklist_fallback）：其余 scene 保留完成词检测回退
-       （防御纵深，不删）。
+    1. 白名单正向强制（whitelist_forced）：用户原主题含清关，且 scene 是借用清关上下文
+       的非-customs 素材，或 za-stock：无条件换成清关准备模板。
+    2. 非清关主题清关句剥离（off_topic_customs_strip）：模型/兜底写了清关、海关、放行等词，
+       就地换成仓配可见动作稿。za-stock 在非清关话题不再无条件改写，以免把承接镜里的
+       Buffalo 抹掉，也避免短镜头被 5 字下限模板压破正式字数窗。
+    3. 黑名单兜底（blacklist_fallback）：清关主题下其余 scene 保留完成词检测回退。
 
     返回 overclaim_guard 命中记录（含 mode、原句、分类、替换后文案），供生产链
     写入渲染报告。回退文案同步到 text_overlay，确保字幕与旁白一致。
     """
     records: list[dict] = []
+    customs_topic = topic_requests_customs(logistics_nodes)
     for index, (item, scene) in enumerate(zip(generated_scenes, scenes)):
         voiceover = str(item.get("voiceover") or "")
         overlay = str(item.get("text_overlay") or "")
         category = str(scene.get("primary_category") or "")
         source = str(scene.get("asset_source") or "")
-        try:
-            max_chars = scene_voiceover_char_limit(scene)
-        except (TypeError, ValueError):
-            max_chars = None
-        # 受控开闸：za-stock 素材无论分类一律强制安全模板（画面是通用背景）。
-        # 真 customs 自有素材仍可正常改写；黑名单兜底保留。
-        if is_zastock_context(source) or requires_safe_customs_copy(category, logistics_nodes):
-            # 第一道（白名单/正向强制）：借来上下文或 za-stock 通用背景，无条件用安全模板，
-            # 模型那句连看都不看——不给它自由说话的机会（真气密）。
+        min_chars, max_chars = formal_voiceover_char_bounds(scene)
+        if max_chars is None:
+            try:
+                max_chars = scene_voiceover_char_limit(scene)
+            except (TypeError, ValueError):
+                max_chars = None
+        if min_chars is None:
+            min_chars = 5
+        if customs_topic and (
+            is_zastock_context(source) or requires_safe_customs_copy(category, logistics_nodes)
+        ):
             safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
-                category, max_chars=max_chars, min_chars=5,
+                category, max_chars=max_chars, min_chars=min_chars,
             )
-            records.append({
-                "scene": index + 1,
-                "primary_category": category,
-                "asset_source": source,
-                "mode": "whitelist_forced",
-                "issues": [],
-                "original_voiceover": voiceover,
-                "replaced_voiceover": safe_copy,
-            })
-            item["voiceover"] = safe_copy
-            item["text_overlay"] = safe_copy.rstrip("。")[:24]
+            records.append(_replace_guarded_copy(
+                item,
+                scene=index + 1,
+                category=category,
+                source=source,
+                mode="whitelist_forced",
+                issues=[],
+                original_voiceover=voiceover,
+                safe_copy=safe_copy,
+            ))
             continue
-        # 第二道（黑名单兜底）：其余 scene 保留原有过度宣称检测（防御纵深，不删）。
+        if not customs_topic:
+            pollution = off_topic_customs_pollution_issues(
+                f"{voiceover} {overlay}", logistics_nodes,
+            )
+            if not pollution:
+                continue
+            safe_copy = hotspot_video_planner.safe_visible_owned_copy(
+                category, max_chars=max_chars, min_chars=min_chars,
+            )
+            records.append(_replace_guarded_copy(
+                item,
+                scene=index + 1,
+                category=category,
+                source=source,
+                mode="off_topic_customs_strip",
+                issues=pollution,
+                original_voiceover=voiceover,
+                safe_copy=safe_copy,
+            ))
+            continue
         issues = overclaim_completion_issues(f"{voiceover} {overlay}", category, logistics_nodes)
         if not issues:
             continue
         safe_copy = hotspot_video_planner.safe_customs_preparation_copy(
-            category, max_chars=max_chars, min_chars=5,
+            category, max_chars=max_chars, min_chars=min_chars,
         )
-        records.append({
-            "scene": index + 1,
-            "primary_category": category,
-            "mode": "blacklist_fallback",
-            "issues": issues,
-            "original_voiceover": voiceover,
-            "replaced_voiceover": safe_copy,
-        })
-        item["voiceover"] = safe_copy
-        item["text_overlay"] = safe_copy.rstrip("。")[:24]
+        records.append(_replace_guarded_copy(
+            item,
+            scene=index + 1,
+            category=category,
+            source=source,
+            mode="blacklist_fallback",
+            issues=issues,
+            original_voiceover=voiceover,
+            safe_copy=safe_copy,
+        ))
     return records
 
 
