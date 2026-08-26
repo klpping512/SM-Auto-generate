@@ -28,10 +28,17 @@ def test_assets_page_renders_shell_before_blocking_on_hotspot_events():
 def test_hook_cards_use_embedded_hotspot_title_and_clip_download():
     page = (ROOT / "static/assets.html").read_text(encoding="utf-8")
     assert "event.hotspot_title_zh||event.hotspot_title" in page
-    assert "下载片段" in page
+    assert "下载到本地" in page
+    assert "下载母片到本地" in page
+    assert "无法下载到本地" in page
     assert "此 Hook 片段已入库" in page
     assert "va.preview_status==='ready'" in page
     assert "确认并下载到库" in page
+    assert "function hookPreviewMarkup(" in page
+    assert "function hookDownloadMarkup(" in page
+    assert 'controls preload="none" playsinline' in page
+    assert "poster?`<img" not in page
+    assert "下载片段" not in page
 
 
 def test_assets_page_exposes_event_clips_and_source_labels():
