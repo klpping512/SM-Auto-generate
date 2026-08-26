@@ -14,6 +14,7 @@ import media_retention
 import video_generation
 import video_quality.service as video_quality_service
 import video_renderer
+import video_topic_contract
 from auth import get_current_user, require_role
 from models import (
     Platform,
@@ -73,6 +74,86 @@ def _validate_video_payload_clip_refs(payload: dict | None) -> None:
             resolve_clip_ref(scene, asset, events)
         except (ClipReferenceError, TypeError, ValueError) as exc:
             raise HTTPException(400, f"第{index}个分镜：{exc}") from exc
+
+
+def _completed_job_match_gate_passed(job: dict | None) -> bool:
+    """Trust the material report already produced by a completed generation job.
+
+    Material confirmation must still verify that every scene is bound and that
+    hotspot clips remain playable.  It must not rebuild a second topic contract
+    after generation and overturn a completed match report with different
+    inference defaults.
+    """
+    if not isinstance(job, dict) or str(job.get("status") or "") not in {"succeeded", "needs_review"}:
+        return False
+    report = job.get("quality_report") if isinstance(job.get("quality_report"), dict) else {}
+    scene_reports = [
+        item for item in (report.get("match_scenes") or [])
+        if isinstance(item, dict) and item.get("scene") != "全片"
+    ]
+    if not scene_reports:
+        return False
+    if any(item.get("hard_failures") for item in scene_reports):
+        return False
+    scores = []
+    for item in scene_reports:
+        try:
+            scores.append(float(item.get("score")))
+        except (TypeError, ValueError):
+            return False
+    if not scores or min(scores) < 70:
+        return False
+    evidence_gate = report.get("evidence_gate") if isinstance(report.get("evidence_gate"), dict) else {}
+    return evidence_gate.get("passed") is not False
+
+
+def _match_confirmation_issues(
+    payload: dict | None,
+    *,
+    enforce_topic_contract: bool = True,
+) -> list[str]:
+    """Return hard blockers before a project can leave material matching."""
+    if not isinstance(payload, dict):
+        return ["视频分镜尚未生成，不能进入配音"]
+    scenes = payload.get("scenes") if isinstance(payload.get("scenes"), list) else []
+    content_scenes = [
+        scene for scene in scenes
+        if isinstance(scene, dict) and str(scene.get("evidence_type") or "") != "brand_endcard"
+    ]
+    if not content_scenes:
+        return ["视频分镜尚未生成，不能进入配音"]
+    issues: list[str] = []
+    hook_events: list[dict] = []
+    for index, scene in enumerate(content_scenes, 1):
+        if not scene.get("asset_id") and not scene.get("event_clip_id"):
+            issues.append(f"第{index}镜尚未绑定热点 Hook 或 Buffalo 素材")
+        event_id = scene.get("event_clip_id")
+        if event_id:
+            try:
+                event = db.get_hotspot_event_clip(int(event_id))
+            except (TypeError, ValueError):
+                event = None
+            if not event or str(event.get("clip_status") or "") != "ready" or not str(event.get("clip_path") or "").strip():
+                issues.append(f"第{index}镜绑定的热点 Hook 不可播放或已失效")
+            elif event:
+                hook_events.append(event)
+    if enforce_topic_contract:
+        brief = payload.get("brief") if isinstance(payload.get("brief"), dict) else {}
+        topic = (
+            brief.get("logistics_topic")
+            or brief.get("requested_topic")
+            or payload.get("title")
+            or ""
+        )
+        fresh_contract = video_topic_contract.build_topic_contract(
+            topic, has_event_anchor=bool(hook_events),
+        )
+        issues.extend(video_topic_contract.validate_generated_topic_contract(
+            {"title": payload.get("title"), "scenes": content_scenes},
+            fresh_contract,
+        ))
+        issues.extend(video_topic_contract.topic_hook_compatibility_issues(topic, hook_events))
+    return list(dict.fromkeys(issues))
 
 
 def _is_manual_reviewable_preview(job: dict, report: dict) -> bool:
@@ -156,6 +237,42 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             detail=f"revision={revision['revision_no']}",
         )
         return revision
+
+    @router.post("/api/video-projects/{project_id}/match/confirm")
+    async def confirm_video_project_match(
+        project_id: str,
+        user=Depends(get_current_user),
+    ):
+        project = db.get_video_project(project_id, created_by=user["id"])
+        if not project:
+            raise HTTPException(404, "视频项目不存在")
+        payload = (project.get("current_revision") or {}).get("payload") or {}
+        active_job = None
+        if project.get("active_job_id"):
+            active_job = db.get_video_generation_job(
+                project["active_job_id"], created_by=user["id"]
+            )
+        completed_match_passed = _completed_job_match_gate_passed(active_job)
+        issues = _match_confirmation_issues(
+            payload,
+            enforce_topic_contract=not completed_match_passed,
+        )
+        if issues:
+            raise HTTPException(409, {
+                "message": "素材匹配未完成，不能进入配音",
+                "issues": issues,
+                "next_action": "先绑定全部分镜素材，并确保热点 Hook 与主题物流节点一致。",
+            })
+        db.add_audit_log(
+            user["id"], user["username"], "confirm_video_project_match",
+            target=project_id,
+            detail=(
+                "material_match_gate_passed:completed_job_report"
+                if completed_match_passed
+                else "material_match_gate_passed:live_contract"
+            ),
+        )
+        return {"ok": True, "project_id": project_id, "message": "素材匹配已通过，可进入配音字幕"}
 
     @router.post("/api/video-projects/{project_id}/generate")
     async def generate_video_project(
@@ -455,6 +572,12 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
         job = db.get_video_generation_job(project.get("active_job_id"))
         if not job or job.get("status") != "succeeded" or not job.get("output_path"):
             raise HTTPException(status_code=400, detail="成片尚未就绪，无法入队")
+        publication = dict((job.get("quality_report") or {}).get("publication") or {})
+        if publication.get("publish_allowed") is False:
+            raise HTTPException(
+                status_code=409,
+                detail="成片已完成，但当前处于质量暂缓状态；人工复核通过前不能进入发布队列",
+            )
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         scheduled_at = request.scheduled_at or now_str

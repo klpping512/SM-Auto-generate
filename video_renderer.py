@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -109,6 +110,11 @@ def normalize_revision_formal_target(
 # 因此允许一次最多 25% 的保守加速来吸收这类测得的波动；超过此阈值仍
 # 必须失败，而不是把听感明显失真的旁白强塞进现场画面。
 MAX_NATURAL_TTS_SPEEDUP = 1.25
+# A short generated sentence may be read faster than its planned visual beat.
+# Slow it down once, within a range that still sounds like normal speech, then
+# shorten the visual beat to the measured narration.  This avoids both the old
+# repeated-audio workaround and multi-second silent tails.
+MIN_NATURAL_TTS_TEMPO = 0.85
 # 素材严重不足快速失败阈值：真实画面连旁白时长的一半都盖不住时，单次收缩+
 # 重合成只会产出一句残缺旁白，并白烧一次外部 TTS（约 90 秒/次、还会重试）——
 # 直接失败。轻度溢出（比例高于该值）仍走原有“最多加速 25% + 一次文本收缩”逻辑。
@@ -118,6 +124,7 @@ MIN_FOOTAGE_TO_NARRATION_RATIO = 0.5
 MAX_TRAILING_NARRATION_GAP_SECONDS = 0.75
 TTS_MAX_ATTEMPTS = 3
 TTS_RETRY_DELAY_SECONDS = 1.0
+_MINIMAX_TTS_REQUEST_LOCK = threading.Lock()
 # A short video must read as one native mobile format without throwing away
 # information from a landscape source. Every production beat uses the same
 # 9:16 canvas: the complete source is fitted inside it, while a low-contrast
@@ -244,10 +251,13 @@ def resolve_tts_selection(
             return "mimo", MIMO_TTS_VOICE
         return "mimo", candidate or MIMO_TTS_VOICE
     if normalized_provider == "minimax":
-        allowed = {MINIMAX_TTS_VOICE, "minimax_default", ""}
+        configured_voice = os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE)
+        allowed = {MINIMAX_TTS_VOICE, configured_voice, "minimax_default", ""}
+        if candidate in {"", "minimax_default"}:
+            return "minimax", configured_voice
         if candidate and candidate not in allowed:
-            return "minimax", MINIMAX_TTS_VOICE
-        return "minimax", candidate or os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE)
+            return "minimax", configured_voice
+        return "minimax", candidate
     if strict:
         raise ValueError(f"未知 TTS 服务商：{normalized_provider}")
     return "mimo", MIMO_TTS_VOICE
@@ -279,6 +289,14 @@ def _scene_tts_concurrency() -> int:
         return max(1, min(8, int(os.environ.get("SCENE_TTS_CONCURRENCY", "2"))))
     except ValueError:
         return 2
+
+
+def _minimax_tts_min_interval_seconds() -> float:
+    """Keep MiniMax business-rate limits stable across concurrent projects."""
+    try:
+        return max(0.0, min(5.0, float(os.environ.get("MINIMAX_TTS_MIN_INTERVAL_SECONDS", "0.35"))))
+    except ValueError:
+        return 0.35
 
 
 def _scene_ffmpeg_concurrency() -> int:
@@ -416,6 +434,10 @@ def _match_asset_by_scene(scene_visual: str, available_assets: list[dict],
     return None
 
 
+def _copy_key(value: object) -> str:
+    return "".join(char for char in str(value or "") if char.isalnum())
+
+
 def normalize_script(
     script: dict,
     asset_ids: set[int],
@@ -494,7 +516,22 @@ def normalize_script(
             "asset_end_ms": asset_end_ms,
             "event_clip_id": event_clip_id,
             "brand_endcard_path": str(raw.get("brand_endcard_path") or "")[:240],
+            "flow_role": str(raw.get("flow_role") or "")[:32],
+            "copy_anchor": str(raw.get("copy_anchor") or "")[:120],
+            "action_key": str(raw.get("action_key") or "")[:120],
+            "primary_category": str(raw.get("primary_category") or "")[:32],
+            "copy_source": str(raw.get("copy_source") or "")[:16],
+            "copy_repair_reason": str(raw.get("copy_repair_reason") or "")[:240],
         })
+    # The planner owns narration. Rendering may preserve structural metadata,
+    # but must never replace validated MiniMax copy with a fixed sentence.
+    if scenes and str(scenes[0].get("evidence_type") or "") == "hotspot_video":
+        next_owned = next(
+            (scene for scene in scenes[1:] if str(scene.get("evidence_type") or "") == "owned_video"),
+            None,
+        )
+        if next_owned is not None and not next_owned.get("flow_role"):
+            next_owned["flow_role"] = "post_hook_bridge"
     min_scenes, max_scenes = formal_scene_bounds(
         target,
         adapted=bool((script.get("adaptation") or {}).get("adapted")),
@@ -631,17 +668,26 @@ def synthesize_minimax_tts(
     last_error: Exception | None = None
     for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
         try:
-            with httpx.Client(timeout=90, trust_env=False) as client:
-                response = client.post(
-                    f"{os.environ.get('MINIMAX_TTS_BASE_URL', MINIMAX_TTS_BASE_URL).rstrip('/')}/t2a_v2",
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json=payload,
-                )
-                response.raise_for_status()
-                body = response.json()
+            # Formal projects can run concurrently and each project also owns
+            # a scene-level TTS pool. MiniMax returns business-rate-limit
+            # failures inside an HTTP 200 body, so serialize provider calls
+            # across the process instead of multiplying retries in parallel.
+            with _MINIMAX_TTS_REQUEST_LOCK:
+                with httpx.Client(timeout=90, trust_env=False) as client:
+                    response = client.post(
+                        f"{os.environ.get('MINIMAX_TTS_BASE_URL', MINIMAX_TTS_BASE_URL).rstrip('/')}/t2a_v2",
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                interval = _minimax_tts_min_interval_seconds()
+                if interval:
+                    time.sleep(interval)
             status = (body.get("base_resp") or {}).get("status_code")
             if status not in (None, 0):
-                raise RuntimeError((body.get("base_resp") or {}).get("status_msg") or "MiniMax TTS 返回失败")
+                message = (body.get("base_resp") or {}).get("status_msg") or "MiniMax TTS 返回失败"
+                raise RuntimeError(f"status_code={status} {message}")
             audio_hex = str((body.get("data") or {}).get("audio") or "")
             if not audio_hex:
                 raise RuntimeError("MiniMax TTS 未返回音频数据")
@@ -652,7 +698,10 @@ def synthesize_minimax_tts(
             last_error = exc
             if attempt < TTS_MAX_ATTEMPTS:
                 time.sleep(TTS_RETRY_DELAY_SECONDS * attempt)
-    raise RuntimeError(f"MiniMax TTS 请求或音频解码失败，已重试 {TTS_MAX_ATTEMPTS} 次") from last_error
+    detail = str(last_error or "unknown")[:240]
+    raise RuntimeError(
+        f"MiniMax TTS 请求或音频解码失败，已重试 {TTS_MAX_ATTEMPTS} 次：{detail}"
+    ) from last_error
 
 
 def synthesize_local_macos(text: str, output: Path, voice: str = "Tingting"):
@@ -686,74 +735,178 @@ def synthesize_scene_voiceover(
     tts_provider: str | None = None,
     voice: str = "",
     style_instruction: str | None = None,
+    force_refresh: bool = False,
 ) -> dict:
-    """Route one scene voiceover through MiMo TTS (single track).
+    """Synthesize one scene with an auditable two-provider failover.
 
-    Returns metadata describing the provider actually used. MiMo failures
-    bubble up directly; there is no silent fallback.
+    The selected provider remains primary.  If it is unavailable and the
+    other configured cloud provider exists, retry that provider once.  The
+    actual provider and failure reason are returned in metadata; a fallback is
+    therefore visible in the quality report rather than silently hidden.
     """
-    import hashlib
+    requested_provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
+    if requested_provider == "local_macos":
+        local_voice = voice or "Tingting"
+        synthesize_local_macos(text, output, local_voice)
+        return {
+            "provider": "local_macos",
+            "model": "macos_say",
+            "voice": local_voice,
+            "style": style_instruction or MIMO_TTS_DEFAULT_STYLE,
+            "attempts": 1,
+            "elapsed_ms": 0,
+            "cache_hit": False,
+        }
 
-    provider = (tts_provider or os.environ.get("TTS_PROVIDER", "mimo") or "mimo").strip().lower()
-    if provider not in {"mimo", "minimax", "local_macos"}:
-        # 历史项目可能存了已下线的 TTS 服务商，统一归一到 MiMo 单轨。
-        provider = "mimo"
-    if provider == "minimax":
-        mimo_model = os.environ.get("MINIMAX_TTS_MODEL", "speech-2.8-turbo")
-        mimo_voice = voice or os.environ.get("MINIMAX_TTS_VOICE", MINIMAX_TTS_VOICE)
-    else:
-        mimo_model = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
-        mimo_voice = voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
+    primary_provider, primary_voice = resolve_tts_selection(requested_provider, voice)
+    provider_candidates = [(primary_provider, primary_voice)]
+    if primary_provider == "mimo" and os.environ.get("MINIMAX_TOKEN_PLAN_KEY"):
+        provider_candidates.append(resolve_tts_selection("minimax", ""))
+    elif primary_provider == "minimax" and os.environ.get("MIMO_API_KEY"):
+        provider_candidates.append(resolve_tts_selection("mimo", ""))
     style = style_instruction or MIMO_TTS_DEFAULT_STYLE
-    meta = {
-        "provider": provider,
-        "model": mimo_model,
-        "voice": mimo_voice,
-        "style": style,
-        "attempts": 0,
-        "elapsed_ms": 0,
-        "cache_hit": False,
-    }
     cache_root = Path(__file__).resolve().parent / "data" / "tts_cache"
-    cache_key = hashlib.sha256(
-        f"{text}|{provider}|{meta['model']}|{meta['voice']}|{meta['style']}".encode("utf-8")
-    ).hexdigest()
-    cache_path = cache_root / f"{cache_key}{output.suffix or '.wav'}"
-
-    def _copy_cache() -> bool:
-        if cache_path.is_file() and cache_path.stat().st_size > 64:
+    started = time.perf_counter()
+    if force_refresh:
+        output.unlink(missing_ok=True)
+    failures: list[dict] = []
+    for candidate_index, (provider, resolved_voice) in enumerate(provider_candidates):
+        model = (
+            os.environ.get("MINIMAX_TTS_MODEL", "speech-2.8-turbo")
+            if provider == "minimax"
+            else os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+        )
+        actual_voice = (
+            resolved_voice
+            if provider == "minimax"
+            else resolved_voice or os.environ.get("MIMO_TTS_VOICE", MIMO_TTS_VOICE)
+        )
+        meta = {
+            "provider": provider,
+            "model": model,
+            "voice": actual_voice,
+            "style": style,
+            "attempts": 1,
+            "elapsed_ms": 0,
+            "cache_hit": False,
+        }
+        cache_key = hashlib.sha256(
+            f"{text}|{provider}|{model}|{actual_voice}|{style}".encode("utf-8")
+        ).hexdigest()
+        cache_path = cache_root / f"{cache_key}{output.suffix or '.wav'}"
+        if not force_refresh and cache_path.is_file() and cache_path.stat().st_size > 64:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(cache_path.read_bytes())
             meta["cache_hit"] = True
-            return True
-        return False
-
-    def _store_cache() -> None:
+            meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            if candidate_index:
+                meta.update({
+                    "fallback_used": True,
+                    "fallback_from": primary_provider,
+                    "fallback_reason": failures[-1]["error"] if failures else "primary_unavailable",
+                })
+            return meta
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if provider == "minimax":
+                synthesize_minimax_tts(text, actual_voice, output, model=model)
+            else:
+                synthesize_mimo_tts(text, actual_voice, output, style_instruction=style)
+        except Exception as exc:
+            output.unlink(missing_ok=True)
+            failures.append({"provider": provider, "error": str(exc)[:180]})
+            continue
         try:
             cache_root.mkdir(parents=True, exist_ok=True)
             if output.is_file() and output.stat().st_size > 64:
                 cache_path.write_bytes(output.read_bytes())
         except OSError:
             pass
-
-    if provider == "local_macos":
-        synthesize_local_macos(text, output)
-        meta.update({"provider": "local_macos", "model": "macos_say", "attempts": 1})
-        return meta
-
-    started = time.perf_counter()
-    if _copy_cache():
         meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        if candidate_index:
+            meta.update({
+                "fallback_used": True,
+                "fallback_from": primary_provider,
+                "fallback_reason": failures[-1]["error"] if failures else "primary_unavailable",
+            })
+        if force_refresh:
+            meta["force_refresh"] = True
         return meta
 
-    meta["attempts"] += 1
-    if provider == "minimax":
-        synthesize_minimax_tts(text, mimo_voice, output, model=mimo_model)
-    else:
-        synthesize_mimo_tts(text, mimo_voice, output, style_instruction=style)
-    _store_cache()
-    meta["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-    return meta
+    detail = "；".join(
+        f"{item['provider']}={item['error']}" for item in failures
+    ) or "没有可用 TTS 服务商"
+    raise RuntimeError(f"TTS 双路生成失败：{detail}")
+
+
+def ensure_unique_scene_audio(
+    scenes: list[dict],
+    work_root: Path,
+    *,
+    tts_provider: str,
+    voice: str,
+    ffprobe: str,
+) -> dict:
+    """Reject the cache/provider failure that repeats one WAV across scenes.
+
+    A byte-identical track for two different timeline beats is never a valid
+    formal video.  Refresh each later duplicate once without cache; if the
+    provider still returns the same audio, fail before spending time rendering.
+    """
+    def fingerprint(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def duplicate_indexes() -> tuple[list[int], list[dict]]:
+        seen: dict[str, int] = {}
+        duplicates: list[int] = []
+        rows: list[dict] = []
+        for index, scene in enumerate(scenes):
+            path = work_root / f"voice-{index}.wav"
+            media = _probe_media(ffprobe, path)
+            duration = float(media.get("duration") or 0)
+            if duration < 0.2 or not bool(media.get("has_audio", True)):
+                raise RuntimeError(f"第{index + 1}镜 TTS 音频为空或损坏")
+            value = fingerprint(path)
+            first = seen.get(value)
+            if first is not None:
+                duplicates.append(index)
+            else:
+                seen[value] = index
+            rows.append({
+                "scene_index": index,
+                "duration": round(duration, 3),
+                "fingerprint": value[:16],
+                "duplicate_of": first,
+                "voiceover": str(scene.get("voiceover") or "")[:80],
+            })
+        return duplicates, rows
+
+    duplicates, initial_rows = duplicate_indexes()
+    refreshed: list[dict] = []
+    for index in duplicates:
+        meta = synthesize_scene_voiceover(
+            str(scenes[index].get("voiceover") or ""),
+            work_root / f"voice-{index}.wav",
+            tts_provider=tts_provider,
+            voice=voice,
+            force_refresh=True,
+        )
+        refreshed.append({"scene_index": index, **meta})
+    remaining, final_rows = duplicate_indexes()
+    if remaining:
+        human_indexes = "、".join(str(index + 1) for index in remaining)
+        raise RuntimeError(f"TTS 音频重复硬门禁未通过：第{human_indexes}镜仍复用同一音轨")
+    return {
+        "passed": True,
+        "initial_duplicates": duplicates,
+        "refreshed": refreshed,
+        "scenes": final_rows,
+        "initial_scenes": initial_rows,
+    }
 
 
 def _generate_text_overlay(
@@ -1326,6 +1479,28 @@ def compact_voiceover_to_fit_real_video(
     return shortened if shortened != compact else None
 
 
+def tts_slowdown_factor(
+    speech_duration: float,
+    planned_duration: float,
+    *,
+    trailing_gap: float = MAX_TRAILING_NARRATION_GAP_SECONDS,
+    min_tempo: float = MIN_NATURAL_TTS_TEMPO,
+) -> float | None:
+    """Return one bounded tempo fit for narration that ends too early.
+
+    ``atempo`` values below one lengthen the existing, unique TTS track without
+    replaying any syllable.  The visual duration is still capped afterwards,
+    so this helper never stretches speech beyond the planned beat.
+    """
+    speech = max(0.0, float(speech_duration))
+    planned = max(0.0, float(planned_duration))
+    target_speech = max(0.0, planned - max(0.0, float(trailing_gap)))
+    if not speech or not target_speech or speech >= target_speech - 0.05:
+        return None
+    factor = max(float(min_tempo), speech / target_speech)
+    return round(factor, 6) if factor < 0.995 else None
+
+
 def scene_render_duration(
     planned_duration: float,
     speech_duration: float,
@@ -1338,10 +1513,10 @@ def scene_render_duration(
     """Fit a single narration pass without leaving a long, silent visual tail.
 
     Normal scenes may shorten below their planning allocation when TTS is
-    naturally concise. Formal dual-library videos preserve their planned beat
-    duration, just like brand endcards, so a promised 50–90 second delivery is
-    not silently compressed into a much shorter video. Neither branch ever
-    cuts off spoken audio.
+    naturally concise. Formal videos enforce their 50–90 second promise at the
+    whole-video gate; each ordinary beat still follows measured narration so a
+    long silent tail cannot hide inside an otherwise valid total. Neither
+    branch ever cuts off spoken audio.
     """
     planned = max(0.0, float(planned_duration))
     speech = max(0.0, float(speech_duration))
@@ -1353,10 +1528,35 @@ def scene_render_duration(
 
 
 def _audio_tempo_command(ffmpeg: str, source: Path, output: Path, factor: float) -> list[str]:
-    """Build a bounded FFmpeg tempo command; callers only use a near-natural speedup."""
+    """Build a bounded FFmpeg tempo command for a near-natural pacing fit."""
     return [
         ffmpeg, "-y", "-i", str(source), "-filter:a", f"atempo={factor:.6f}",
         "-vn", str(output),
+    ]
+
+
+def _trim_tts_tail_command(ffmpeg: str, source: Path, output: Path) -> list[str]:
+    """Remove only generated edge silence, never pauses inside narration.
+
+    Reversing the PCM track turns the original trailing edge into the start of
+    the filter input. ``silenceremove`` therefore cannot touch natural pauses
+    between spoken words. A 50 ms edge is retained to avoid clipping the final
+    consonant before the renderer adds its deliberate visual breathing room.
+    """
+    return [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-filter:a",
+        (
+            "areverse,"
+            "silenceremove=start_periods=1:start_duration=0.12:"
+            "start_threshold=-50dB:start_silence=0.05,"
+            "areverse"
+        ),
+        "-vn",
+        str(output),
     ]
 
 
@@ -1503,7 +1703,9 @@ def render_job(
         scene_subtitles: list[dict] = []
         rendered_scene_sources: list[dict] = []
         audio_tempo_adjustments: list[dict] = []
+        audio_edge_trims: list[dict] = []
         voiceover_compactions: list[dict] = []
+        narration_tail_gaps: list[dict] = []
 
         # 从脚本标题或首场景旁白提取整体话题，用于素材匹配时加权
         topic = job["script"].get("title", "") or ""
@@ -1535,6 +1737,16 @@ def render_job(
                 scene_meta = future.result() or {}
                 tts_reports.append({"scene_index": index, **dict(scene_meta)})
 
+        tts_audio_uniqueness = ensure_unique_scene_audio(
+            scenes,
+            work_root,
+            tts_provider=tts_provider,
+            voice=job["voice"],
+            ffprobe=ffprobe,
+        )
+        if tts_audio_uniqueness["refreshed"]:
+            tts_reports.extend(tts_audio_uniqueness["refreshed"])
+
         pending_scene_renders: list[dict] = []
         for index, scene in enumerate(scenes):
             # 1. 使用并行预生成的 TTS 音频
@@ -1542,11 +1754,60 @@ def render_job(
             wav = work_root / f"voice-{index}.wav"
             check_canceled()
             speech_duration = _probe_media(ffprobe, wav)["duration"]
+            # TTS providers often append 250–350 ms of encoded silence. If it
+            # is measured as speech and then followed by the deliberate 750 ms
+            # visual breathing room, the delivered MP4 contains a >1s silent
+            # stall. Trim only the generated file's trailing edge before tempo
+            # fitting; natural pauses inside the narration remain untouched.
+            trimmed_wav = work_root / f"voice-{index}-edge-trimmed.wav"
+            run_cancelable_process(
+                job_id,
+                _trim_tts_tail_command(ffmpeg, wav, trimmed_wav),
+                timeout=60,
+                cancel_check=is_canceled,
+            )
+            trimmed_duration = _probe_media(ffprobe, trimmed_wav)["duration"]
+            if 0.5 <= trimmed_duration <= speech_duration + 0.05:
+                original_duration = speech_duration
+                wav = trimmed_wav
+                speech_duration = trimmed_duration
+                audio_edge_trims.append({
+                    "scene": index + 1,
+                    "audio_seconds_before": round(original_duration, 3),
+                    "audio_seconds_after": round(speech_duration, 3),
+                    "removed_seconds": round(max(0.0, original_duration - speech_duration), 3),
+                })
+            if preserve_planned_duration and not bool(scene.get("brand_endcard_path")):
+                slowdown = tts_slowdown_factor(
+                    speech_duration,
+                    float(scene["duration"]),
+                )
+                if slowdown is not None:
+                    fitted_wav = work_root / f"voice-{index}-paced.wav"
+                    run_cancelable_process(
+                        job_id,
+                        _audio_tempo_command(ffmpeg, wav, fitted_wav, slowdown),
+                        timeout=60,
+                        cancel_check=is_canceled,
+                    )
+                    wav = fitted_wav
+                    original_duration = speech_duration
+                    speech_duration = _probe_media(ffprobe, wav)["duration"]
+                    audio_tempo_adjustments.append({
+                        "scene": index + 1,
+                        "mode": "slowdown_to_reduce_silent_tail",
+                        "tempo": round(slowdown, 4),
+                        "audio_seconds_before": round(original_duration, 3),
+                        "audio_seconds_after": round(speech_duration, 3),
+                    })
             # 永不截断旁白。短旁白不再被原计划镜头强行拉成数秒静音尾部。
             duration = scene_render_duration(
                 float(scene["duration"]), speech_duration,
                 is_brand_endcard=bool(scene.get("brand_endcard_path")),
-                preserve_planned_duration=preserve_planned_duration,
+                # Formal output keeps its 50–90s promise at the whole-video
+                # timeline.  Preserving every planned beat separately caused
+                # 2–4s of silence after short TTS lines.
+                preserve_planned_duration=False,
             )
 
             # 2. 获取素材。没有对应的真实热点/自有素材时直接失败，
@@ -1666,10 +1927,11 @@ def render_job(
                         duration = scene_render_duration(
                             float(scene["duration"]), speech_duration,
                             is_brand_endcard=bool(scene.get("brand_endcard_path")),
-                            preserve_planned_duration=preserve_planned_duration,
+                            preserve_planned_duration=False,
                         )
                         audio_tempo_adjustments.append({
                             "scene": index + 1,
+                            "mode": "speedup_to_fit_real_footage",
                             "tempo": round(speedup, 4),
                             "audio_seconds_before": round(original_duration, 3),
                             "audio_seconds_after": round(speech_duration, 3),
@@ -1694,7 +1956,7 @@ def render_job(
                     duration = scene_render_duration(
                         float(scene["duration"]), speech_duration,
                         is_brand_endcard=bool(scene.get("brand_endcard_path")),
-                        preserve_planned_duration=preserve_planned_duration,
+                        preserve_planned_duration=False,
                     )
                     voiceover_compactions.append({
                         "scene": index + 1,
@@ -1706,6 +1968,12 @@ def render_job(
                         f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，旁白需 {duration:.1f} 秒；"
                         "必须拆分成可用的真实素材 Beat 或补充未使用的 Buffalo 自有图片，禁止循环真实视频"
                     )
+            narration_tail_gaps.append({
+                "scene": index + 1,
+                "render_seconds": round(duration, 3),
+                "speech_seconds": round(speech_duration, 3),
+                "tail_gap_seconds": round(max(0.0, duration - speech_duration), 3),
+            })
             scene_durations.append(duration)
             audio_path = wav if os.path.exists(wav) else None
             cues = _build_subtitle_cues_internal(
@@ -1841,9 +2109,22 @@ def render_job(
             "requested_provider": tts_provider,
             "scenes": tts_reports,
             "cache_hits": sum(1 for item in tts_reports if item.get("cache_hit")),
+            "audio_uniqueness": tts_audio_uniqueness,
         }
         report["audio_tempo_adjustments"] = audio_tempo_adjustments
+        report["audio_edge_trims"] = audio_edge_trims
         report["voiceover_compactions"] = voiceover_compactions
+        report["narration_tail_gaps"] = narration_tail_gaps
+        report["copy_provenance"] = [
+            {
+                "scene": index,
+                "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
+                "source": str(scene.get("copy_source") or "fallback"),
+                "reason": str(scene.get("copy_repair_reason") or ""),
+                "voiceover": str(scene.get("voiceover") or ""),
+            }
+            for index, scene in enumerate(scenes, 1)
+        ]
         source_usage = source_usage_report(rendered_scene_sources)
         final_subtitles = subtitle_timeline_report(
             scene_subtitles,
@@ -1872,6 +2153,11 @@ def render_job(
             "no_repeated_source_or_range": source_usage["passed"],
             "final_subtitle_timeline_aligned": final_subtitles["passed"],
             "transition_audio_video_sync": report["transition_audio_sync"]["passed"],
+            "tts_audio_unique": bool(tts_audio_uniqueness.get("passed")),
+            "narration_tail_gap_controlled": all(
+                float(item.get("tail_gap_seconds") or 0) <= 0.9
+                for item in narration_tail_gaps
+            ),
             "production_duration_50_90s": (
                 50.0 <= float(report.get("duration") or 0) <= 90.0
                 if int(job["script"].get("duration_target_ms") or 0) >= 50_000

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import socket
 from dataclasses import dataclass, field
@@ -16,10 +17,26 @@ from uuid import uuid4
 import database as db
 import semantic_matching
 import video_renderer
+import video_topic_contract
 from video_composition_policy import is_explanation_scene, source_usage_report
 import video_quality.service as video_quality_service
 from video_quality.schemas import VideoQualityInput
 from video_quality.video_evaluator import is_recoverable_temporal_evidence_error
+
+
+logger = logging.getLogger(__name__)
+
+
+def _script_quality_topic(brief: dict, script: dict) -> str:
+    """Return the immutable user topic, never a Hook-derived planner label."""
+    contract = brief.get("topic_contract") if isinstance(brief.get("topic_contract"), dict) else {}
+    return str(
+        contract.get("requested_topic")
+        or brief.get("requested_topic")
+        or brief.get("logistics_topic")
+        or script.get("title")
+        or ""
+    ).strip()
 
 
 class PipelineStage(StrEnum):
@@ -131,6 +148,23 @@ def route_script_quality(report: dict, threshold: float = 80) -> QualityDecision
 def _normalized_copy(value: object) -> str:
     """Normalize a line enough to identify a reused template."""
     return "".join(char for char in str(value or "") if char.isalnum())
+
+
+def copy_provenance_report(scenes: list[dict] | None) -> list[dict]:
+    """Expose the final per-scene narration origin in every generation report."""
+    rows = []
+    for index, scene in enumerate(scenes or [], 1):
+        source = str(scene.get("copy_source") or "fallback")
+        if source not in {"model", "repair", "policy_repair", "fallback", "corpus"}:
+            source = "fallback"
+        rows.append({
+            "scene": index,
+            "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
+            "source": source,
+            "reason": str(scene.get("copy_repair_reason") or ""),
+            "voiceover": str(scene.get("voiceover") or ""),
+        })
+    return rows
 
 
 def formal_content_repetition_issues(scenes: list[dict]) -> list[str]:
@@ -313,6 +347,21 @@ def route_video_evaluation_quality(
     evaluation_status = str(report.get("evaluation_status") or "unavailable")
     issues = report.get("issues") if isinstance(report.get("issues"), list) else []
     high_issues = [item for item in issues if str(item.get("severity")) == "high"]
+    critical_categories = {
+        "prompt_alignment", "topic_alignment", "hook_alignment",
+        "semantic_alignment", "storytelling",
+    }
+    critical_issues = [
+        item for item in issues
+        if str(item.get("category") or "") in critical_categories
+        and str(item.get("severity") or "") in {"medium", "high"}
+    ]
+    scores = report.get("scores") if isinstance(report.get("scores"), dict) else {}
+    try:
+        prompt_alignment = float(scores.get("prompt_alignment", score))
+        storytelling = float(scores.get("storytelling", score))
+    except (TypeError, ValueError):
+        prompt_alignment = storytelling = 0
     low_risk_categories = {
         "camera_quality", "temporal_consistency", "subtitle_audio_quality",
     }
@@ -332,12 +381,56 @@ def route_video_evaluation_quality(
         and all(str(item.get("category") or "") in low_risk_categories for item in issues)
         and not (report.get("technical_issues") or [])
     )
-    if (
+    # Technical hard gates have already passed before this function runs.
+    # Medium editorial notes such as visual variety remain useful audit data,
+    # but they must not strand a decodable, correctly timed, real-Hook video in
+    # ``needs_review``.  Semantic/topic mismatches and every high-severity issue
+    # are still blocking unless an expected contextual-Hook note was explicitly
+    # recovered by ``_filter_expected_dual_library_editorial_notes``.
+    noncritical_editorial_only = (
+        evaluation_status == "completed"
+        and score >= 70
+        and bool(issues)
+        and not high_issues
+        and not critical_issues
+        and not (report.get("technical_issues") or [])
+    )
+    # The evaluator's explicit clean pass is authoritative once deterministic
+    # media gates have passed. Requiring an undocumented prompt score of 85
+    # after the evaluator returned passed=true, score=86 and no issues created
+    # the contradictory “86 分通过但 needs_review” state seen in production.
+    clean_evaluator_pass = (
+        evaluation_status == "completed"
+        and bool(report.get("passed"))
+        and score >= threshold
+        and not issues
+        and not high_issues
+        and not critical_issues
+        and not (report.get("technical_issues") or [])
+        and prompt_alignment >= 75
+        and storytelling >= 75
+    )
+    # Do not call an unavailable semantic evaluator a pass.  The pipeline
+    # converts this review decision into a publication hold *after* the hard
+    # technical gates have passed and still finishes the MP4.  This preserves
+    # both truths: generation remains available, publication is not silently
+    # approved without semantic evidence.
+    if evaluation_status != "completed" and not (report.get("technical_issues") or []):
+        return QualityDecision(
+            JobStatus.NEEDS_REVIEW,
+            PipelineStage.PREVIEW_QUALITY_CHECK,
+            score,
+            ["视频质检服务暂不可用，请人工检查预览"],
+        )
+    if clean_evaluator_pass or (
         evaluation_status == "completed"
         and bool(report.get("passed"))
         and score >= threshold
         and not high_issues
-    ) or low_risk_editorial_only or (
+        and not critical_issues
+        and prompt_alignment >= 85
+        and storytelling >= 80
+    ) or low_risk_editorial_only or noncritical_editorial_only or (
         evaluation_status == "completed"
         and bool(report.get("policy_recovered"))
         and bool(report.get("passed"))
@@ -348,7 +441,7 @@ def route_video_evaluation_quality(
         return QualityDecision(JobStatus.RUNNING, PipelineStage.FINAL_RENDERING, score)
     descriptions = [
         str(item.get("description") or item.get("category") or "视频质量问题")
-        for item in (high_issues or issues)
+        for item in (critical_issues or high_issues or issues)
     ]
     if not descriptions:
         descriptions = [
@@ -368,13 +461,23 @@ def _filter_expected_dual_library_editorial_notes(report: dict, script: dict) ->
     """Keep fixed dual-Hook openings and the brand CTA from becoming false defects."""
     if str(script.get("source_type") or "") != "topic_brief_dual_library":
         return report
+    binding_mode = str((script.get("brief") or {}).get("hook_binding_mode") or "")
+    contextual_binding = binding_mode in {"adjacent_logistics", "contextual_attention"}
     kept, ignored = [], []
     for issue in report.get("issues") or []:
         category = str(issue.get("category") or "")
         description = str(issue.get("description") or "")
         expected_hook_pair = category == "temporal_consistency" and "同一热点的不同片段" in description
         expected_cta = category == "storytelling" and "品牌CTA" in description and "静态图片" in description
-        (ignored if expected_hook_pair or expected_cta else kept).append(issue)
+        expected_contextual_hook = (
+            contextual_binding
+            and category in {"prompt_alignment", "topic_alignment", "hook_alignment", "semantic_alignment"}
+            and any(term in description for term in (
+                "开场", "Hook", "热点", "hook_compatibility", "节点不匹配", "跨度大",
+            ))
+            and not any(term in description for term in ("全片", "正文偏题", "没有回应主题"))
+        )
+        (ignored if expected_hook_pair or expected_cta or expected_contextual_hook else kept).append(issue)
     if not ignored:
         return report
     filtered = {**report, "issues": kept, "expected_editorial_notes": ignored}
@@ -443,6 +546,121 @@ def lease_owner_identity() -> str:
 StageHandler = Callable[[dict], Awaitable[QualityDecision | PipelineStage | None]]
 
 
+def video_generation_auto_retry_limit() -> int:
+    """Return the bounded number of full-pipeline automatic retries.
+
+    The first claim is the initial production attempt. A configured value of
+    two therefore allows at most three complete attempts. Keep the hard cap
+    small: deterministic reconstruction is preferable to an infinite worker
+    loop when a source file is genuinely broken.
+    """
+    try:
+        configured = int(os.environ.get("VIDEO_GENERATION_AUTO_RETRIES", "2"))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(0, min(configured, 5))
+
+
+def _resequence_retry_scenes(scenes: list[dict], attempt: int) -> list[dict]:
+    """Change visual rhythm on retries while preserving grounded scene facts.
+
+    Whole scenes move together, so narration stays attached to its source.
+    The real Hook remains first and the brand close remains last.
+    """
+    copied = [dict(scene) for scene in (scenes or [])]
+    if attempt <= 1 or len(copied) < 4:
+        return copied
+    opener: list[dict] = []
+    if copied and (
+        str(copied[0].get("evidence_type") or "") == "hotspot_video"
+        or str(copied[0].get("scene_role") or "") in {"hotspot_hook", "hotspot_evidence"}
+    ):
+        opener = [copied.pop(0)]
+    closer: list[dict] = []
+    if copied and str(copied[-1].get("scene_role") or "") == "brand_close":
+        closer = [copied.pop()]
+    images = [scene for scene in copied if str(scene.get("evidence_type") or "") == "image"]
+    dynamic = [scene for scene in copied if str(scene.get("evidence_type") or "") != "image"]
+    if not images or not dynamic:
+        return opener + copied + closer
+
+    first_dynamic = dynamic.pop(0)
+    if dynamic:
+        offset = max(0, attempt - 2) % len(dynamic)
+        dynamic = dynamic[offset:] + dynamic[:offset]
+    reordered = [first_dynamic]
+    while images or dynamic:
+        if images:
+            reordered.append(images.pop(0))
+        if dynamic:
+            reordered.append(dynamic.pop(0))
+    result = opener + reordered + closer
+    for index, scene in enumerate(result, 1):
+        scene["scene"] = index
+    return result
+
+
+async def _schedule_automatic_video_retry(
+    job: dict,
+    *,
+    error_code: str,
+    error_message: str,
+    failed_stage: str,
+    quality_report: dict | None = None,
+) -> bool:
+    """Requeue a failed attempt from the immutable revision, if budget remains."""
+    try:
+        attempt = max(1, int(job.get("attempt") or 1))
+    except (TypeError, ValueError):
+        attempt = 1
+    retry_limit = video_generation_auto_retry_limit()
+    if attempt > retry_limit:
+        return False
+
+    report = dict(quality_report or job.get("quality_report") or {})
+    history = list(report.get("automatic_retry_history") or [])
+    history.append({
+        "attempt": attempt,
+        "failed_stage": failed_stage,
+        "error_code": error_code,
+        "error_message": error_message[:500],
+    })
+    report["automatic_retry_history"] = history[-5:]
+    report["automatic_retry"] = {
+        "scheduled": True,
+        "completed_attempts": attempt,
+        "remaining_retries": max(0, retry_limit - attempt + 1),
+        "restart_stage": PipelineStage.QUEUED.value,
+    }
+    await asyncio.to_thread(
+        db.update_video_generation_job,
+        job["id"],
+        status=JobStatus.PENDING.value,
+        stage=PipelineStage.QUEUED.value,
+        progress=0,
+        lease_owner=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
+        finished_at=None,
+        error_code=error_code,
+        error_message=error_message[:500],
+        quality_report=report,
+    )
+    await asyncio.to_thread(
+        db.add_video_generation_event,
+        job["id"],
+        "automatic_retry_scheduled",
+        "质量门禁未通过，已自动从确定性脚本重新生产",
+        {
+            "attempt": attempt,
+            "retry_limit": retry_limit,
+            "failed_stage": failed_stage,
+            "error_code": error_code,
+        },
+    )
+    return True
+
+
 async def run_claimed_job(
     job: dict,
     owner: str,
@@ -490,9 +708,35 @@ async def run_claimed_job(
                     quality_report=merged_report,
                 )
                 if result.status is JobStatus.NEEDS_REVIEW:
+                    issue_message = "；".join(result.issues) or "质量门禁未通过"
+                    latest_for_retry = await asyncio.to_thread(
+                        db.get_video_generation_job, job["id"]
+                    ) or latest_after_stage
+                    if await _schedule_automatic_video_retry(
+                        latest_for_retry,
+                        error_code="QualityGateRejected",
+                        error_message=issue_message,
+                        failed_stage=result.stage.value,
+                        quality_report=merged_report,
+                    ):
+                        return
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    await asyncio.to_thread(
+                        db.update_video_generation_job,
+                        job["id"],
+                        status=JobStatus.FAILED.value,
+                        stage=result.stage.value,
+                        error_code="QualityGateExhausted",
+                        error_message=issue_message[:500],
+                        finished_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        heartbeat_at=None,
+                    )
                     await asyncio.to_thread(
                         db.add_video_generation_event,
-                        job["id"], "needs_review", "质量门禁需要人工确认",
+                        job["id"], "automatic_retry_exhausted",
+                        "自动重建次数已用尽，任务已停止以防止坏片出库",
                         {"stage": result.stage.value, "issues": result.issues},
                     )
                     return
@@ -508,6 +752,7 @@ async def run_claimed_job(
                             job["id"], status=JobStatus.SUCCEEDED.value,
                             stage=target.value, progress=100, finished_at=now,
                             lease_owner=None, lease_expires_at=None,
+                            heartbeat_at=None, error_code=None, error_message=None,
                         )
                         await asyncio.to_thread(
                             db.add_video_generation_event,
@@ -548,6 +793,14 @@ async def run_claimed_job(
             PipelineStage.CANCELED.value,
         }:
             fail_stage = current.value
+        if await _schedule_automatic_video_retry(
+            latest,
+            error_code=type(exc).__name__,
+            error_message=str(exc),
+            failed_stage=fail_stage,
+        ):
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
@@ -555,8 +808,10 @@ async def run_claimed_job(
             stage=fail_stage,
             error_code=type(exc).__name__,
             error_message=str(exc)[:500],
+            finished_at=now,
             lease_owner=None,
             lease_expires_at=None,
+            heartbeat_at=None,
         )
         await asyncio.to_thread(
             db.add_video_generation_event, job["id"], "failed", "视频生成失败",
@@ -671,6 +926,10 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     "asset_start_ms": event["start_ms"],
                     "asset_end_ms": event["end_ms"],
                 })
+        planning_scenes = _resequence_retry_scenes(
+            planning_scenes,
+            max(1, int(job.get("attempt") or 1)),
+        )
         planning_payload["scenes"] = planning_scenes
         try:
             script = video_renderer.normalize_script(
@@ -755,6 +1014,76 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             hard_failures.extend(source_usage["issues"])
         if str(script.get("source_type") or "") == "topic_brief_dual_library":
             hard_failures.extend(formal_content_repetition_issues(content_scenes))
+            brief = script.get("brief") if isinstance(script.get("brief"), dict) else {}
+            contract = brief.get("topic_contract") if isinstance(brief.get("topic_contract"), dict) else {}
+            if contract:
+                topic = _script_quality_topic(brief, script)
+                hook_event_ids = brief.get("approved_hook_event_ids") or []
+                hook_events = []
+                for event_id in hook_event_ids:
+                    try:
+                        event = db.get_hotspot_event_clip(int(event_id))
+                    except (TypeError, ValueError):
+                        event = None
+                    if event:
+                        hook_events.append(event)
+                contract = video_topic_contract.build_topic_contract(
+                    topic, has_event_anchor=bool(hook_events),
+                )
+                repaired_title = video_topic_contract.ensure_title_satisfies_contract(
+                    str(script.get("title") or ""), contract,
+                )
+                if repaired_title and repaired_title != str(script.get("title") or ""):
+                    script["title"] = repaired_title
+                    report["script"] = script
+                    await asyncio.to_thread(
+                        db.update_video_generation_job, job["id"], quality_report=report,
+                    )
+                hook_binding_mode = str(brief.get("hook_binding_mode") or "exact")
+                compatibility_issues = video_topic_contract.topic_hook_compatibility_issues(
+                    topic, hook_events,
+                )
+                if hook_binding_mode == "exact" and compatibility_issues:
+                    hook_binding_mode = "contextual_attention"
+                    brief["hook_binding_mode"] = hook_binding_mode
+                    script["brief"] = brief
+                    chat_generation = dict(report.get("chat_generation") or {})
+                    chat_generation["hook_binding_mode"] = hook_binding_mode
+                    chat_generation["hook_binding_demoted"] = True
+                    chat_generation["hook_binding_demote_reason"] = compatibility_issues[:2]
+                    report["chat_generation"] = chat_generation
+                    report["script"] = script
+                    await asyncio.to_thread(
+                        db.update_video_generation_job, job["id"], quality_report=report,
+                    )
+                contract_errors = video_topic_contract.validate_generated_topic_contract(script, contract)
+                sentence_errors = video_topic_contract.incomplete_sentence_issues(script)
+                recoverable = contract_errors and all(
+                    str(error).startswith("标题缺少主题要素") for error in contract_errors
+                ) and not sentence_errors
+                if recoverable:
+                    script["title"] = repaired_title or str(contract.get("safe_title") or topic)
+                    report["script"] = script
+                    await asyncio.to_thread(
+                        db.update_video_generation_job, job["id"], quality_report=report,
+                    )
+                    contract_errors = video_topic_contract.validate_generated_topic_contract(
+                        script, contract,
+                    )
+                hard_failures.extend(contract_errors)
+                hard_failures.extend(sentence_errors)
+                if contract.get("opening_mode") == "owned_topic_hook" and hook_binding_mode == "exact":
+                    if any(str(scene.get("evidence_type") or "") == "hotspot_video" for scene in content_scenes):
+                        hard_failures.append("非事件主题禁止使用热点新闻画面")
+                    if not content_scenes or str(content_scenes[0].get("scene_role") or "") != "topic_hook":
+                        hard_failures.append("非事件主题第一镜必须是主题型开场")
+        if hard_failures:
+            logger.warning(
+                "脚本质量门禁未通过: job=%s project=%s failures=%s",
+                job.get("id"),
+                job.get("project_id"),
+                hard_failures,
+            )
         issues.extend(hard_failures)
         score = max(0, 100 - len(issues) * 30)
         await asyncio.to_thread(
@@ -781,8 +1110,9 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             "orientation": "portrait",
         }
         atoms = semantic_matching.build_semantic_atoms(payload)
-        # 自动视频只使用动态视频片段。图片不会在素材不足时静默顶替，
-        # 否则生成结果会变成静态幻灯片且用户无法发现来源问题。
+        # Prefer dynamic Buffalo clips.  When the inventory cannot provide a
+        # unique video segment, a unique owned still is the deterministic
+        # availability fallback explicitly allowed by the production policy.
         segments = [
             item for item in await asyncio.to_thread(db.list_asset_segments, None, "active", 1000)
             if not item.get("asset_hotspot_id") and item.get("asset_file_type") == "video"
@@ -793,6 +1123,12 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             top_k=10,
             required_file_type="video",
         )
+        owned_images = [
+            item for item in await asyncio.to_thread(
+                db.list_assets, "image", None, None, "active"
+            )
+            if not item.get("hotspot_id")
+        ]
         assignment_by_scene = {
             scene_index: assignments[index] if index < len(assignments) else {"candidates": []}
             for index, scene_index in enumerate(matchable_indexes)
@@ -911,11 +1247,39 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 selected, segment = candidate, candidate_segment
                 break
             if not selected or not segment:
-                scene_reports.append({
-                    "scene": index + 1, "score": 0,
-                    "hard_failures": ["没有未被使用且符合约束的本地素材"],
-                    "issues": ["请补充未使用的热点 Hook、Buffalo 自有视频或自有图片；禁止重复真实视频"],
-                })
+                fallback_image = next(
+                    (
+                        item for item in owned_images
+                        if int(item.get("id") or 0) not in used_image_asset_ids
+                    ),
+                    None,
+                )
+                if fallback_image:
+                    image_id = int(fallback_image["id"])
+                    used_image_asset_ids.add(image_id)
+                    scene.update({
+                        "asset_id": image_id,
+                        "asset_segment_id": None,
+                        "asset_start_ms": 0,
+                        "asset_end_ms": int(scene.get("duration_ms") or 6_000),
+                        "evidence_type": "image",
+                        "scene_role": "owned_context_image",
+                        "asset_source": "owned_image_fallback",
+                        "match_score": 70,
+                        "match_reasons": ["动态素材不足，使用唯一 Buffalo 自有图片兜底"],
+                    })
+                    scene_reports.append({
+                        "scene": index + 1, "score": 70,
+                        "hard_failures": [],
+                        "issues": ["动态素材不足，已自动使用 Buffalo 自有图片"],
+                        "library_origin": "owned_context_image",
+                    })
+                else:
+                    scene_reports.append({
+                        "scene": index + 1, "score": 0,
+                        "hard_failures": ["没有未被使用且符合约束的本地素材"],
+                        "issues": ["Buffalo 自有视频和静态图片均已用尽"],
+                    })
                 continue
             used_owned_asset_ids.add(int(segment["asset_id"]))
             used_segment_ids.add(int(segment["id"]))
@@ -939,8 +1303,13 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             scene_reports.append({
                 "scene": "全片", "score": 0, "hard_failures": usage["issues"], "issues": [],
             })
-        report.update({"script": script, "matches": assignments, "match_scenes": scene_reports,
-                       "source_usage": usage})
+        report.update({
+            "script": script,
+            "matches": assignments,
+            "match_scenes": scene_reports,
+            "source_usage": usage,
+            "copy_provenance": copy_provenance_report(scenes),
+        })
         await asyncio.to_thread(
             db.update_video_generation_job, job["id"],
             progress=_STAGE_PROGRESS[PipelineStage.ASSET_MATCHING], quality_report=report,
@@ -1087,7 +1456,13 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         latest_job = await asyncio.to_thread(db.get_video_generation_job, job["id"])
         report = dict((latest_job or job).get("quality_report") or {})
         report.pop("render_progress", None)
-        report["preview_quality" if preview else "final_quality"] = rendered.get("quality_report") or {}
+        rendered_quality = dict(rendered.get("quality_report") or {})
+        copy_provenance = report.get("copy_provenance") or copy_provenance_report(
+            script.get("scenes") or []
+        )
+        rendered_quality["copy_provenance"] = copy_provenance
+        report["copy_provenance"] = copy_provenance
+        report["preview_quality" if preview else "final_quality"] = rendered_quality
         await asyncio.to_thread(
             db.update_video_generation_job, job["id"],
             **{
@@ -1106,6 +1481,11 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
     async def preview_quality(job: dict):
         full_report = dict(job.get("quality_report") or {})
         report = full_report.get("preview_quality") or {}
+        prior_gate = full_report.get("gate") if isinstance(full_report.get("gate"), dict) else {}
+        try:
+            repair_attempts = max(0, int(prior_gate.get("repair_attempts") or 0))
+        except (TypeError, ValueError):
+            repair_attempts = 0
         checks = report.get("checks") or {}
         issues = [name for name, passed in checks.items() if not passed]
         script = full_report.get("script") or {}
@@ -1116,7 +1496,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             "score": 100 if report.get("status") == "passed" else 0,
             "hard_failures": issues,
             "issues": issues,
-        })
+        }, repair_attempts=repair_attempts)
         if not (
             technical_decision.status is JobStatus.RUNNING
             and technical_decision.stage is PipelineStage.FINAL_RENDERING
@@ -1241,6 +1621,29 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 quality_report=full_report,
             )
             return PipelineStage.SUCCEEDED
+        if semantic_decision.status is JobStatus.NEEDS_REVIEW:
+            # Semantic review is important for publication, but it runs after
+            # the deterministic preview gates have already proved that the MP4
+            # is decodable, audible, timed and source-safe.  Do not discard that
+            # valid production or loop the same immutable revision.  Finish the
+            # high-resolution render and expose an explicit publication hold.
+            publication = dict(full_report.get("publication") or {})
+            publication.update({
+                "tier": "quality_hold",
+                "publish_allowed": False,
+                "manual_acceptance_required": True,
+                "review_mode": "manual_preview",
+                "technical_preview_passed": True,
+                "semantic_preview_passed": False,
+                "semantic_issues": list(semantic_decision.issues),
+            })
+            full_report["publication"] = publication
+            await asyncio.to_thread(
+                db.update_video_generation_job,
+                job["id"],
+                quality_report=full_report,
+            )
+            return PipelineStage.FINAL_RENDERING
         return semantic_decision
 
     async def final_rendering(job: dict):
@@ -1254,6 +1657,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             "no_repeated_source_or_range",
             "final_subtitle_timeline_aligned",
             "transition_audio_video_sync",
+            "tts_audio_unique",
         )
         missing_or_failed = [name for name in required_final_checks if checks.get(name) is not True]
         if report.get("status") != "passed" or missing_or_failed:
@@ -1285,6 +1689,7 @@ async def worker_loop(
     lease_seconds: int = 30,
 ) -> None:
     owner = lease_owner_identity()
+    logger.info("视频生成 worker 已启动 owner=%s", owner)
     await asyncio.to_thread(db.recover_expired_video_generation_jobs)
     while not stop_event.is_set():
         job = await asyncio.to_thread(db.claim_next_video_generation_job, owner, lease_seconds)

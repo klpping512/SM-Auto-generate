@@ -48,6 +48,8 @@ import hotspot_media
 import hotspot_event_matching
 import hotspot_event_media
 import hotspot_hook_curator
+import hotspot_hook_copy
+import brand_outro_corpus
 import media_retention
 import video_generation
 import local_asset_import
@@ -63,6 +65,7 @@ import hotspot_lexicon
 import hotspot_intake_policy
 import hotspot_video_sources
 import topic_hook_pipeline
+import video_topic_contract
 import video_quality.service as video_quality_service
 import douyin_copywriting_sop
 from auth import (
@@ -323,11 +326,52 @@ def _planner_validation_kind(error: Exception) -> str:
         return "invalid_json"
     if "标题、角度或有效分镜" in text:
         return "empty_plan_fields"
+    if "旁白超过" in text and "时长上限" in text:
+        return "voiceover_too_long"
+    if "旁白少于" in text and "时长下限" in text:
+        return "voiceover_too_short"
     if "旁白" in text:
         return "invalid_voiceover"
     if "无效分镜" in text:
         return "invalid_scene"
     return "validation_error"
+
+
+def _targeted_repair_failure_signature(
+    pending_rewrites: set[int],
+    targeted_errors: dict[int, Exception],
+) -> tuple[tuple[int, str], ...]:
+    """Return the progress signal used by the MiniMax repair circuit breaker.
+
+    Exact model wording is intentionally ignored. If the same scenes keep
+    failing the same validation classes, the repair has made no contract-level
+    progress and another paid remote call cannot improve pipeline availability.
+    """
+    return tuple(
+        (index, _planner_validation_kind(targeted_errors[index]))
+        for index in sorted(pending_rewrites)
+        if index in targeted_errors
+    )
+
+
+def _immutable_topic_guard_nodes(planning_brief: dict) -> list[str]:
+    """Return only user-topic nodes for policy/overclaim enforcement.
+
+    ``build_brief`` may enrich retrieval with Hook or generic rescue nodes.
+    Those nodes are useful for finding pictures, but they cannot activate a
+    customs narration template that the user never requested.
+    """
+    contract = planning_brief.get("topic_contract")
+    if not isinstance(contract, dict):
+        topic = str(
+            planning_brief.get("requested_topic")
+            or planning_brief.get("logistics_topic")
+            or ""
+        )
+        contract = video_topic_contract.build_topic_contract(
+            topic, has_event_anchor=True,
+        )
+    return [str(node) for node in (contract.get("nodes") or []) if str(node).strip()]
 
 
 # ==================== API: Topics ====================
@@ -1882,6 +1926,19 @@ def _decorate_hotspot_event(event: dict, segments: list[dict] | None = None) -> 
         "source_class": event.get("source_class") or _event_source_class(event),
     }
     evidence = event.get("evidence") or {}
+    source_title = str(event.get("title_zh") or event.get("title_en") or "").strip()
+    attention_title = str(
+        evidence.get("attention_title")
+        or hotspot_hook_copy.attention_headline(
+            str(evidence.get("what_happened") or ""),
+            str(evidence.get("logistics_question") or ""),
+            source_title,
+        )
+    ).strip()
+    event["source_title"] = source_title
+    event["attention_title"] = attention_title
+    if attention_title:
+        event["virtual_asset"]["name"] = attention_title
     event["logistics_scenes_real"] = hotspot_intake_policy.real_logistics_scenes(
         event.get("logistics_scenes"),
         " ".join(
@@ -1944,15 +2001,111 @@ def _chat_hook_event_profile(fact_text: str) -> set[str]:
     return hotspot_lexicon.category_profile(fact_text, mode="event")
 
 
+_CHAT_HOOK_VISIBLE_SCENE_TERMS: dict[str, tuple[str, ...]] = {
+    "warehouse": (
+        "仓库", "仓储", "分拣", "分拨", "入库", "出库", "装箱", "打包",
+        "搬运", "装卸", "叉车", "扫码", "包裹", "warehouse", "sorting",
+        "packing", "forklift", "parcel", "loading",
+    ),
+    "last_mile": (
+        "末端", "配送", "派送", "交付", "交接", "快递员", "配送车辆",
+        "courier", "last mile", "delivery vehicle", "parcel delivery",
+    ),
+    "border": (
+        "边境", "口岸", "海关", "清关", "查验", "放行", "border", "customs",
+        "clearance", "beitbridge",
+    ),
+    "customs": (
+        "海关", "清关", "查验", "放行", "报关", "customs", "clearance",
+    ),
+    "port": (
+        "港口", "码头", "集装箱", "堆场", "船舶", "港区", "port", "harbour",
+        "harbor", "container", "terminal", "vessel",
+    ),
+    "road": (
+        "公路", "道路", "高速", "卡车", "货车", "车队", "交通", "路线",
+        "road", "highway", "truck", "traffic", "freight vehicle",
+    ),
+    "disruption": (
+        "事故", "侧翻", "起火", "火灾", "积雪", "大雪", "暴雪", "洪水",
+        "拥堵", "堵车", "封路", "停摆", "延误", "accident", "fire", "snow",
+        "flood", "congestion", "closure", "delay",
+    ),
+}
+
+_CHAT_HOOK_VISUAL_SCENE_MAP: dict[str, frozenset[str]] = {
+    "port": frozenset({"port", "disruption"}),
+    "border": frozenset({"border", "customs", "disruption"}),
+    "road": frozenset({"road", "disruption"}),
+    "warehouse": frozenset({"warehouse", "disruption"}),
+    "delivery": frozenset({"last_mile", "disruption"}),
+}
+
+_CHAT_HOOK_ROAD_LOGISTICS_OBJECTS = (
+    "卡车", "货车", "车辆", "车队", "货运", "运输", "配送", "派送",
+    "快递", "包裹", "货物", "truck", "freight", "vehicle", "delivery",
+    "courier", "parcel", "cargo",
+)
+
+
+def _grounded_chat_hook_scene_keys(event: dict) -> set[str]:
+    """Return logistics scenes supported by immutable visible-fact evidence.
+
+    Legacy rows can carry model-authored logistics tags, while the event
+    lexicon also recognises ``货架``. Neither makes an interview in front of a
+    beauty shelf a warehouse Hook. Automatic output therefore requires a
+    concrete logistics location, object or action in the verified fact text.
+    """
+    evidence = event.get("evidence") or {}
+    visual_audit = evidence.get("visual_audit") or {}
+    audit_scene = str(visual_audit.get("scene_type") or "").strip().casefold()
+    # Three-frame visual evidence is authoritative when present.  A legacy
+    # title/summary can call a flooded doorway a warehouse, but an explicit
+    # ``other``/``non_event`` visual verdict means there is no proven
+    # logistics scene and the Hook must not enter automatic production.
+    if visual_audit and audit_scene in {"other", "non_event", "agriculture"}:
+        return set()
+
+    fact_text = " ".join(str(value or "") for value in (
+        event.get("title_zh"), event.get("title_en"),
+        evidence.get("what_happened"), evidence.get("event_identity"),
+    )).casefold()
+    if not fact_text.strip():
+        return set()
+    grounded = {
+        scene for scene, markers in _CHAT_HOOK_VISIBLE_SCENE_TERMS.items()
+        if any(marker.casefold() in fact_text for marker in markers)
+    }
+    # A broken pavement, street interview or generic traffic sentence is not
+    # a logistics Hook.  Road grounding also needs a visible freight,
+    # delivery, vehicle or cargo object/action.
+    if "road" in grounded and not any(
+        marker.casefold() in fact_text for marker in _CHAT_HOOK_ROAD_LOGISTICS_OBJECTS
+    ):
+        grounded.discard("road")
+
+    if visual_audit and audit_scene:
+        allowed = _CHAT_HOOK_VISUAL_SCENE_MAP.get(audit_scene)
+        if not allowed:
+            return set()
+        grounded &= set(allowed)
+    return grounded & set(hotspot_intake_policy.REAL_LOGISTICS_SCENES)
+
+
 def _build_topic_brief_payload(body: TopicBriefCreateRequest) -> dict:
-    raw = body.raw_input.strip()
+    raw = video_topic_contract.normalize_topic_input(body.raw_input)
     keywords = _topic_keywords(raw)
+    topic_contract = video_topic_contract.build_topic_contract(raw)
     # The user's natural-language request is the narrative contract.  A list
     # of extracted logistics nodes is only for media retrieval; using it as
     # the subject flattened requests such as a Takealot experience video into
     # merely "配送", after which the Hook headline could take over the video.
     subject = "南非物流" if "南非" in keywords and "物流" in keywords and len(raw) <= 8 else raw[:300]
-    nodes = list(dict.fromkeys(body.logistics_nodes + [item for item in keywords if item in {"清关", "末端", "配送", "仓储", "港口", "运输"}]))
+    nodes = list(dict.fromkeys(
+        list(topic_contract.get("nodes") or [])
+        + body.logistics_nodes
+        + [item for item in keywords if item in {"清关", "末端", "配送", "仓储", "港口", "运输", "分拣"}]
+    ))
     broad = len(raw) <= 8 or raw.rstrip("？?。.") in {"南非物流", "物流", "跨境物流"}
     angle = body.angle.strip()
     if not angle and not broad:
@@ -1993,7 +2146,7 @@ _TOPIC_ANCHOR_CONTRACTS = (
 )
 
 
-def _topic_anchor_contract(topic: str) -> dict | None:
+def _topic_anchor_contract(topic: str, *, has_event_anchor: bool = False) -> dict | None:
     """Return a narrow, explicit topic contract when a request names one.
 
     It deliberately does not try to perform generic semantic scoring locally.
@@ -2005,13 +2158,29 @@ def _topic_anchor_contract(topic: str) -> dict | None:
     for contract in _TOPIC_ANCHOR_CONTRACTS:
         if any(term.casefold() in lowered for term in contract["terms"]):
             return contract
+    first_principles = video_topic_contract.build_topic_contract(
+        topic, has_event_anchor=has_event_anchor,
+    )
+    if first_principles.get("intent") != "custom_logistics_topic":
+        return first_principles
     return None
 
 
-def _validate_generated_topic_anchor(generated: dict, brief: dict) -> None:
+def _validate_generated_topic_anchor(
+    generated: dict,
+    brief: dict,
+    *,
+    has_event_anchor: bool = False,
+) -> None:
     """Reject a fluent but off-topic script before it becomes a project."""
-    contract = _topic_anchor_contract(str(brief.get("raw_input") or brief.get("subject") or ""))
+    topic = str(brief.get("raw_input") or brief.get("requested_topic") or brief.get("subject") or "")
+    contract = _topic_anchor_contract(topic, has_event_anchor=has_event_anchor)
     if not contract:
+        return
+    if contract.get("contract_version"):
+        errors = video_topic_contract.validate_generated_topic_contract(generated, contract)
+        if errors:
+            raise ValueError("；".join(errors))
         return
     title = str(generated.get("title") or "").casefold()
     voiceovers = " ".join(
@@ -2024,6 +2193,249 @@ def _validate_generated_topic_anchor(generated: dict, brief: dict) -> None:
         raise ValueError(f"内容规划模型标题没有完整回应用户主题：{contract['label']}")
     if not any(term.casefold() in voiceovers for term in contract["narrative"]):
         raise ValueError(f"内容规划模型旁白没有展开用户主题：{contract['label']}")
+
+
+def _repair_generated_topic_contract(
+    generated: dict,
+    *,
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+) -> dict:
+    """Apply the smallest auditable repair when a reachable model misses nodes.
+
+    This is deliberately narrower than the offline fallback path.  It does not
+    rewrite a script wholesale, invent a Hook, or claim a service outcome.  It
+    only restores the immutable user-topic contract (title/opening/named
+    logistics nodes) using phrases from that contract, then marks changed
+    beats as ``policy_repair`` for the report.
+    """
+    topic = str(
+        brief.get("raw_input")
+        or brief.get("requested_topic")
+        or brief.get("subject")
+        or brief.get("logistics_topic")
+        or ""
+    )
+    contract = _topic_anchor_contract(topic, has_event_anchor=bool(event))
+    if not contract or not contract.get("contract_version"):
+        return generated
+
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if len(repaired["scenes"]) != len(scenes):
+        raise ValueError("主题契约修复无法对应正式分镜数量")
+    original = {**repaired, "scenes": [dict(item) for item in repaired["scenes"]]}
+
+    # A reachable model must not replace the requested subject with a Hook
+    # headline.  The contract's safe title is a bounded topic correction, not
+    # a generic fallback slogan.
+    title = str(repaired.get("title") or "")
+    repaired["title"] = video_topic_contract.ensure_title_satisfies_contract(title, contract)
+
+    # Topic-only openings are mandatory and are intentionally deterministic so
+    # the first frame cannot become a generic “现场” opener.  For an event,
+    # scene one remains the verified Hook and is never overwritten here.
+    if not event and repaired["scenes"]:
+        opening_hook = str(contract.get("opening_hook") or "").strip()
+        first = str(repaired["scenes"][0].get("voiceover") or "")
+        maximum = voiceover_limits[0] if voiceover_limits else None
+        compact_length = len("".join(opening_hook.split()))
+        if opening_hook and opening_hook not in first:
+            if maximum is not None and compact_length > maximum:
+                raise ValueError("主题型开场超过首镜头时长上限，无法进行最小主题修复")
+            repaired["scenes"][0]["voiceover"] = opening_hook
+            repaired["scenes"][0]["text_overlay"] = opening_hook.rstrip("。！？")[:24]
+
+    missing_groups = video_topic_contract.missing_narrative_groups(repaired, contract)
+    if not missing_groups:
+        return repaired
+
+    intent = str(contract.get("intent") or "")
+    phrase_map: dict[str, tuple[str, ...]] = {
+        "same_city_delivery_sla": (
+            "从接单和取件开始计时，才看得出同城配送时效。",
+            "分拣和交接，直接影响同城配送后续时效。",
+            "出车和配送衔接顺不顺，决定同城路线时效。",
+            "签收完成后记录时长，才算送达闭环。",
+        ),
+        "local_courier_comparison": (
+            "取件和揽收，是比较同城快递的第一步。",
+            "分拣和仓内交接，决定流程是否清楚。",
+            "末端配送和交接，才看得出服务差异。",
+            "对比要看完整维度，不能只看一个报价。",
+        ),
+        "peak_overflow_response": (
+            "库位和库容，决定旺季仓储能否装得下。",
+            "分拣一旦失序，后续配送就会被拖慢。",
+            "交接不断点，配送才不容易形成积压。",
+            "预案要写清触发点和应对顺序，才能执行。",
+        ),
+        "peak_full_cycle_review": (
+            "入库和仓储，是旺季备战复盘的起点。",
+            "分拣节点要提前校准，避免后面一起拥堵。",
+            "出车和运输，需要提前排好衔接和顺序。",
+            "交付和末端配送，决定复盘是否真正闭环。",
+        ),
+        "policy_change_verification": (
+            "先确认官方发布机构，来源不明不能当结论。",
+            "再确认政策适用对象，避免把范围理解错。",
+            "生效日期必须先核清，时间点不能靠猜。",
+            "清关准备要跟着官方原文走，不能只看标题。",
+        ),
+    }
+    phrases = list(phrase_map.get(intent) or ())
+    if not phrases:
+        for group in missing_groups:
+            terms = [str(term) for term in group[:2] if str(term).strip()]
+            if terms:
+                phrases.append("、".join(terms) + "，是这个物流主题的关键节点。")
+
+    candidate_indexes: list[int] = []
+    if event:
+        bridge_indexes = set(_owned_bridge_window_indices(scenes, maximum=1))
+        candidate_indexes = [
+            index for index, scene in enumerate(scenes)
+            if str(scene.get("scene_role") or "") == "owned_proof"
+            and str(scene.get("evidence_type") or "") == "owned_video"
+            # Scene one after the Hook owns the immutable
+            # fact→impact→Buffalo bridge.  Topic-contract repair must use a
+            # later proof beat, otherwise the final bridge repair overwrites
+            # the inserted topic term and the same revision fails again.
+            and index not in bridge_indexes
+        ]
+    else:
+        candidate_indexes = [
+            index for index, scene in enumerate(scenes)
+            if str(scene.get("scene_role") or "") in {"topic_context", "owned_proof"}
+            and str(scene.get("evidence_type") or "") == "owned_video"
+        ]
+    candidate_indexes += [
+        index for index, scene in enumerate(scenes)
+        if index not in candidate_indexes
+        and str(scene.get("scene_role") or "") not in {"hotspot_evidence", "brand_cta"}
+        and str(scene.get("evidence_type") or "") != "brand_endcard"
+    ]
+    used_indexes: set[int] = set()
+
+    for group_index, group in enumerate(missing_groups):
+        phrase_candidates = []
+        if group_index < len(phrases):
+            phrase_candidates.append(phrases[group_index])
+        if group:
+            compact_terms = "、".join(str(term) for term in group[:3])
+            phrase_candidates.extend((
+                f"{compact_terms}先核对。",
+                f"{compact_terms}要逐项核对。",
+                f"{compact_terms}要逐项核对并记录。",
+                f"先核对{compact_terms}，再安排后续动作。",
+                f"{compact_terms}是这个物流主题的关键节点。",
+            ))
+        phrase_candidates = list(dict.fromkeys(phrase_candidates))
+        repaired_one = False
+        for scene_index in candidate_indexes:
+            if scene_index in used_indexes or scene_index >= len(repaired["scenes"]):
+                continue
+            current = str(repaired["scenes"][scene_index].get("voiceover") or "").strip()
+            minimum = voiceover_minimums[scene_index] if scene_index < len(voiceover_minimums) else None
+            maximum = voiceover_limits[scene_index] if scene_index < len(voiceover_limits) else None
+            options = []
+            for phrase in phrase_candidates:
+                options.extend((f"{current.rstrip('。！？；，、')}，{phrase}", phrase))
+            for option in options:
+                compact_length = len("".join(option.split()))
+                if minimum is not None and compact_length < minimum:
+                    continue
+                if maximum is not None and compact_length > maximum:
+                    continue
+                if video_topic_contract.incomplete_sentence_issues({"scenes": [{"voiceover": option}]}):
+                    continue
+                repaired["scenes"][scene_index]["voiceover"] = option
+                repaired["scenes"][scene_index]["text_overlay"] = option.rstrip("。！？")[:24]
+                used_indexes.add(scene_index)
+                repaired_one = True
+                break
+            if repaired_one:
+                break
+        if not repaired_one:
+            raise ValueError(
+                "主题契约修复无法在现有分镜字数窗口内补齐：" + "/".join(str(term) for term in group)
+            )
+
+    return _annotate_copy_revisions(
+        original, repaired, reason="topic_contract_rescue",
+    )
+
+
+def _enforce_generated_topic_opening(
+    generated: dict,
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+) -> dict:
+    """Lock the user's topic and owned-media opener before any model score.
+
+    A non-event topic cannot acquire a fake news Hook.  The first two owned
+    scenes carry a deterministic editorial Hook and its topic bridge.
+    """
+    topic = str(brief.get("raw_input") or brief.get("requested_topic") or brief.get("subject") or "")
+    contract = video_topic_contract.build_topic_contract(topic, has_event_anchor=bool(event))
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if contract.get("intent") == "custom_logistics_topic":
+        return repaired
+    repaired["title"] = contract.get("safe_title") or contract["label"]
+    if event:
+        # The verified Hook remains scene one. The first owned scene after it
+        # is reserved for the fact→risk→Buffalo brand bridge, so the immutable
+        # topic contract is locked into the following owned proof beats.
+        # This prevents a real Hook from replacing the user's requested topic
+        # without ever asking a model to rewrite the approved event fact.
+        owned_proof_indexes = [
+            index for index, scene in enumerate(scenes)
+            if str(scene.get("scene_role") or "") == "owned_proof"
+            and str(scene.get("evidence_type") or "") == "owned_video"
+        ]
+        context_indexes = owned_proof_indexes[1:] if len(owned_proof_indexes) > 1 else owned_proof_indexes
+        context_lines = list(contract.get("event_context_lines") or [contract["opening_bridge"]])
+        for scene_index, line in zip(context_indexes, context_lines):
+            if scene_index >= len(repaired["scenes"]):
+                break
+            repaired["scenes"][scene_index]["voiceover"] = line
+            repaired["scenes"][scene_index]["text_overlay"] = line.rstrip("。！？")[:24]
+    else:
+        owned_indexes = [
+            index for index, scene in enumerate(scenes)
+            if str(scene.get("scene_role") or "") in {"topic_hook", "topic_context", "owned_proof"}
+            and str(scene.get("evidence_type") or "") == "owned_video"
+        ]
+        locked = (contract["opening_hook"], contract["opening_bridge"])
+        for ordinal, scene_index in enumerate(owned_indexes[:2]):
+            if scene_index >= len(repaired["scenes"]):
+                break
+            repaired["scenes"][scene_index]["voiceover"] = locked[ordinal]
+            repaired["scenes"][scene_index]["text_overlay"] = locked[ordinal].rstrip("。！？")[:24]
+    # Static images are editorial rhythm bridges, not visual proof.  Lock their
+    # copy after model generation so a fluent model cannot invent warehouse
+    # actions (for example “分拣线在跑”) that the still image does not show.
+    image_lines = list(contract.get("image_bridge_lines") or ["先核对主题，再安排对应动作。"])
+    image_ordinal = 0
+    for scene_index, source_scene in enumerate(scenes):
+        if str(source_scene.get("scene_role") or "") != "owned_context_image":
+            continue
+        if scene_index >= len(repaired["scenes"]):
+            break
+        copy = image_lines[image_ordinal % len(image_lines)]
+        image_ordinal += 1
+        repaired["scenes"][scene_index]["voiceover"] = copy
+        repaired["scenes"][scene_index]["text_overlay"] = copy.rstrip("。！？")[:24]
+    return repaired
+
+
+def _validate_complete_formal_voiceovers(generated: dict) -> None:
+    issues = video_topic_contract.incomplete_sentence_issues(generated)
+    if issues:
+        raise ValueError("；".join(issues))
 
 
 _EMPTY_FORMAL_COPY = ("先核对清单", "配送节奏要稳", "库存要对得上")
@@ -2041,12 +2453,48 @@ def _validate_formal_copy_specificity(generated: dict) -> None:
 
 _EMPTY_HOOK_TRANSITIONS = ("镜头转到仓内", "先看执行现场", "问题摆在这里")
 _HOOK_BRIDGE_TERMS = ("安全", "风险", "影响", "异常", "提醒", "变化", "火情", "火灾", "核对")
-_VISIBLE_ACTION_TERMS = ("Buffalo", "仓", "分拣", "核对", "隔离", "归位", "标签", "封条", "堆位", "包装", "动线")
-_BRAND_ADVANTAGE_TERMS = ("做稳", "做细", "做实", "可核对", "留痕", "前置", "更清楚", "更可控")
+# A Hook fact and a Buffalo action are not yet a bridge. The copy must state
+# an actual logistics consequence between them; “Buffalo 核对” alone used to
+# pass because “核对” was incorrectly treated as an impact word.
+_LOGISTICS_IMPACT_TERMS = (
+    "延误", "延迟", "中断", "受阻", "拥堵", "排队", "滞留", "绕行",
+    "停运", "封路", "波动", "不稳", "风险", "影响", "打乱", "拖慢",
+    "节奏", "时效", "通行", "履约", "周转", "交付",
+)
+_VISIBLE_ACTION_TERMS = (
+    # A brand name is not an action.  These terms describe operations that can
+    # actually be seen in the reviewed Buffalo footage and therefore allow
+    # MiniMax to vary its wording without being rejected by a tiny keyword set.
+    "逐件", "逐项", "逐单", "分拣", "核对", "确认", "检查", "查验", "验货",
+    "扫描", "扫码", "记录", "留档", "拍照", "称重", "测量", "贴标", "标签",
+    "封条", "封箱", "包装", "打包", "隔离", "归位", "分区", "分类", "上架",
+    "入库", "出库", "盘点", "搬运", "装卸", "装车", "卸货", "交接", "签收",
+    "发运", "排车", "调度", "堆位", "动线", "复核", "点检", "检验",
+    "清点", "扫件", "登记", "理货", "分流", "码放", "处理包裹",
+)
+_VISIBLE_ACTION_FAMILIES = (
+    ("逐件", "逐项", "逐单", "扫描", "扫码", "扫件"),
+    ("核对", "确认", "检查", "查验", "验货", "复核", "点检", "检验", "清点"),
+    ("记录", "留档", "拍照", "留痕", "登记"),
+    ("称重", "测量"),
+    ("贴标", "标签", "封条", "封箱", "包装", "打包"),
+    ("隔离", "归位", "分区", "分类", "上架", "入库", "出库", "盘点", "理货", "分流", "码放"),
+    ("分拣", "理货", "分流", "处理包裹"),
+    ("搬运", "装卸", "装车", "卸货", "交接", "签收"),
+    ("发运", "排车", "调度", "堆位", "动线"),
+)
+_BRAND_ADVANTAGE_TERMS = (
+    "做稳", "做细", "做实", "更稳", "稳定", "安全", "履约", "可靠",
+    "可核对", "可追踪", "追踪", "可追溯", "可见", "透明", "留痕", "前置",
+    "可控",
+    "更清楚", "更可控", "更早发现", "减少差错", "降低风险", "责任清楚",
+)
 _HOOK_FACT_TERMS = (
     "燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾", "结构",
-    "道路", "公路", "人群", "车辆", "卡车", "拥堵", "排队", "滞留", "尘土",
-    "积雪", "大雪", "暴雨", "洪水", "港口", "码头", "口岸", "边境", "飞机", "警灯",
+    "道路", "公路", "人群", "车辆", "货车", "卡车", "拥堵", "排队", "滞留", "尘土",
+    "积雪", "大雪", "暴雨", "洪水", "港口", "码头", "口岸", "边境", "海关", "清关", "查验",
+    "集装箱", "堆场", "船舶", "货船", "航行", "直升机", "飞机", "警灯",
+    "救援", "救护车", "警员", "担架", "事故", "碰撞",
     "末端", "配送", "派送", "仓储", "仓库", "分拣", "运输", "货运", "物流", "装卸",
 )
 
@@ -2071,8 +2519,145 @@ def _hotspot_risk_lead(voiceover: str) -> str:
     return "现场变化更考验核对"
 
 
+def _fallback_bridge_candidates(voiceover: str, category: str) -> list[str]:
+    """Build short evidence-specific bridges for the rare model fallback.
+
+    The sentence varies with the locked Hook and the visible Buffalo scene.
+    It avoids the old generic ``风险影响仓配`` wording while still fitting a
+    short narration window and satisfying impact/action/advantage grounding.
+    """
+    lead = _hotspot_risk_lead(voiceover)
+    action_endings = {
+        "warehouse": ("分拣留痕", "核对更清楚"),
+        "staff": ("逐项记录留痕", "协同核对更清楚"),
+        "facility": ("分区点检留痕", "逐项检查更可控"),
+        "delivery": ("交接留痕", "逐单确认更清楚"),
+    }
+    endings = action_endings.get(category) or action_endings["warehouse"]
+    return [f"{lead}，Buffalo{ending}。" for ending in endings]
+
+
 def _hook_fact_terms(what_happened: str) -> list[str]:
     return [term for term in _HOOK_FACT_TERMS if term in str(what_happened or "")]
+
+
+def _selected_hotspot_fact(scenes: list[dict], event: dict | None) -> str:
+    """Use the selected atomic segment fact before the parent event summary.
+
+    A parent news video can contain several scenes.  Matching and rendering
+    operate on one audited subclip, so spoken copy must follow that subclip,
+    not a stale or broader event-level description.
+    """
+    if scenes:
+        selected = str(scenes[0].get("audited_visual_fact") or "").strip()
+        if selected:
+            return selected
+        for reason in scenes[0].get("match_reasons") or []:
+            text = str(reason or "").strip()
+            if text.startswith("优先现场子片段："):
+                selected = text.split("：", 1)[1].strip()
+                if selected:
+                    return selected
+    return str(((event or {}).get("evidence") or {}).get("what_happened") or "").strip()
+
+
+def _short_retention_hook_fact_line(fact: str) -> str:
+    """A stop-worthy factual opener that still fits a 4–6 second Hook clip."""
+    text = str(fact or "").strip()
+    if any(term in text for term in ("救护车", "救援", "警员", "担架")):
+        return "道路有救护车，配送预案备好吗？"
+    if any(term in text for term in ("海关", "查验", "清关")):
+        return "海关正在说明查验，发货前漏核哪项？"
+    if any(term in text for term in ("燃烧", "火光", "火焰", "浓烟", "起火", "火灾")):
+        return "火光浓烟已经出现，货运先核对哪步？"
+    if any(term in text for term in ("排队", "拥堵", "滞留")) and any(
+        term in text for term in ("道路", "公路", "车辆", "货车", "卡车")
+    ):
+        return "道路车辆排起长队，配送先卡在哪步？"
+    if any(term in text for term in ("货车", "卡车", "车辆")) and any(
+        term in text for term in ("道路", "公路", "行驶", "通行")
+    ):
+        return "货车正在道路行驶，交付安排先核对哪一步？"
+    if any(term in text for term in ("港口", "码头", "集装箱", "装卸")):
+        return "港口作业出现变化，发货安排先核对哪一环？"
+    return ""
+
+
+def _complete_grounded_hook_fact_lines(event: dict) -> list[str]:
+    """Return complete, visible-fact openers for the locked logistics scene.
+
+    The model's wording remains first choice. These lines are the bounded
+    production fallback when it returns a fragment such as ``...through``.
+    They describe only scene classes already proven by immutable Hook facts.
+    """
+    evidence = event.get("evidence") or {}
+    fact_text = " ".join(str(value or "") for value in (
+        event.get("title_zh"), event.get("title_en"),
+        evidence.get("what_happened"), evidence.get("event_identity"),
+    )).casefold()
+    scene_keys = _grounded_chat_hook_scene_keys(event)
+    lines: list[str] = []
+
+    if "disruption" in scene_keys:
+        if any(term in fact_text for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾")):
+            lines.extend((
+                "画面可见火光和浓烟，现场作业受到影响。",
+                "画面可见现场起火并出现浓烟。",
+            ))
+        if any(term in fact_text for term in ("积雪", "大雪", "暴雪", "洪水", "暴雨")):
+            lines.extend((
+                "画面可见恶劣天气正在影响道路通行。",
+                "画面可见道路积雪，车辆正在缓慢通行。",
+            ))
+    if "border" in scene_keys or "customs" in scene_keys:
+        if any(term in fact_text for term in ("拥堵", "排队", "滞留", "卡车", "货车")):
+            lines.extend((
+                "画面可见口岸卡车正在排队等待。",
+                "画面可见口岸货车持续排队，现场通行已经出现滞留。",
+            ))
+        lines.extend((
+            "画面可见海关人员正在现场查验。",
+            "画面可见海关人员正在现场说明查验要求。",
+        ))
+    if "port" in scene_keys:
+        if all(term in fact_text for term in ("集装箱", "货船", "直升机")):
+            lines.extend((
+                "集装箱货船旁，一架直升机正在协同飞行。",
+                "画面可见集装箱货船正在海面航行，附近一架直升机同时飞行，现场呈现清晰的海上航运动态。",
+            ))
+        lines.extend((
+            "画面可见港口车辆与货物正在周转。",
+            "画面可见港口车辆与集装箱持续周转。",
+            "画面可见港口车辆与集装箱持续周转，现场装卸、堆场和船舶作业正在按各自节点同步推进。",
+        ))
+    if "road" in scene_keys:
+        if "货车" in fact_text and any(term in fact_text for term in ("行驶", "驶过", "通行")):
+            lines.append("画面可见一辆货车正在道路上持续行驶。")
+        if any(term in fact_text for term in ("拥堵", "排队", "滞留", "停放", "车队")):
+            lines.extend((
+                "画面可见道路车辆正在排队等待。",
+                "画面可见道路车辆持续排队，现场通行已经受到影响。",
+            ))
+        lines.extend((
+            "画面可见货运车辆正在道路上行驶。",
+            "画面可见道路货运车辆持续通行。",
+        ))
+    if "warehouse" in scene_keys:
+        if any(term in fact_text for term in ("检查", "查验", "翻找", "核对")):
+            lines.extend((
+                "仓库内工作人员正在逐件检查货物。",
+                "画面可见仓库内工作人员正在逐件翻找并检查货物。",
+            ))
+        lines.extend((
+            "画面可见仓内人员正在分拣包裹。",
+            "画面可见仓内人员正在逐件核对并分拣包裹。",
+        ))
+    if "last_mile" in scene_keys:
+        lines.extend((
+            "画面可见配送人员正在交接包裹。",
+            "画面可见配送人员正在核对收件信息并交接包裹。",
+        ))
+    return list(dict.fromkeys(lines))
 
 
 def _compact_logistics_question(question: str) -> str:
@@ -2081,7 +2666,7 @@ def _compact_logistics_question(question: str) -> str:
     if not text:
         return ""
     if "末端配送" in text or "最后三公里" in text:
-        return "末端配送如何稳住最后三公里？"
+        return "末端配送要怎么稳住最后三公里的履约？"
     if "仓配" in text or "仓储" in text:
         return "仓配变化时，哪些动作要先核对？"
     if "道路" in text or "路线" in text or "通行" in text:
@@ -2105,7 +2690,7 @@ def _deterministic_hotspot_fact_line(what_happened: str) -> str:
     if any(term in text for term in ("积雪", "雪景", "大雪", "降雪", "暴雪")) and any(
         term in text for term in ("道路", "公路", "车辆", "交通")
     ):
-        return "雪天公路上车辆通行放慢但未中断。"
+        return "镜头记录车辆在积雪覆盖的公路上持续行驶，交通保持通行但速度需要关注。"
     if any(term in text for term in ("燃烧", "火光", "火焰", "浓烟", "烟雾", "起火", "火灾")):
         return "现场可见火光和浓烟，设施周边出现燃烧风险。"
     if any(term in text for term in ("港口", "码头", "口岸", "边境")):
@@ -2126,26 +2711,48 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
         return repaired
     if scenes[0].get("scene_role") != "hotspot_evidence":
         return repaired
-    what_happened = str((event.get("evidence") or {}).get("what_happened") or "").strip()
+    what_happened = _selected_hotspot_fact(scenes, event)
     logistics_question = str((event.get("evidence") or {}).get("logistics_question") or "").strip()
     terms = _hook_fact_terms(what_happened)
     first_voiceover = str(repaired["scenes"][0].get("voiceover") or "")
     compact_question = _compact_logistics_question(logistics_question)
+    maximum = _scene_voiceover_max_chars(scenes[0])
+    minimum = _scene_voiceover_min_chars(scenes[0])
+    compact_length = len("".join(first_voiceover.split()))
+    within_window = (
+        (maximum is None or compact_length <= maximum)
+        and (minimum is None or compact_length >= minimum)
+    )
     question_already_present = bool(
         compact_question and compact_question.rstrip("？") in first_voiceover
     )
-    fact_ok = bool(terms) and sum(term in first_voiceover for term in terms) >= min(2, len(terms))
+    fact_ok = (
+        sum(term in first_voiceover for term in terms) >= min(2, len(terms))
+        if terms else bool(first_voiceover.strip())
+    )
+    first_complete = bool(
+        first_voiceover.strip()
+        and first_voiceover.rstrip()[-1] in "。！？；"
+        and not video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": first_voiceover}]}
+        )
+    )
     # A generic logistics Hook is allowed as a reusable opener, but its audited
     # logistics question must still reach the first spoken beat; otherwise the
     # planner can produce a fluent yet content-free “车在路上跑” sentence.
     if not terms and not compact_question:
         return repaired
-    if fact_ok and (not compact_question or question_already_present):
+    if fact_ok and first_complete and (not compact_question or question_already_present) and within_window:
         return repaired
-    maximum = _scene_voiceover_max_chars(scenes[0])
-    minimum = _scene_voiceover_min_chars(scenes[0])
+    short_retention_line = _short_retention_hook_fact_line(what_happened)
+    retention_line = hotspot_hook_copy.retention_opening(what_happened, compact_question)
     deterministic_fact_line = _deterministic_hotspot_fact_line(what_happened)
-    candidates = [deterministic_fact_line] if deterministic_fact_line else []
+    candidates = [short_retention_line] if short_retention_line else []
+    if retention_line:
+        candidates.append(retention_line)
+    candidates.extend(_complete_grounded_hook_fact_lines(event))
+    if deterministic_fact_line and deterministic_fact_line not in candidates:
+        candidates.append(deterministic_fact_line)
     if compact_question:
         candidates.append(compact_question)
     candidates.append(what_happened)
@@ -2168,20 +2775,36 @@ def _repair_formal_narrative_hook(generated: dict, scenes: list[dict], event: di
         candidates.append(f"现场画面记录{terms[0]}，并可见{terms[1]}等现场元素。")
     for candidate in candidates:
         compact_length = len("".join(candidate.split()))
-        candidate_fact_ok = bool(terms) and sum(term in candidate for term in terms) >= min(2, len(terms))
-        if candidate_fact_ok and (maximum is None or compact_length <= maximum) and (minimum is None or compact_length >= minimum):
+        candidate_complete = bool(
+            candidate.strip()
+            and candidate.rstrip()[-1] in "。！？；"
+            and not video_topic_contract.incomplete_sentence_issues(
+                {"scenes": [{"voiceover": candidate}]}
+            )
+        )
+        candidate_fact_ok = (
+            sum(term in candidate for term in terms) >= min(2, len(terms))
+            if terms else bool(candidate.strip())
+        )
+        if candidate_complete and candidate_fact_ok and (maximum is None or compact_length <= maximum) and (minimum is None or compact_length >= minimum):
             repaired["scenes"][0]["voiceover"] = candidate
             repaired["scenes"][0]["text_overlay"] = candidate.rstrip("。")[:24]
             break
     return repaired
 
 
-def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict | None) -> None:
+def _validate_formal_narrative(
+    generated: dict,
+    scenes: list[dict],
+    event: dict | None,
+    *,
+    require_bridge: bool = True,
+) -> None:
     """Reject a fluent script that skips the Hook-to-brand narrative bridge."""
     if not event or not any(scene.get("evidence_type") == "hotspot_video" for scene in scenes):
         return
     evidence = event.get("evidence") or {}
-    what_happened = str(evidence.get("what_happened") or "").strip()
+    what_happened = _selected_hotspot_fact(scenes, event)
     if not what_happened:
         return
     generated_scenes = list(generated.get("scenes") or [])
@@ -2193,38 +2816,200 @@ def _validate_formal_narrative(generated: dict, scenes: list[dict], event: dict 
     fact_terms = _hook_fact_terms(what_happened)
     if fact_terms and sum(term in first for term in fact_terms) < min(2, len(fact_terms)):
         raise ValueError("热点开场没有明确说明 Hook 发生了什么")
-    for index, scene in enumerate(scenes[1:], 1):
-        if scene.get("scene_role") != "owned_proof":
-            continue
-        bridge = str(generated_scenes[index].get("voiceover") or "") if index < len(generated_scenes) else ""
-        if any(phrase in bridge for phrase in _EMPTY_HOOK_TRANSITIONS):
-            raise ValueError("热点后的第一个自有镜头不能只做无意义转场")
-        if not any(term in bridge for term in _HOOK_BRIDGE_TERMS):
-            raise ValueError("热点后的第一个自有镜头没有说明物流安全承接关系")
-        if not any(term in bridge for term in _VISIBLE_ACTION_TERMS):
-            raise ValueError("热点后的第一个自有镜头没有落到 Buffalo 可见动作")
-        if not any(term in bridge for term in _BRAND_ADVANTAGE_TERMS):
-            raise ValueError("热点后的第一个自有镜头没有把可见动作转成 Buffalo 品牌优势")
-        break
+    if not require_bridge:
+        return
+    bridge_indices = _owned_bridge_window_indices(scenes)
+    if not bridge_indices:
+        # Fact-only unit/curation checks intentionally pass a single Hook
+        # scene.  They validate the opener, not a complete production plan.
+        if not any(str(scene.get("scene_role") or "") == "owned_proof" for scene in scenes):
+            return
+        raise ValueError("热点后缺少 Buffalo 自有承接镜头")
+    bridge_lines = [
+        str(generated_scenes[index].get("voiceover") or "")
+        for index in bridge_indices
+        if index < len(generated_scenes)
+    ]
+    first_bridge = bridge_lines[0] if bridge_lines else ""
+    bridge_text = "".join(bridge_lines)
+    if any(phrase in first_bridge for phrase in _EMPTY_HOOK_TRANSITIONS):
+        raise ValueError("热点后的第一个自有镜头不能只做无意义转场")
+    if "buffalo" not in bridge_text.casefold():
+        raise ValueError("热点后的承接段没有点明 Buffalo")
+    if not any(term in bridge_text for term in _LOGISTICS_IMPACT_TERMS):
+        raise ValueError("热点后的承接段没有说明物流安全承接关系")
+    if not any(term in bridge_text for term in _VISIBLE_ACTION_TERMS):
+        raise ValueError("热点后的承接段没有落到 Buffalo 可见动作")
+    if not any(term in bridge_text for term in _BRAND_ADVANTAGE_TERMS):
+        raise ValueError("热点后的承接段没有把可见动作转成 Buffalo 品牌优势")
+    _validate_dynamic_brand_cta(generated_scenes, scenes)
 
 
-def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict:
-    """Deterministically repair only the first Hook-to-owned bridge beat.
+def _validate_dynamic_brand_cta(generated_scenes: list[dict], scenes: list[dict]) -> None:
+    """Keep the normal CTA model-authored; corpus wording is outage-only fallback."""
+    cta_indices = [
+        index for index, scene in enumerate(scenes)
+        if str(scene.get("scene_role") or "") == "brand_cta"
+    ]
+    if not cta_indices:
+        return
+    if len(cta_indices) != 1:
+        raise ValueError("正式成片必须且只能包含一个品牌 CTA 镜头")
+    index = cta_indices[0]
+    if index >= len(generated_scenes):
+        raise ValueError("MiniMax 没有生成品牌 CTA 文案")
+    item = generated_scenes[index]
+    voiceover = str(item.get("voiceover") or "").strip()
+    source = str(item.get("copy_source") or "model")
+    _validate_dynamic_brand_cta_voiceover(voiceover, source=source)
 
-    ``flow_role`` is useful metadata, but it is not the safety boundary: older
-    plans and some model-repaired plans can omit it. The first owned proof after
-    the locked Hook is the bridge by position and must receive the same check.
+
+def _validate_dynamic_brand_cta_voiceover(voiceover: str, *, source: str) -> None:
+    """Validate a model-authored CTA without replacing any of its wording."""
+    voiceover = str(voiceover or "").strip()
+    if not voiceover:
+        raise ValueError("MiniMax 品牌 CTA 为空")
+    if source == "fallback":
+        return
+    corpus_lines = {
+        str(row.get("voiceover") or "").strip()
+        for row in brand_outro_corpus.BRAND_OUTRO_CORPUS
+    }
+    if voiceover in corpus_lines:
+        raise ValueError("MiniMax 品牌 CTA 复用了确定性语料库")
+    if "buffalo" not in voiceover.casefold():
+        raise ValueError("MiniMax 品牌 CTA 没有点名 Buffalo")
+    if not any(term in voiceover for term in _BRAND_ADVANTAGE_TERMS):
+        raise ValueError("MiniMax 品牌 CTA 没有落到具体品牌优势")
+    if not any(term in voiceover for term in _LOGISTICS_IMPACT_TERMS + _VISIBLE_ACTION_TERMS):
+        raise ValueError("MiniMax 品牌 CTA 没有承接本片物流影响或可见动作")
+
+
+def _stamp_copy_source(
+    generated: dict,
+    source: str,
+    *,
+    reason: str = "",
+) -> dict:
+    """Attach auditable copy provenance without changing model wording."""
+    stamped = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    for item in stamped["scenes"]:
+        item["copy_source"] = source
+        if reason:
+            item["copy_repair_reason"] = reason
+        else:
+            item.pop("copy_repair_reason", None)
+    return stamped
+
+
+def _annotate_copy_revisions(before: dict, after: dict, *, reason: str) -> dict:
+    """Mark only locally changed lines as repairs; keep fallback identity intact."""
+    annotated = {**after, "scenes": [dict(item) for item in after.get("scenes") or []]}
+    before_scenes = list(before.get("scenes") or [])
+    for index, item in enumerate(annotated["scenes"]):
+        prior = before_scenes[index] if index < len(before_scenes) else {}
+        source = str(prior.get("copy_source") or item.get("copy_source") or "model")
+        changed = any(
+            str(item.get(field) or "") != str(prior.get(field) or "")
+            for field in ("voiceover", "text_overlay")
+        )
+        if changed and source != "fallback":
+            source = "policy_repair"
+            previous_reason = str(prior.get("copy_repair_reason") or "").strip()
+            item["copy_repair_reason"] = "；".join(
+                part for part in (previous_reason, reason) if part
+            )
+        elif prior.get("copy_repair_reason"):
+            item["copy_repair_reason"] = prior["copy_repair_reason"]
+        item["copy_source"] = source
+    return annotated
+
+
+def _copy_provenance_rows(scenes: list[dict]) -> list[dict]:
+    return [
+        {
+            "scene": index,
+            "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
+            "source": str(scene.get("copy_source") or "fallback"),
+            "reason": str(scene.get("copy_repair_reason") or ""),
+            "voiceover": str(scene.get("voiceover") or ""),
+        }
+        for index, scene in enumerate(scenes, 1)
+    ]
+
+
+def _rotate_copy_candidates(candidates: list[str], seed: str) -> list[str]:
+    """Use stable diversity for the rare offline fallback, not one global slogan."""
+    if len(candidates) < 2:
+        return candidates
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    offset = int.from_bytes(digest[:4], "big") % len(candidates)
+    return candidates[offset:] + candidates[:offset]
+
+
+def _repair_formal_narrative_bridge(
+    generated: dict,
+    scenes: list[dict],
+    *,
+    hook_binding_mode: str = "exact",
+) -> dict:
+    """Build the first bridge only for the explicit offline fallback path.
+
+    Normal model and model-repair output must pass ``_validate_formal_narrative``
+    unchanged. This helper is intentionally reserved for a failed remote model
+    chain and rotates scene-specific candidates so one slogan cannot fill every
+    video.
     """
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     first_voiceover = str(repaired["scenes"][0].get("voiceover") or "") if repaired["scenes"] else ""
     contrast_lead = _hotspot_risk_lead(first_voiceover)
-    labels = {
-        # Keep the contrast line inside the shortest real-video beat while
-        # making the brand response visible and stable, not causal.
-        "warehouse": ("核对", "做稳"),
-        "staff": ("分拣", "做细"),
-        "facility": ("核对", "做稳"),
-        "delivery": ("交接", "做稳"),
+    exact_candidates = {
+        "warehouse": [
+            "风险影响仓配，Buffalo分拣更可核对。",
+            "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
+            "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
+            "现场风险提醒仓内先核对，Buffalo让每件货的状态更清楚。",
+            "物流波动传到仓内，Buffalo分区核对，让异常处理更可控。",
+        ],
+        "staff": [
+            "风险影响协同，Buffalo分拣更可核对。",
+            "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
+            "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
+            "现场变化越突然，Buffalo越要分工核对，让处理更可控。",
+            "物流风险传到作业端，Buffalo逐项确认，让责任更清楚。",
+        ],
+        "facility": [
+            "风险影响作业，Buffalo分区核对更可控。",
+            "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
+            "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
+            "现场风险提醒设施先检查，Buffalo把关键动作留痕。",
+            "物流波动传到作业区，Buffalo分区确认，让状态更清楚。",
+        ],
+        "delivery": [
+            "风险影响配送，Buffalo交接更可核对。",
+            "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
+            "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
+            "道路变化影响配送节奏，Buffalo核对交接，让状态更清楚。",
+            "物流波动来到末端，Buffalo逐单确认，让交接更可核对。",
+        ],
+    }
+    industry_candidates = {
+        "warehouse": [
+            "现场只作提醒，Buffalo分拣更可核对。",
+            "行业现场只作提醒，Buffalo逐件核对，让异常更早留痕。",
+        ],
+        "staff": [
+            "现场只作提醒，Buffalo协同更可核对。",
+            "行业现场只作提醒，Buffalo分工核对，让处理更可控。",
+        ],
+        "facility": [
+            "现场只作提醒，Buffalo分区核对更可控。",
+            "行业现场只作提醒，Buffalo检查设施，让动作可留痕。",
+        ],
+        "delivery": [
+            "现场只作提醒，Buffalo交接更可核对。",
+            "行业现场只作提醒，Buffalo逐项交接，让状态更清楚。",
+        ],
     }
     hotspot_seen = False
     bridge_checked = False
@@ -2238,19 +3023,23 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
             continue
         bridge_checked = True
         voiceover = str(repaired["scenes"][index].get("voiceover") or "")
-        valid_relation = any(term in voiceover for term in _HOOK_BRIDGE_TERMS)
+        valid_relation = any(term in voiceover for term in _LOGISTICS_IMPACT_TERMS)
         valid_action = any(term in voiceover for term in _VISIBLE_ACTION_TERMS)
         valid_advantage = any(term in voiceover for term in _BRAND_ADVANTAGE_TERMS)
         empty_transition = any(phrase in voiceover for phrase in _EMPTY_HOOK_TRANSITIONS)
         if not (empty_transition or not valid_relation or not valid_action or not valid_advantage):
             continue
-        category = str(scene.get("primary_category") or "").casefold()
-        action, advantage = labels.get(category, ("核对", "做稳"))
-        candidates = [
-            f"{contrast_lead}，Buffalo{action}{advantage}。",
-            f"物流风险，Buffalo{action}{advantage}。",
-            f"现场变化，Buffalo{action}{advantage}。",
-        ]
+        category = str(scene.get("primary_category") or "warehouse").casefold()
+        pool = exact_candidates if hook_binding_mode == "exact" else industry_candidates
+        dynamic_candidates = _rotate_copy_candidates(
+            _fallback_bridge_candidates(first_voiceover, category),
+            f"{first_voiceover}|{category}|{hook_binding_mode}|dynamic",
+        )
+        candidates = [*dynamic_candidates, *(pool.get(category) or pool["warehouse"])]
+        candidates.extend([
+            f"{contrast_lead}，Buffalo逐项核对，让异常更早留痕。",
+            f"{contrast_lead}，Buffalo把现场动作做到可核对。",
+        ])
         maximum = _scene_voiceover_max_chars(scene)
         minimum = _scene_voiceover_min_chars(scene)
         replacement = next(
@@ -2258,12 +3047,221 @@ def _repair_formal_narrative_bridge(generated: dict, scenes: list[dict]) -> dict
                 candidate for candidate in candidates
                 if (maximum is None or len("".join(candidate.split())) <= maximum)
                 and (minimum is None or len("".join(candidate.split())) >= minimum)
+                and any(term in candidate for term in _LOGISTICS_IMPACT_TERMS)
+                and any(term in candidate for term in _VISIBLE_ACTION_TERMS)
+                and any(term in candidate for term in _BRAND_ADVANTAGE_TERMS)
             ),
-            candidates[-1],
+            None,
         )
+        if replacement is None:
+            raise ValueError(
+                "确定性承接文案无法满足当前镜头字数窗口："
+                f"minimum={minimum}, maximum={maximum}, category={category}"
+            )
         repaired["scenes"][index]["voiceover"] = replacement
         repaired["scenes"][index]["text_overlay"] = replacement.rstrip("。")[:24]
+        repaired["scenes"][index]["copy_source"] = "fallback"
+        repaired["scenes"][index]["copy_repair_reason"] = "remote_model_chain_unavailable"
     return repaired
+
+
+def _deterministic_formal_script(
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+    *,
+    hook_binding_mode: str = "exact",
+    fallback_reason: str = "remote_model_chain_unavailable",
+) -> dict:
+    """Build an evidence-bounded script when the remote planner is invalid.
+
+    The model can improve wording, but it must never be a production
+    availability dependency. This fallback uses only the locked Hook fact, the
+    user's topic contract and reviewed source-scene anchors.
+    """
+    topic = str(
+        brief.get("raw_input") or brief.get("requested_topic")
+        or brief.get("subject") or brief.get("logistics_topic") or "南非物流"
+    ).strip()
+    contract = video_topic_contract.build_topic_contract(topic, has_event_anchor=bool(event))
+    evidence = (event or {}).get("evidence") or {}
+    fact = str(evidence.get("what_happened") or "").strip()
+    fact_question = str(evidence.get("logistics_question") or "").strip()
+    fact_line = hotspot_hook_copy.retention_opening(fact, fact_question)
+    if not fact_line:
+        fact_line = _deterministic_hotspot_fact_line(fact)
+    visible_lines = {
+        "warehouse": (
+            "仓内人员正在逐件核对包裹。", "货物进入仓内后依次核对分拣。",
+            "分拣现场按顺序处理每件货物。",
+            "工作人员在仓内逐件核对包裹并记录结果。",
+            "仓内人员按顺序核对货物并同步记录异常。",
+        ),
+        "staff": (
+            "工作人员正在现场协同作业。", "现场人员按流程核对作业。",
+            "现场人员按流程核对货物并同步做好记录。",
+            "工作人员协同核对包裹并逐项确认动作。",
+        ),
+        "facility": (
+            "仓内设备按区域配合作业。", "设施现场保持分区作业。",
+            "仓内设备按区域配合作业并逐项核对货物。",
+            "设施现场按分区完成准备并同步记录动作。",
+        ),
+        "delivery": (
+            "配送车辆正在按动线作业。", "车辆出发前按流程核对交接。",
+            "配送车辆出发前核对交接信息再按动线作业。",
+            "车辆按现场动线完成交接准备再进入配送。",
+        ),
+    }
+    image_lines = (
+        "先回到当前物流主题。", "再看 Buffalo 的可见准备。",
+        "画面转入仓配准备环节。", "外部变化只作行业提醒。",
+        "真正要核对的是每个动作。", "继续看仓内的执行细节。",
+        "流程是否稳定，要回到现场。", "这里只展示可见的仓配动作。",
+        "主题结论要由可见动作承接。", "最后把核对落到每个环节。",
+    )
+    topic_lines_by_intent = {
+        "local_courier_comparison": (
+            "取件、分拣和末端交接要用同一口径对比。",
+            "现场分拣动作可见，再看包裹如何进入末端。",
+            "同路线再比较交接记录，结果才有可比性。",
+        ),
+        "same_city_delivery_sla": (
+            "接单、分拣、出车和签收都要统一计时。",
+            "分拣和交接用时也要算进同城配送全程。",
+            "出车只是中段，签收时间才完成全程记录。",
+            "异常节点单独留痕，才能比较真实时效。",
+        ),
+        "peak_overflow_response": (
+            "先核对库位和分拣顺序，再处理旺季增量。",
+            "库位、分拣和交接失序，配送就会跟着变慢。",
+            "爆仓预案要写明触发点、分工和处理顺序。",
+        ),
+        "peak_full_cycle_review": (
+            "入库、分拣、出车和交付要逐段复盘。",
+            "每个节点都要回看准备记录和异常处理。",
+            "全流程复盘要把问题落到具体物流动作。",
+        ),
+        "policy_change_verification": (
+            "先核对官方原文、适用对象和生效日期。",
+            "来源和日期未核实，不能当成政策更新发布。",
+            "清关准备要跟随已确认的官方口径调整。",
+        ),
+    }
+    topic_lines = topic_lines_by_intent.get(
+        str(contract.get("intent") or ""),
+        (
+            str(contract.get("opening_bridge") or "").strip(),
+            f"围绕{topic[:12]}，逐项核对可见物流动作。",
+        ),
+    )
+    topic_lines = tuple(line for line in topic_lines if line)
+
+    def bounded(candidates: list[str], scene: dict, *, seed: str) -> str:
+        minimum = _scene_voiceover_min_chars(scene)
+        maximum = _scene_voiceover_max_chars(scene)
+        for candidate in _rotate_copy_candidates(candidates, seed):
+            candidate = str(candidate or "").strip()
+            length = len("".join(candidate.split()))
+            if (
+                candidate and candidate[-1] in "。！？；"
+                and (minimum is None or length >= minimum)
+                and (maximum is None or length <= maximum)
+            ):
+                return candidate
+        fallbacks = (
+            "现场动作正在按流程逐项展开。",
+            "画面中的物流动作正在按流程展开。",
+            "画面中的物流作业动作正在现场逐项展开。",
+        )
+        for candidate in fallbacks:
+            length = len("".join(candidate.split()))
+            if (minimum is None or length >= minimum) and (maximum is None or length <= maximum):
+                return candidate
+        # The downstream validator will report the impossible measured window.
+        return fallbacks[-1]
+
+    generated_scenes: list[dict] = []
+    owned_ordinal = 0
+    image_ordinal = 0
+    bridge_done = False
+    for scene in scenes:
+        role = str(scene.get("scene_role") or "")
+        category = str(scene.get("primary_category") or "").casefold()
+        if role == "hotspot_evidence":
+            candidates = [fact_line, str(scene.get("voiceover") or ""), "外部物流现场正在发生变化。"]
+        elif role == "brand_cta":
+            # The endcard already carries a scene-matched corpus line.  It is
+            # used only in this explicit remote-interface fallback branch;
+            # the normal path asks MiniMax to author the CTA with the rest of
+            # the video's factual and marketing context.
+            candidates = [
+                brand_outro_corpus.select_brand_outro(brief)["voiceover"],
+                str(scene.get("voiceover") or ""),
+            ]
+        elif role == "owned_proof" and not bridge_done:
+            bridge_done = True
+            category_bridges = {
+                "warehouse": [
+                    "风险影响仓配，Buffalo分拣更可核对。",
+                    "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
+                    "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
+                    "现场风险提醒仓内先核对，Buffalo让每件货的状态更清楚。",
+                ],
+                "staff": [
+                    "风险影响协同，Buffalo分拣更可核对。",
+                    "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
+                    "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
+                    "现场变化越突然，Buffalo越要分工核对，让处理更可控。",
+                ],
+                "facility": [
+                    "风险影响作业，Buffalo分区核对更可控。",
+                    "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
+                    "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
+                    "现场风险提醒设施先检查，Buffalo把关键动作留痕。",
+                ],
+                "delivery": [
+                    "风险影响配送，Buffalo交接更可核对。",
+                    "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
+                    "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
+                    "道路变化影响配送节奏，Buffalo核对交接，让状态更清楚。",
+                ],
+            }
+            candidates = [
+                *_fallback_bridge_candidates(fact_line, category),
+                *(category_bridges.get(category) or category_bridges["warehouse"]),
+            ]
+        elif role == "owned_context_image":
+            candidates = [
+                topic_lines[image_ordinal % len(topic_lines)],
+                image_lines[image_ordinal % len(image_lines)],
+                str(scene.get("voiceover") or ""),
+            ]
+            image_ordinal += 1
+        else:
+            category_lines = visible_lines.get(category, ("Buffalo把现场动作做到可核对。",))
+            candidates = [
+                str(scene.get("copy_anchor") or ""),
+                topic_lines[owned_ordinal % len(topic_lines)],
+                category_lines[owned_ordinal % len(category_lines)],
+                str(scene.get("voiceover") or ""),
+            ]
+            owned_ordinal += 1
+        copy = bounded(candidates, scene, seed=f"{topic}|{role}|{category}|{len(generated_scenes)}")
+        scene_fallback_reason = fallback_reason
+        if role == "brand_cta":
+            scene_fallback_reason += f";brand_endcard_corpus:{scene.get('outro_id') or 'selected'}"
+        generated_scenes.append({
+            "voiceover": copy,
+            "text_overlay": copy.rstrip("。！？；")[:24],
+            "copy_source": "fallback",
+            "copy_repair_reason": scene_fallback_reason,
+        })
+    return {
+        "title": contract.get("safe_title") or topic,
+        "angle": contract.get("safe_angle") or "从真实外部现场回到 Buffalo 可见仓配动作。",
+        "scenes": generated_scenes,
+    }
 
 
 def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
@@ -2321,13 +3319,18 @@ def _scene_voiceover_min_chars(scene: dict) -> int | None:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)
     except (TypeError, ValueError):
         return None
-    # TTS is normally much faster than the minimum pacing requirement.
-    # Five Chinese characters can cover the shortest three-second beat with a
-    # natural pause.  Requiring a sixth character repeatedly made the repair
-    # model append stock phrases such as "请核对订单信息".
+    # The renderer preserves the planned duration for formal videos.  At the
+    # previous ~2 chars/s floor a six-second beat frequently contained only
+    # three seconds of speech followed by a conspicuous silent tail.  Keep a
+    # narrow but natural 2.8–3.6 chars/s window so narration covers the visual
+    # beat without forcing the renderer to loop speech or stretch the clip.
     if not duration_seconds:
         return None
-    return 5 if duration_seconds <= 3.5 else max(6, int(math.ceil(duration_seconds * 2.0)))
+    # Very short Hook clips need a slightly wider wording window so two
+    # audited scene facts can still fit. Longer formal beats keep the stronger
+    # floor that avoids multi-second silent tails.
+    rate = 2.6 if duration_seconds <= 4.5 else 2.8
+    return max(8, int(math.ceil(duration_seconds * rate)))
 
 
 _UNSUPPORTED_HOTSPOT_INTENSIFIERS = ("堵死", "全面瘫痪", "完全停摆", "全线停摆")
@@ -2362,6 +3365,8 @@ def _enforce_formal_scene_copy_contract(generated: dict, scenes: list[dict]) -> 
         maximum = _scene_voiceover_max_chars(scene)
         candidates = (
             anchor,
+            "工作人员正在仓内逐件核对包裹并记录结果。",
+            "仓内人员按顺序核对货物并同步记录异常。",
             "工作人员正在仓内逐件核对包裹。",
             "工作人员正在逐件核对每件包裹。",
             "仓内工作人员核对包裹。",
@@ -2446,8 +3451,47 @@ def _planner_json(
             for phrase in _UNSUPPORTED_HOTSPOT_INTENSIFIERS:
                 if phrase in voiceover:
                     raise ValueError(f"内容规划模型第 {index} 个热点分镜包含未经证实的夸张断言：{phrase}")
-        normalized.append({"voiceover": voiceover, "text_overlay": overlay or voiceover[:24]})
+        normalized_scene = {"voiceover": voiceover, "text_overlay": overlay or voiceover[:24]}
+        copy_source = str(item.get("copy_source") or "").strip()
+        if copy_source in {"model", "repair", "policy_repair", "fallback", "corpus"}:
+            normalized_scene["copy_source"] = copy_source
+        copy_repair_reason = str(item.get("copy_repair_reason") or "").strip()
+        if copy_repair_reason:
+            normalized_scene["copy_repair_reason"] = copy_repair_reason[:240]
+        normalized.append(normalized_scene)
     return {"title": title, "angle": angle, "scenes": normalized}
+
+
+def _planner_repair_payload(context: dict, validation_error: Exception, invalid_draft: str) -> dict:
+    """Give a repair call the topic facts and an exact-length JSON skeleton.
+
+    A one-scene example is ambiguous when the formal plan has eight or more
+    approved beats.  It also cannot reconstruct a missing title/angle unless
+    the original topic contract is repeated.  Keep the evidence plan fixed,
+    but make every required output slot explicit.
+    """
+    allowed_scenes = list(context.get("allowed_scenes") or [])
+    scene_template = [
+        {
+            "scene": item.get("scene"),
+            "role": item.get("role"),
+            "voiceover": "",
+            "text_overlay": "",
+            "voiceover_min_chars": item.get("voiceover_min_chars"),
+            "voiceover_max_chars": item.get("voiceover_max_chars"),
+        }
+        for item in allowed_scenes
+    ]
+    return {
+        "validation_error": str(validation_error),
+        "invalid_draft": str(invalid_draft or ""),
+        "brief": context.get("brief") or {},
+        "facts": context.get("facts") or [],
+        "narrative_contract": context.get("narrative_contract") or {},
+        "topic_requirements": context.get("topic_requirements") or {},
+        "allowed_scenes": allowed_scenes,
+        "required_json": {"title": "", "angle": "", "scenes": scene_template},
+    }
 
 
 def _extend_short_formal_voiceovers(
@@ -2488,8 +3532,13 @@ def _repair_short_formal_voiceovers(
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     if len(repaired["scenes"]) != len(scenes):
         raise ValueError("内容规划模型返回的分镜数量无法进行旁白时长修复")
-    hotspot_fact = str((event or {}).get("evidence", {}).get("what_happened") or "").strip()
-    hotspot_fact_line = _deterministic_hotspot_fact_line(hotspot_fact)
+    hotspot_evidence = (event or {}).get("evidence") or {}
+    hotspot_fact = str(hotspot_evidence.get("what_happened") or "").strip()
+    hotspot_question = str(hotspot_evidence.get("logistics_question") or "").strip()
+    hotspot_fact_line = hotspot_hook_copy.retention_opening(hotspot_fact, hotspot_question)
+    legacy_hotspot_fact_line = _deterministic_hotspot_fact_line(hotspot_fact)
+    if not hotspot_fact_line:
+        hotspot_fact_line = legacy_hotspot_fact_line
     for index, (item, scene) in enumerate(zip(repaired["scenes"], scenes)):
         minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
         maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
@@ -2498,18 +3547,73 @@ def _repair_short_formal_voiceovers(
         if minimum is None or compact_length >= minimum:
             continue
         candidates: list[str] = []
+        # Late topic locks deliberately replace several owned beats with short,
+        # topic-specific editorial lines.  Preserve that topic wording and
+        # extend it with evidence-neutral, visible-action language before
+        # considering category fallbacks.  The old implementation skipped the
+        # current line entirely, so a perfectly feasible 14–18 character
+        # window could fail merely because every hand-written fallback was
+        # either shorter than 14 or longer than 18.
+        current_stem = voiceover.rstrip("。！？；，、")
+        current_candidates = (
+                current_stem + "，再核对。",
+                current_stem + "，逐项核对。",
+                current_stem + "，现场核对。",
+                current_stem + "，动作可核对。",
+                current_stem + "，并记录结果。",
+                current_stem + "，再核对现场动作。",
+                current_stem + "，相关动作逐项核对。",
+        ) if current_stem else ()
         if scene.get("scene_role") == "hotspot_evidence" and hotspot_fact_line:
-            candidates.append(hotspot_fact_line)
+            candidates.extend((
+                hotspot_fact_line,
+                hotspot_fact_line.rstrip("。！？；") + "。这段外部现场只作行业提醒。",
+            ))
+            if legacy_hotspot_fact_line and legacy_hotspot_fact_line != hotspot_fact_line:
+                candidates.append(legacy_hotspot_fact_line)
         copy_anchor = str(scene.get("copy_anchor") or "").strip()
         if copy_anchor:
-            candidates.append(copy_anchor)
+            candidates.extend((
+                copy_anchor,
+                copy_anchor.rstrip("。！？；") + "，画面中的动作正在现场展开。",
+            ))
+        # Reviewed scene copy remains the first choice for ordinary scenes.
+        # Topic-lock extensions are considered immediately afterwards so a
+        # narrow cloud narration window can preserve the immutable topic
+        # instead of failing or falling back to unrelated generic wording.
+        candidates.extend(current_candidates)
         category = str(scene.get("primary_category") or "").casefold()
         candidates.extend({
-            "warehouse": ["工作人员正在仓内逐件核对包裹。"],
-            "staff": ["工作人员正在现场协同作业。"],
-            "facility": ["设施现场保持分区作业。"],
-            "delivery": ["配送车辆正在按动线作业。"],
-        }.get(category, ["镜头中的作业动作清晰可见。"]))
+            "warehouse": [
+                "仓内人员逐件核对包裹并记录。",
+                "仓内人员按顺序核对货物并记录。",
+                "工作人员正在仓内逐件核对包裹并同步做好记录。",
+                "仓内人员按顺序核对货物，把异常留在发出前发现。",
+            ],
+            "staff": [
+                "现场人员逐项核对货物并记录。",
+                "工作人员按流程核对货物并记录。",
+                "工作人员按流程核对现场货物并同步做好记录。",
+                "现场人员协同核对包裹，把每一步动作逐项确认。",
+            ],
+            "facility": [
+                "仓内设备按区域作业并记录动作。",
+                "现场设备分区作业并核对货物。",
+                "仓内设备按区域配合作业，现场动作正在逐项展开。",
+                "设施现场按分区完成作业准备并逐项核对货物。",
+            ],
+            "delivery": [
+                "车辆出发前逐项核对交接信息。",
+                "配送车辆按动线交接并记录结果。",
+                "配送车辆出发前核对交接信息，再按既定动线作业。",
+                "车辆按现场动线完成交接准备，再进入配送环节。",
+            ],
+        }.get(category, [
+            "当前画面只记录可见物流动作。",
+            "这张图片只作主题过渡并提醒核对。",
+            "画面正在说明当前物流环节，相关动作需要逐项看清。",
+            "先看清画面中的物流动作，再回到当前主题逐项核对。",
+        ]))
         replacement = next(
             (
                 candidate for candidate in candidates
@@ -2522,6 +3626,104 @@ def _repair_short_formal_voiceovers(
             raise ValueError(f"内容规划模型第 {index + 1} 个分镜旁白少于 {minimum} 字时长下限")
         item["voiceover"] = replacement
         item["text_overlay"] = replacement.rstrip("。")[:24]
+    return repaired
+
+
+def _repair_dangling_formal_voiceovers(
+    generated: dict,
+    scenes: list[dict],
+    voiceover_minimums: list[int | None] | None = None,
+    voiceover_limits: list[int | None] | None = None,
+) -> dict:
+    """Replace incomplete model endings with already-reviewed scene copy.
+
+    A narration can be inside its measured character window and still end in a
+    connector such as ``通过`` or ``如果``.  That is a copy-shape failure, not
+    a reason to relax the completeness gate.  Use only the reviewed source
+    narration/copy anchor or a category-safe visible-action sentence; never
+    append a new claim to the model's unfinished thought.
+    """
+    repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if len(repaired["scenes"]) != len(scenes):
+        raise ValueError("内容规划模型返回的分镜数量无法进行悬空旁白修复")
+
+    # A dangling sentence still has to fit the measured narration window.
+    # The old one-line fallbacks were sometimes shorter than a 6–7s scene,
+    # so the repair itself raised and the whole project failed. These are
+    # reviewed visible-action statements, not new service claims.
+    safe_by_category = {
+        "warehouse": (
+            "仓内人员按区域逐件核对包裹。",
+            "分拣台前工作人员按路线逐件核对包裹。",
+            "现场人员按区域逐件核对包裹并完成分拣准备。",
+            "仓内人员按区域逐件核对包裹并同步记录处理结果。",
+            "仓内工作人员按顺序核对货物并逐项记录分拣结果。",
+        ),
+        "staff": (
+            "工作人员按流程逐项核对现场包裹。",
+            "现场人员协同核对包裹并完成作业准备。",
+            "现场工作人员协同核对货物并逐项记录当前作业结果。",
+        ),
+        "facility": (
+            "仓内设备按区域配合包裹分拣作业。",
+            "设施现场按分区完成作业准备。",
+            "仓内设备按区域配合作业并逐项记录可见处理动作。",
+        ),
+        "delivery": (
+            "配送车辆按既定动线完成发运准备。",
+            "车辆出发前按流程核对交接信息。",
+            "配送车辆按现场动线完成交接准备并逐项记录结果。",
+            "车辆出发前按流程核对货物与交接信息并记录结果。",
+        ),
+        "road": (
+            "画面可见道路车辆正在排队等待。",
+            "画面可见道路货运车辆持续通行。",
+            "画面可见道路车辆持续排队，现场通行已经受到影响。",
+        ),
+        "border": (
+            "画面可见口岸卡车正在排队等待。",
+            "画面可见口岸货车持续排队，现场通行已经出现滞留。",
+        ),
+        "customs": (
+            "画面可见海关人员正在现场查验。",
+            "画面可见海关人员正在现场说明查验要求。",
+        ),
+        "port": (
+            "画面可见港口车辆与货物正在周转。",
+            "画面可见港口车辆与集装箱持续周转。",
+        ),
+        "disruption": (
+            "画面可见火光和浓烟，现场作业受到影响。",
+            "画面可见恶劣天气正在影响道路通行。",
+        ),
+    }
+
+    def _complete(candidate: str, minimum: int | None, maximum: int | None) -> bool:
+        candidate = "".join(str(candidate or "").split())
+        if not candidate or candidate[-1] not in "。！？；":
+            return False
+        if video_topic_contract.incomplete_sentence_issues({"scenes": [{"voiceover": candidate}]}):
+            return False
+        length = len(candidate)
+        return (minimum is None or length >= minimum) and (maximum is None or length <= maximum)
+
+    for index, (item, source_scene) in enumerate(zip(repaired["scenes"], scenes)):
+        current = str(item.get("voiceover") or "").strip()
+        if not video_topic_contract.incomplete_sentence_issues({"scenes": [{"voiceover": current}]}):
+            continue
+        minimum = voiceover_minimums[index] if voiceover_minimums and index < len(voiceover_minimums) else None
+        maximum = voiceover_limits[index] if voiceover_limits and index < len(voiceover_limits) else None
+        category = str(source_scene.get("primary_category") or "").casefold()
+        candidates = [
+            str(source_scene.get("voiceover") or "").strip(),
+            str(source_scene.get("copy_anchor") or "").strip(),
+            *safe_by_category.get(category, ("镜头中的物流作业动作清晰可见。",)),
+        ]
+        replacement = next((candidate for candidate in candidates if _complete(candidate, minimum, maximum)), None)
+        if replacement is None:
+            raise ValueError(f"内容规划模型第 {index + 1} 个分镜以悬空连接词结尾")
+        item["voiceover"] = replacement
+        item["text_overlay"] = replacement.rstrip("。！？；")[:24]
     return repaired
 
 
@@ -2559,24 +3761,43 @@ def _repair_repeated_formal_voiceovers(
             "仓内货物依次完成分拣准备。",
             "分拣人员围绕货物逐项核对。",
             "货物按区域摆放后继续核对。",
+            "工作人员在仓内逐件核对包裹并记录结果。",
+            "仓内人员按顺序核对货物并同步记录异常。",
+            "货物进入仓内后逐件核对并完成分拣记录。",
+            "分拣现场按顺序处理货物并留下核对记录。",
+            "每件货物在仓内完成核对并确认分拣结果。",
+            "仓内货物依次完成分拣准备并标记异常。",
+            "现场人员按区域逐件核对包裹并同步结果。",
         ),
         "staff": (
             "工作人员正在现场协同作业。",
             "现场人员按流程核对作业。",
             "工作人员逐项确认现场动作。",
             "现场协同围绕货物逐步展开。",
+            "现场人员按流程核对货物并同步做好记录。",
+            "工作人员协同核对包裹并逐项确认动作。",
+            "人员在现场分工处理货物并核对作业结果。",
+            "现场协同围绕货物展开并逐项留下记录。",
         ),
         "facility": (
             "仓内设备按区域配合作业。",
             "设施现场保持分区作业。",
             "设备动作围绕货物逐项展开。",
             "现场设备配合分拣准备。",
+            "仓内设备按区域配合作业并逐项核对货物。",
+            "设施现场按分区完成准备并同步记录动作。",
+            "设备作业围绕货物逐项展开并确认处理结果。",
+            "现场设备配合分拣准备并留下作业记录。",
         ),
         "delivery": (
             "配送车辆正在按动线作业。",
             "车辆出发前先按流程核对。",
             "配送交接按现场动线展开。",
             "车辆作业围绕交接逐步展开。",
+            "配送车辆出发前核对交接信息再按动线作业。",
+            "车辆按现场动线完成交接准备再进入配送。",
+            "配送交接按流程逐项确认并同步记录结果。",
+            "车辆出发前核对货物与交接信息再安排配送。",
         ),
     }
     image_candidates = (
@@ -2585,7 +3806,23 @@ def _repair_repeated_formal_voiceovers(
         "画面切入仓内。",
         "节奏转入仓内。",
         "外部变化暂作背景。",
+        "外部现场只作提醒，再回到当前物流主题。",
+        "先看外部变化，再核对仓内的准备动作。",
+        "画面转入仓内准备，相关动作需要逐项核对。",
     )
+    subjects = {
+        "warehouse": ("工作人员", "仓内人员", "现场人员", "分拣人员", "作业人员", "核对人员"),
+        "staff": ("工作人员", "现场人员", "作业人员", "协同人员", "当班人员", "核对人员"),
+        "facility": ("仓内设备", "现场设备", "作业设备", "分区设备", "处理设备", "辅助设备"),
+        "delivery": ("配送车辆", "现场车辆", "作业车辆", "交接车辆", "发运车辆", "运输车辆"),
+    }
+    actions = {
+        "warehouse": ("逐件核对包裹", "按顺序核对货物", "逐项记录分拣动作", "按区域处理货物"),
+        "staff": ("按流程核对货物", "逐项确认现场动作", "协同处理可见货物", "记录当前作业状态"),
+        "facility": ("按区域配合作业", "逐项处理可见货物", "记录当前设备动作", "配合完成分拣准备"),
+        "delivery": ("按动线完成交接", "出发前核对货物", "逐项确认交接信息", "记录当前车辆动作"),
+    }
+    safe_tails = ("。", "并记录结果。", "让动作可核对。", "并确认现场状态。")
     seen: set[str] = set()
     for index, (item, scene) in enumerate(zip(repaired["scenes"], scenes)):
         voiceover = str(item.get("voiceover") or "").strip()
@@ -2603,7 +3840,34 @@ def _repair_repeated_formal_voiceovers(
         # 已审核的 copy_anchor 优先保留，但只有不重复且在时长窗口内才可用。
         anchor = str(scene.get("copy_anchor") or "").strip()
         if anchor:
-            candidates.insert(0, anchor)
+            candidates[:0] = [
+                anchor,
+                anchor.rstrip("。！？；") + "，并同步做好现场记录。",
+                anchor.rstrip("。！？；") + "，这一步动作正在现场展开。",
+            ]
+        if role == "owned_context_image":
+            candidates.extend((
+                "再看现场变化。", "回到当前主题。", "转入仓内准备。", "聚焦仓内动作。",
+                "继续核对动作。", "再看分拣准备。", "核对现场动作。", "回到物流现场。",
+                "继续观察现场。", "再看可见动作。", "聚焦当前环节。", "转入执行现场。",
+            ))
+        else:
+            # Do not cap the formal chain at a small hand-written sentence
+            # list. A 60-second plan can legitimately contain many clips of
+            # the same reviewed category. Build a bounded cartesian set of
+            # neutral, visible-action sentences so repetition becomes a local
+            # repair trigger instead of a scripting-stage production failure.
+            category_subjects = subjects.get(category, ("现场人员", "作业人员", "工作人员"))
+            category_actions = actions.get(
+                category,
+                ("记录当前可见动作", "按流程核对现场动作", "逐项确认当前状态"),
+            )
+            candidates.extend(
+                f"{subject}{action}{tail}"
+                for subject in category_subjects
+                for action in category_actions
+                for tail in safe_tails
+            )
         replacement = next(
             (
                 candidate for candidate in candidates
@@ -2614,14 +3878,472 @@ def _repair_repeated_formal_voiceovers(
             None,
         )
         if replacement is None:
-            raise ValueError(f"内容规划模型第 {index + 1} 个分镜无法在时长窗口内去除重复旁白")
+            # Last-resort wording is deliberately meta and evidence-neutral:
+            # it describes only that the current shot records a visible
+            # logistics action. The ordinal keeps it unique without inventing
+            # a service result.
+            ordinal_candidates = (
+                f"画面{index + 1}记录现场动作。",
+                f"第{index + 1}段只记录可见物流动作。",
+                f"第{index + 1}段只记录现场可见的物流动作。",
+                f"第{index + 1}段只记录现场可见物流动作，不推断画面外结果。",
+            )
+            replacement = next(
+                (
+                    candidate for candidate in ordinal_candidates
+                    if _formal_voiceover_key(candidate) not in seen
+                    and (minimum is None or len("".join(candidate.split())) >= minimum)
+                    and (maximum is None or len("".join(candidate.split())) <= maximum)
+                ),
+                None,
+            )
+        if replacement is None:
+            raise ValueError(
+                f"第 {index + 1} 个分镜的旁白字数窗口不可满足：minimum={minimum}, maximum={maximum}"
+            )
         item["voiceover"] = replacement
         item["text_overlay"] = replacement.rstrip("。")[:24]
         seen.add(_formal_voiceover_key(replacement))
     return repaired
 
 
-def _compact_long_formal_voiceovers(generated: dict, voiceover_limits: list[int | None]) -> dict:
+def _finalize_formal_script_candidate(
+    generated: dict,
+    *,
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+    hook_binding_mode: str,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    hotspot_count: int,
+    allow_fallback_bridge: bool = False,
+) -> dict:
+    """Validate MiniMax copy unchanged; only repair an explicit offline fallback."""
+    original = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    if not allow_fallback_bridge:
+        normalized = _planner_json(
+            _json.dumps(generated, ensure_ascii=False), len(scenes), voiceover_limits,
+            voiceover_minimums, hotspot_scene_count=hotspot_count,
+        )
+        _validate_formal_copy_specificity(normalized)
+        _validate_complete_formal_voiceovers(normalized)
+        _validate_generated_topic_anchor(normalized, brief, has_event_anchor=bool(event))
+        _validate_formal_narrative(normalized, scenes, event)
+        return normalized
+    generated = _enforce_formal_scene_copy_contract(generated, scenes)
+    generated = _enforce_generated_topic_opening(generated, brief, scenes, event)
+    generated = _repair_formal_narrative_hook(generated, scenes, event)
+    if allow_fallback_bridge:
+        generated = _repair_formal_narrative_bridge(
+            generated, scenes, hook_binding_mode=hook_binding_mode,
+        )
+    generated = _compact_long_formal_voiceovers(
+        generated,
+        voiceover_limits,
+        scenes,
+        voiceover_minimums,
+    )
+    generated = _repair_short_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits, event,
+    )
+    generated = _repair_repeated_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits,
+    )
+    generated = _repair_dangling_formal_voiceovers(
+        generated, scenes, voiceover_minimums, voiceover_limits,
+    )
+    # Dangling-sentence repair may replace the first beat with category copy.
+    # Re-lock the immutable Hook fact afterwards so the last repair can never
+    # erase what actually happened in the verified opening clip.
+    generated = _repair_formal_narrative_hook(generated, scenes, event)
+    # Duration, repetition and dangling-sentence repair can legitimately
+    # replace the first owned beat. Re-assert the offline fallback bridge only
+    # after those repairs, so the final line still contains the risk relation,
+    # a Buffalo-visible action and a concrete advantage. This never runs for
+    # accepted MiniMax copy.
+    generated = _repair_formal_narrative_bridge(
+        generated, scenes, hook_binding_mode=hook_binding_mode,
+    )
+    # The preceding duration/repetition repairs are intentionally allowed to
+    # replace individual lines.  Restore every immutable topic group only
+    # after those repairs, using later owned proof beats, then re-assert the
+    # first Hook bridge once more.  Generation and validation now share one
+    # contract instead of rejecting each other's output.
+    generated = _repair_generated_topic_contract(
+        generated,
+        brief=brief,
+        scenes=scenes,
+        event=event,
+        voiceover_minimums=voiceover_minimums,
+        voiceover_limits=voiceover_limits,
+    )
+    generated = _repair_formal_narrative_bridge(
+        generated, scenes, hook_binding_mode=hook_binding_mode,
+    )
+    _validate_formal_copy_specificity(generated)
+    _validate_complete_formal_voiceovers(generated)
+    _validate_generated_topic_anchor(generated, brief, has_event_anchor=bool(event))
+    _validate_formal_narrative(generated, scenes, event)
+    normalized = _planner_json(
+        _json.dumps(generated, ensure_ascii=False), len(scenes), voiceover_limits,
+        voiceover_minimums, hotspot_scene_count=hotspot_count,
+    )
+    return _annotate_copy_revisions(
+        original,
+        normalized,
+        reason="local_fact_duration_or_safety_guard",
+    )
+
+
+_MODEL_DANGLING_TAILS = (
+    "因此", "所以", "同时", "从而", "并且", "再把", "让", "把", "通过",
+    "以及", "而且", "并", "和", "与", "为", "的",
+)
+
+
+def _clean_model_fragment(value: str) -> str:
+    """Return a complete compact fragment without inventing new copy."""
+    cleaned = "".join(str(value or "").split()).strip("，、；：。！？ ")
+    changed = True
+    while cleaned and changed:
+        changed = False
+        for tail in _MODEL_DANGLING_TAILS:
+            if cleaned.endswith(tail) and len(cleaned) > len(tail):
+                cleaned = cleaned[:-len(tail)].rstrip("，、；：。！？ ")
+                changed = True
+                break
+    return cleaned
+
+
+def _model_term_fragments(text: str, term: str) -> list[str]:
+    """Build richest-to-shortest spans around a term already written by MiniMax."""
+    start = text.find(term)
+    if start < 0:
+        return []
+    end = start + len(term)
+    spans: list[str] = []
+    for before, after in ((3, 3), (2, 2), (2, 0), (1, 1), (0, 0)):
+        candidate = _clean_model_fragment(text[max(0, start - before):min(len(text), end + after)])
+        if candidate and candidate not in spans:
+            spans.append(candidate)
+    return spans
+
+
+def _compress_model_bridge_line(
+    voiceover: str,
+    maximum: int,
+    minimum: int | None = None,
+    grounded_actions: list[str] | None = None,
+) -> str:
+    """Compress MiniMax's four-beat bridge using only words from its own line.
+
+    This is deliberately not a scene/category template.  It extracts the
+    model's own risk relation, visible action and brand-advantage fragments,
+    then only adds punctuation.  Richer source spans win when they fit.
+    """
+    compact = "".join(str(voiceover or "").split())
+    risk_terms = [term for term in _LOGISTICS_IMPACT_TERMS if term in compact]
+    allowed_actions = tuple(grounded_actions or _VISIBLE_ACTION_TERMS)
+    action_terms = [term for term in allowed_actions if term in compact]
+    # “逐件/逐项/逐单” only quantify an operation; they are not a complete
+    # visible action by themselves.  Requiring a core verb prevents local
+    # compaction from producing malformed copy such as “Buffalo逐件。”.
+    core_action_terms = [
+        term for term in action_terms if term not in {"逐件", "逐项", "逐单"}
+    ]
+    source_advantage_terms = [
+        term for term in _BRAND_ADVANTAGE_TERMS if term in compact
+    ]
+    brand_name = "Buffalo" if "buffalo" in compact.casefold() else ""
+    if not risk_terms or not core_action_terms:
+        return ""
+
+    def clause_prefixes(clause: str, terms: tuple[str, ...]) -> list[str]:
+        """Use only complete source prefixes ending at a known model term."""
+        values: list[str] = []
+        cleaned = _clean_model_fragment(clause)
+        if cleaned:
+            values.append(cleaned)
+        for term in terms:
+            start = 0
+            while True:
+                found = clause.find(term, start)
+                if found < 0:
+                    break
+                candidate = _clean_model_fragment(clause[:found + len(term)])
+                if candidate and candidate not in values:
+                    values.append(candidate)
+                start = found + len(term)
+        return values
+
+    def clause_term_spans(clause: str, terms: tuple[str, ...]) -> list[str]:
+        """Keep complete model terms or nearby term spans, never raw windows."""
+        positions = sorted(
+            (clause.find(term), clause.find(term) + len(term), term)
+            for term in terms
+            if term in clause
+        )
+        values: list[str] = []
+        for start, end, term in positions:
+            if term not in values:
+                values.append(term)
+            for next_start, next_end, _ in positions:
+                if next_start <= start or next_start - end > 3:
+                    continue
+                candidate = _clean_model_fragment(clause[start:next_end])
+                if candidate and candidate not in values:
+                    values.append(candidate)
+        return values
+
+    clauses = [
+        _clean_model_fragment(part)
+        for part in re.split(r"[。！？；，、]", compact)
+        if _clean_model_fragment(part)
+    ]
+    risk_clauses = [
+        clause for clause in clauses
+        if any(term in clause for term in _LOGISTICS_IMPACT_TERMS)
+    ]
+    action_clauses = [
+        clause for clause in clauses
+        if any(term in clause for term in core_action_terms)
+    ]
+    advantage_fragments: list[str] = []
+    for clause in clauses:
+        if not any(term in clause for term in source_advantage_terms):
+            continue
+        for value in (
+            clause_prefixes(clause, tuple(source_advantage_terms))
+            + clause_term_spans(clause, tuple(source_advantage_terms))
+        ):
+            if value and value not in advantage_fragments:
+                advantage_fragments.append(value)
+    # MiniMax sometimes writes the whole bridge without punctuation.  Split
+    # only at an existing brand/action boundary, never at an arbitrary
+    # character offset, so both halves still consist of complete model words.
+    for clause in clauses:
+        if not (
+            any(term in clause for term in _LOGISTICS_IMPACT_TERMS)
+            and any(term in clause for term in core_action_terms)
+        ):
+            continue
+        brand_at = clause.casefold().find("buffalo")
+        action_positions = [
+            clause.find(term) for term in core_action_terms if term in clause
+        ]
+        split_at = brand_at if brand_at > 0 else min(
+            (position for position in action_positions if position > 0),
+            default=-1,
+        )
+        if split_at <= 0:
+            continue
+        risk_part = _clean_model_fragment(clause[:split_at])
+        action_part = _clean_model_fragment(clause[split_at:])
+        if risk_part and risk_part not in risk_clauses:
+            risk_clauses.append(risk_part)
+        if action_part and action_part not in action_clauses:
+            action_clauses.append(action_part)
+    risk_prefix_terms = tuple(dict.fromkeys(_LOGISTICS_IMPACT_TERMS + _HOOK_FACT_TERMS))
+    action_prefix_terms = tuple(dict.fromkeys(allowed_actions + _BRAND_ADVANTAGE_TERMS))
+    candidates: list[str] = []
+    for risk_clause in risk_clauses:
+        for action_clause in action_clauses:
+            risk_options = clause_prefixes(risk_clause, risk_prefix_terms)
+            risk_options += [
+                value for value in clause_term_spans(risk_clause, risk_prefix_terms)
+                if value not in risk_options
+            ]
+            action_options = clause_prefixes(action_clause, action_prefix_terms)
+            action_options += [
+                value for value in clause_term_spans(action_clause, action_prefix_terms)
+                if value not in action_options
+            ]
+            advantage_options = [
+                value
+                for value in clause_term_spans(action_clause, action_prefix_terms)
+                if any(term in value for term in _BRAND_ADVANTAGE_TERMS)
+            ]
+            advantage_options += [
+                value for value in advantage_fragments
+                if value not in advantage_options
+            ]
+            for risk in risk_options:
+                for action in action_options:
+                    branded_action = action
+                    if brand_name and "buffalo" not in branded_action.casefold():
+                        branded_action = f"{brand_name}{branded_action}"
+                    for advantage in [""] + advantage_options:
+                        if advantage and advantage in branded_action:
+                            candidate = f"{risk}，{branded_action}。"
+                        elif advantage:
+                            candidate = f"{risk}，{branded_action}，{advantage}。"
+                        else:
+                            candidate = f"{risk}，{branded_action}。"
+                        candidate = candidate.replace("，，", "，")
+                        if (
+                            len(candidate) <= maximum
+                            and (minimum is None or len(candidate) >= minimum)
+                            and candidate.casefold().count("buffalo") == (1 if brand_name else 0)
+                            and any(term in candidate for term in _LOGISTICS_IMPACT_TERMS)
+                            and any(term in candidate for term in core_action_terms)
+                            and (
+                                not source_advantage_terms
+                                or any(term in candidate for term in source_advantage_terms)
+                            )
+                            and not video_topic_contract.incomplete_sentence_issues(
+                                {"scenes": [{"voiceover": candidate}]}
+                            )
+                            and candidate not in candidates
+                        ):
+                            candidates.append(candidate)
+
+    def score(candidate: str) -> tuple[int, int, int, int, int]:
+        return (
+            sum(term in candidate for term in _HOOK_FACT_TERMS),
+            sum(term in candidate for term in _LOGISTICS_IMPACT_TERMS),
+            sum(term in candidate for term in core_action_terms),
+            sum(term in candidate for term in _BRAND_ADVANTAGE_TERMS),
+            len(candidate),
+        )
+
+    return max(candidates, key=score, default="")
+
+
+def _hard_clip_model_line(
+    voiceover: str,
+    maximum: int,
+    minimum: int | None = None,
+) -> str:
+    """Last-resort length clip that keeps MiniMax as the sole copy author."""
+    compact = "".join(str(voiceover or "").split())
+    if len(compact) <= maximum:
+        return compact
+    upper = max(1, maximum - 1)
+    lower = max(2, int(maximum * 0.55), int(minimum or 0))
+    for end in range(upper, lower - 1, -1):
+        clipped = _clean_model_fragment(compact[:end])
+        if not clipped:
+            continue
+        candidate = clipped[:upper].rstrip("，、；：。！？ ") + "。"
+        if (
+            (minimum is None or len(candidate) >= minimum)
+            and not video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": candidate}]}
+            )
+        ):
+            return candidate
+    return ""
+
+
+def _compress_model_grounded_action_line(
+    voiceover: str,
+    grounded_actions: list[str],
+    maximum: int,
+    minimum: int | None = None,
+) -> str:
+    """Keep a complete MiniMax fragment that still names the filmed action."""
+    compact = "".join(str(voiceover or "").split())
+    if not compact or not grounded_actions:
+        return ""
+    candidates: list[str] = []
+
+    def add(raw: str) -> None:
+        candidate = _clean_model_fragment(raw).rstrip("，、；：。！？ ") + "。"
+        length = len(candidate)
+        if (
+            candidate
+            and length <= maximum
+            and (minimum is None or length >= minimum)
+            and any(term in candidate for term in grounded_actions)
+            and not video_topic_contract.incomplete_sentence_issues(
+                {"scenes": [{"voiceover": candidate}]}
+            )
+            and candidate not in candidates
+        ):
+            candidates.append(candidate)
+
+    clauses = [part for part in re.split(r"[。！？；，、]", compact) if part]
+    for index, clause in enumerate(clauses):
+        add(clause)
+        if index + 1 < len(clauses):
+            add(f"{clause}，{clauses[index + 1]}")
+        if index > 0:
+            add(f"{clauses[index - 1]}，{clause}")
+    add(compact[:max(1, maximum - 1)])
+    return max(candidates, key=len, default="")
+
+
+def _complete_model_sentence(voiceover: str) -> str:
+    """Close a dangling MiniMax sentence by deleting only its unfinished tail."""
+    compact = "".join(str(voiceover or "").split())
+    if not compact:
+        return ""
+    if not video_topic_contract.incomplete_sentence_issues(
+        {"scenes": [{"voiceover": compact}]}
+    ):
+        return compact
+    lower = max(2, len(compact) - 12)
+    for end in range(len(compact), lower - 1, -1):
+        fragment = _clean_model_fragment(compact[:end])
+        if not fragment:
+            continue
+        candidate = fragment.rstrip("，、；：。！？ ") + "。"
+        if not video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": candidate}]}
+        ):
+            return candidate
+    return ""
+
+
+def _normalize_model_terminal_punctuation(voiceover: str) -> str:
+    """Add only a missing terminal mark; never delete or replace model words."""
+    compact = "".join(str(voiceover or "").split())
+    if not compact:
+        return ""
+    if not video_topic_contract.incomplete_sentence_issues(
+        {"scenes": [{"voiceover": compact}]}
+    ):
+        return compact
+    if compact[-1] in "。！？；":
+        return compact
+    candidate = compact + "。"
+    if not video_topic_contract.incomplete_sentence_issues(
+        {"scenes": [{"voiceover": candidate}]}
+    ):
+        return candidate
+    return compact
+
+
+def _complete_remote_model_voiceovers(generated: dict) -> dict:
+    """Apply punctuation-only completion to MiniMax lines, never stock copy."""
+    completed = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    for index, item in enumerate(completed["scenes"]):
+        current = str(item.get("voiceover") or "").strip()
+        if not video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": current}]}
+        ):
+            continue
+        replacement = _complete_model_sentence(current)
+        if not replacement:
+            raise ValueError(f"第{index + 1}镜旁白无法保留模型原意并补全句子")
+        item["voiceover"] = replacement
+        item["text_overlay"] = str(item.get("text_overlay") or replacement.rstrip("。"))[:24]
+    return _annotate_copy_revisions(
+        generated,
+        completed,
+        reason="model_sentence_completion",
+    )
+
+
+def _compact_long_formal_voiceovers(
+    generated: dict,
+    voiceover_limits: list[int | None],
+    scenes: list[dict] | None = None,
+    voiceover_minimums: list[int | None] | None = None,
+    *,
+    allow_scene_fallback: bool = True,
+) -> dict:
     """Trim an otherwise-valid model line to its locked real-video beat.
 
     The planner already chose the factual wording.  When it merely overruns a
@@ -2633,24 +4355,598 @@ def _compact_long_formal_voiceovers(generated: dict, voiceover_limits: list[int 
     repaired = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     for index, item in enumerate(repaired["scenes"]):
         maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        minimum = (
+            voiceover_minimums[index]
+            if voiceover_minimums and index < len(voiceover_minimums)
+            else None
+        )
         voiceover = str(item.get("voiceover") or "").strip()
         compact = "".join(voiceover.split())
         if maximum is None or len(compact) <= maximum:
             continue
         prefix = compact[:maximum]
+        source_scene = scenes[index] if scenes and index < len(scenes) else {}
+        grounded_actions = _visible_action_terms_for_scene(source_scene)
+        shortened = ""
+        if str(source_scene.get("scene_role") or "") == "owned_proof":
+            if "buffalo" in compact.casefold() and any(
+                term in compact for term in _LOGISTICS_IMPACT_TERMS
+            ):
+                shortened = _compress_model_bridge_line(
+                    compact, maximum, minimum, grounded_actions,
+                )
+            if not shortened:
+                shortened = _compress_model_grounded_action_line(
+                    compact,
+                    grounded_actions,
+                    maximum,
+                    minimum,
+                )
         boundary = max((prefix.rfind(mark) for mark in "。！？；，、"), default=-1)
         # Do not leave a one-word fragment merely because a comma happened at
         # the start; a full-width stop within the latter half is a clean cut.
-        if boundary >= max(4, int(maximum * 0.55)):
+        if shortened:
+            pass
+        elif boundary >= max(4, int(maximum * 0.55)):
             marker = prefix[boundary]
             shortened = prefix[:boundary + 1]
             if marker in "，、":
                 shortened = shortened[:-1].rstrip() + "。"
+        elif allow_scene_fallback:
+            # If the model wrote one unbroken clause, use the already-reviewed
+            # scene contract instead of spending more remote calls on the same
+            # wording error.  These candidates only describe the locked topic
+            # beat or visible source action and always end as complete sentences.
+            role = str(source_scene.get("scene_role") or "")
+            category = str(source_scene.get("primary_category") or "").casefold()
+            candidates = [
+                str(source_scene.get("voiceover") or "").strip(),
+                str(source_scene.get("copy_anchor") or "").strip(),
+                {
+                    "warehouse": "仓内正在进行分拣准备。",
+                    "staff": "工作人员正在处理仓内包裹。",
+                    "facility": "仓内设备正在处理包裹。",
+                    "delivery": "车辆正在进行发运前准备。",
+                }.get(category, ""),
+            ]
+            shortened = next(
+                (
+                    candidate for candidate in candidates
+                    if candidate
+                    and candidate[-1] in "。！？；"
+                    and len("".join(candidate.split())) <= maximum
+                ),
+                "",
+            )
+            if not shortened or role == "hotspot_evidence":
+                raise ValueError(f"内容规划模型第 {index + 1} 个分镜过长且没有可安全截断的完整分句")
         else:
-            shortened = prefix[:max(1, maximum - 1)].rstrip("，、；：- ") + "。"
+            # MiniMax has supplied usable wording.  Prefer a clean semantic
+            # boundary; for the first owned bridge, reconstruct a shorter line
+            # exclusively from MiniMax's own risk/action/advantage fragments.
+            # A final hard clip still keeps the model as the sole copy author.
+            semantic_boundaries = (
+                "。", "！", "？", "；", "，", "、",
+                "因此", "所以", "同时", "从而", "并且", "再把", "让",
+            )
+            cut_at = max((prefix.rfind(mark) for mark in semantic_boundaries), default=-1)
+            if cut_at >= max(4, int(maximum * 0.55)):
+                shortened = prefix[:cut_at].rstrip("，、；： ") + "。"
+            elif str(source_scene.get("scene_role") or "") == "owned_proof":
+                shortened = _compress_model_bridge_line(
+                    compact, maximum, minimum, grounded_actions,
+                )
+                if not shortened:
+                    shortened = _hard_clip_model_line(compact, maximum, minimum)
+            else:
+                shortened = _hard_clip_model_line(compact, maximum, minimum)
+            if not shortened:
+                raise ValueError(f"内容规划模型第 {index + 1} 个分镜无法保留完整模型语义")
+        if minimum is not None and len("".join(shortened.split())) < minimum:
+            source_scene = scenes[index] if scenes and index < len(scenes) else {}
+            if str(source_scene.get("scene_role") or "") == "owned_proof":
+                shortened = _compress_model_bridge_line(
+                    compact, maximum, minimum, grounded_actions,
+                )
+            if not shortened or len("".join(shortened.split())) < minimum:
+                shortened = _hard_clip_model_line(compact, maximum, minimum)
+        if video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": shortened}]}
+        ):
+            shortened = _hard_clip_model_line(compact, maximum, minimum)
+        if (
+            not shortened
+            or (minimum is not None and len("".join(shortened.split())) < minimum)
+            or video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": shortened}]}
+            )
+        ):
+            raise ValueError(f"内容规划模型第 {index + 1} 个分镜无法形成完整模型句子")
         item["voiceover"] = shortened
         item["text_overlay"] = str(item.get("text_overlay") or shortened)[:24]
     return repaired
+
+
+def _salvage_remote_formal_script(
+    content: str,
+    *,
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    hotspot_count: int,
+    source: str,
+    reason: str,
+) -> dict:
+    """Keep a valid MiniMax draft when only a measured beat is too long.
+
+    The model remains the author.  Local code can remove a trailing clause at
+    punctuation/semantic boundaries, but cannot swap in category templates.
+    Every other factual, topic, narrative and duration gate remains active.
+    """
+    parsed = _planner_json(
+        content, len(scenes), None, None, hotspot_scene_count=hotspot_count,
+    )
+    stamped = _stamp_copy_source(parsed, source, reason=reason)
+    # The Hook opening is evidence, not creative brand copy.  If MiniMax omits
+    # audited nouns while rewriting for duration, lock only scene 1 back to the
+    # verified database fact.  The marketing bridge and all owned-scene copy
+    # remain model-authored and are never replaced with a fixed slogan here.
+    fact_locked = _repair_formal_narrative_hook(stamped, scenes, event)
+    stamped = _annotate_copy_revisions(
+        stamped,
+        fact_locked,
+        reason="verified_hook_fact_lock",
+    )
+    stamped = _complete_remote_model_voiceovers(stamped)
+    # Duration compaction is a staging operation.  Validate the compacted
+    # document, then apply the narrow topic-contract rescue so a reachable
+    # MiniMax response using a valid synonym is not rejected at scripting.
+    compacted = _compact_long_formal_voiceovers(
+        stamped,
+        voiceover_limits,
+        scenes,
+        voiceover_minimums,
+        allow_scene_fallback=False,
+    )
+    compacted = _annotate_copy_revisions(
+        stamped,
+        compacted,
+        reason="model_duration_compaction",
+    )
+    compacted = _repair_generated_topic_contract(
+        compacted,
+        brief=brief,
+        scenes=scenes,
+        event=event,
+        voiceover_minimums=voiceover_minimums,
+        voiceover_limits=voiceover_limits,
+    )
+    normalized = _planner_json(
+        _json.dumps(compacted, ensure_ascii=False),
+        len(scenes),
+        voiceover_limits,
+        voiceover_minimums,
+        hotspot_scene_count=hotspot_count,
+    )
+    _validate_formal_copy_specificity(normalized)
+    _validate_complete_formal_voiceovers(normalized)
+    _validate_generated_topic_anchor(normalized, brief, has_event_anchor=bool(event))
+    _validate_formal_narrative(normalized, scenes, event)
+    return normalized
+
+
+def _first_owned_bridge_index(scenes: list[dict]) -> int | None:
+    """Return the first Buffalo proof beat after the verified Hook."""
+    hotspot_seen = False
+    for index, scene in enumerate(scenes):
+        if str(scene.get("scene_role") or "") == "hotspot_evidence":
+            hotspot_seen = True
+            continue
+        if hotspot_seen and str(scene.get("scene_role") or "") == "owned_proof":
+            return index
+    return None
+
+
+def _owned_bridge_window_indices(scenes: list[dict], *, maximum: int = 2) -> list[int]:
+    """Use two short Buffalo beats for impact/action/advantage when available."""
+    first = _first_owned_bridge_index(scenes)
+    if first is None:
+        return []
+    indices = [first]
+    for index in range(first + 1, len(scenes)):
+        if str(scenes[index].get("scene_role") or "") == "owned_proof":
+            indices.append(index)
+            if len(indices) >= maximum:
+                break
+    return indices
+
+
+def _visible_action_terms_for_scene(scene: dict) -> list[str]:
+    """Whitelist action words that are present in the locked visual contract."""
+    visual_contract = " ".join(
+        str(scene.get(key) or "")
+        for key in (
+            "copy_anchor", "action_key", "visual", "audited_visual_fact", "voiceover",
+        )
+    )
+    grounded = [term for term in _VISIBLE_ACTION_TERMS if term in visual_contract]
+    expanded = list(grounded)
+    for family in _VISIBLE_ACTION_FAMILIES:
+        if any(term in visual_contract for term in family):
+            expanded.extend(term for term in family if term not in expanded)
+    return expanded
+
+
+def _prepare_remote_formal_script_for_bridge(
+    content: str,
+    *,
+    brief: dict,
+    scenes: list[dict],
+    event: dict | None,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    hotspot_count: int,
+    source: str,
+    reason: str,
+) -> tuple[dict, list[int], int]:
+    """Keep a MiniMax plan whose remaining bad beats can be patched precisely.
+
+    The fourth remote call must not regenerate the whole plan or fall back to
+    local stock copy.  It receives only the first Buffalo bridge plus any beats
+    whose model-authored copy is outside the measured duration window.
+    """
+    bridge_index = _first_owned_bridge_index(scenes)
+    if bridge_index is None:
+        raise ValueError("正式分镜缺少热点后的 Buffalo 承接镜")
+    parsed = _planner_json(
+        content, len(scenes), None, None, hotspot_scene_count=hotspot_count,
+    )
+    stamped = _stamp_copy_source(parsed, source, reason=reason)
+    fact_locked = _repair_formal_narrative_hook(stamped, scenes, event)
+    stamped = _annotate_copy_revisions(
+        stamped, fact_locked, reason="verified_hook_fact_lock",
+    )
+    stamped = _complete_remote_model_voiceovers(stamped)
+    compacted = _compact_long_formal_voiceovers(
+        stamped,
+        voiceover_limits,
+        scenes,
+        voiceover_minimums,
+        allow_scene_fallback=False,
+    )
+    compacted = _annotate_copy_revisions(
+        stamped, compacted, reason="model_duration_compaction",
+    )
+    compacted = _repair_generated_topic_contract(
+        compacted,
+        brief=brief,
+        scenes=scenes,
+        event=event,
+        voiceover_minimums=voiceover_minimums,
+        voiceover_limits=voiceover_limits,
+    )
+    bridge_window = _owned_bridge_window_indices(scenes)
+    rewrite_indices: set[int] = set(bridge_window or [bridge_index])
+    for index, item in enumerate(compacted.get("scenes") or []):
+        original_item = (stamped.get("scenes") or [])[index]
+        if str(item.get("voiceover") or "") != str(original_item.get("voiceover") or ""):
+            # Local compaction is only a staging aid.  A changed line must be
+            # handed back to MiniMax so no locally shortened sentence reaches
+            # the final report as if it were model-authored copy.
+            rewrite_indices.add(index)
+        compact_length = len("".join(str(item.get("voiceover") or "").split()))
+        maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+        if (maximum is not None and compact_length > maximum) or (
+            minimum is not None and compact_length < minimum
+        ):
+            rewrite_indices.add(index)
+    try:
+        _validate_dynamic_brand_cta(compacted.get("scenes") or [], scenes)
+    except ValueError:
+        # A reachable MiniMax response that returned a stock CTA or omitted
+        # the theme-specific value proposition is repaired by MiniMax again;
+        # it is never silently replaced by the local corpus.
+        rewrite_indices.update(
+            index for index, scene in enumerate(scenes)
+            if str(scene.get("scene_role") or "") == "brand_cta"
+        )
+    relaxed_limits = list(voiceover_limits)
+    relaxed_minimums = list(voiceover_minimums)
+    for index in rewrite_indices:
+        if index < len(relaxed_limits):
+            relaxed_limits[index] = None
+        if index < len(relaxed_minimums):
+            relaxed_minimums[index] = None
+    normalized = _planner_json(
+        _json.dumps(compacted, ensure_ascii=False),
+        len(scenes),
+        relaxed_limits,
+        relaxed_minimums,
+        hotspot_scene_count=hotspot_count,
+    )
+    # ``normalized`` is an internal staging document. Every locally changed
+    # or duration-invalid line is replaced by the fourth MiniMax call below.
+    # Topic validation happens here after the narrow rescue, so a missing
+    # literal such as “接单” can be repaired from the same semantic group.
+    _validate_generated_topic_anchor(normalized, brief, has_event_anchor=bool(event))
+    return normalized, sorted(rewrite_indices), bridge_index
+
+
+def _parse_model_scene_rewrites(content: str) -> list[dict]:
+    raw = str(content or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        payload = _json.loads(raw)
+    except Exception as exc:
+        raise ValueError("MiniMax 镜头专项修订未返回合法 JSON") from exc
+    rows = payload.get("scenes") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("MiniMax 镜头专项修订返回结构无效")
+    return rows
+
+
+def _normalize_model_scene_rewrite_row(
+    row: dict,
+    *,
+    index: int,
+    bridge_index: int,
+    scenes: list[dict],
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+) -> dict:
+    """Validate one MiniMax patch without revalidating unfinished peers.
+
+    Targeted retries may repair several beats.  A valid beat is frozen as soon
+    as it passes this contract, so a later retry cannot regress it while
+    fixing another scene.  Any duration compaction keeps only MiniMax-authored
+    words and never substitutes a category template.
+    """
+    voiceover = str(row.get("voiceover") or "").strip()
+    if not voiceover:
+        raise ValueError(f"MiniMax 第 {index + 1} 镜专项修订缺少旁白")
+    source_scene = scenes[index] if index < len(scenes) else {}
+    maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+    minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+    compacted = _compact_long_formal_voiceovers(
+        {"scenes": [{"voiceover": voiceover, "text_overlay": row.get("text_overlay")}]},
+        [maximum],
+        [source_scene],
+        [minimum],
+        allow_scene_fallback=False,
+    )
+    voiceover = str(compacted["scenes"][0].get("voiceover") or "").strip()
+    # MiniMax occasionally returns a semantically complete sentence without
+    # the terminal Chinese punctuation.  Preserve every model-authored word
+    # and add punctuation only; malformed/truncated tails remain invalid and
+    # continue through the targeted remote retry path below.
+    voiceover = _normalize_model_terminal_punctuation(voiceover)
+    if any(phrase in voiceover for phrase in (
+        "Buffalo先核对", "Buffalo核对做稳", "核对做稳",
+    )):
+        raise ValueError("MiniMax 镜头专项修订仍使用固定承接句")
+    compact_length = len("".join(voiceover.split()))
+    if maximum is not None and compact_length > maximum:
+        raise ValueError(f"MiniMax 第 {index + 1} 镜旁白超过 {maximum} 字时长上限")
+    if minimum is not None and compact_length < minimum:
+        raise ValueError(f"MiniMax 第 {index + 1} 镜旁白少于 {minimum} 字时长下限")
+    if video_topic_contract.incomplete_sentence_issues(
+        {"scenes": [{"voiceover": voiceover}]}
+    ):
+        raise ValueError(f"MiniMax 第 {index + 1} 镜旁白不是完整句子")
+    if str(source_scene.get("scene_role") or "") == "brand_cta":
+        _validate_dynamic_brand_cta_voiceover(voiceover, source="repair")
+
+    grounded_actions = _visible_action_terms_for_scene(source_scene)
+    if grounded_actions and not any(term in voiceover for term in grounded_actions):
+        raise ValueError(f"MiniMax 第 {index + 1} 镜没有使用锁定镜头中的真实可见动作")
+    bridge_window = _owned_bridge_window_indices(scenes)
+    bridge_position = (
+        bridge_window.index(index) if index in bridge_window else None
+    )
+    if bridge_position is not None:
+        if not grounded_actions:
+            raise ValueError("锁定 Buffalo 镜头没有可供模型引用的可见动作")
+        if bridge_position == 0:
+            if "buffalo" not in voiceover.casefold():
+                raise ValueError("MiniMax 第一承接镜没有点明 Buffalo")
+            if not any(term in voiceover for term in _LOGISTICS_IMPACT_TERMS):
+                raise ValueError("MiniMax 第一承接镜没有说明热点带来的物流影响")
+        # With two Buffalo beats, the second one must turn its visible action
+        # into a concrete advantage. With only one beat, that line completes
+        # the full four-beat bridge. This validates model output only; it never
+        # substitutes local stock copy.
+        if (bridge_position > 0 or len(bridge_window) == 1) and not any(
+            term in voiceover for term in _BRAND_ADVANTAGE_TERMS
+        ):
+            raise ValueError(
+                f"MiniMax 第 {index + 1} 镜没有把真实可见动作写成 Buffalo 品牌优势"
+            )
+    return {
+        "scene": index + 1,
+        "voiceover": voiceover,
+        "text_overlay": str(row.get("text_overlay") or "").strip()[:24],
+    }
+
+
+def _apply_model_scene_rewrites(
+    generated: dict,
+    content: str,
+    *,
+    rewrite_indices: list[int],
+    bridge_index: int,
+    scenes: list[dict],
+    brief: dict,
+    event: dict | None,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    hotspot_count: int,
+) -> dict:
+    """Splice MiniMax-authored patches into only the measured invalid beats."""
+    rows = _parse_model_scene_rewrites(content)
+    expected = {index + 1 for index in rewrite_indices}
+    received: dict[int, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("MiniMax 镜头专项修订包含无效分镜")
+        try:
+            scene_number = int(row.get("scene"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("MiniMax 镜头专项修订缺少分镜编号") from exc
+        if scene_number in received:
+            raise ValueError("MiniMax 镜头专项修订包含重复分镜")
+        received[scene_number] = row
+    if set(received) != expected:
+        raise ValueError("MiniMax 镜头专项修订未完整覆盖指定分镜")
+
+    rewritten = {
+        **generated,
+        "scenes": [dict(item) for item in generated.get("scenes") or []],
+    }
+    for index in rewrite_indices:
+        row = received[index + 1]
+        voiceover = str(row.get("voiceover") or "").strip()
+        if not voiceover:
+            raise ValueError(f"MiniMax 第 {index + 1} 镜专项修订缺少旁白")
+        rewritten["scenes"][index] = {
+            **rewritten["scenes"][index],
+            "voiceover": voiceover,
+            "text_overlay": str(row.get("text_overlay") or "").strip()[:24],
+        }
+    # MiniMax sometimes returns a semantically correct line a few characters
+    # beyond the locked TTS window.  Compact only words already present in the
+    # model response; category templates and scene fallback are forbidden.
+    rewritten = _compact_long_formal_voiceovers(
+        rewritten,
+        voiceover_limits,
+        scenes,
+        voiceover_minimums,
+        allow_scene_fallback=False,
+    )
+    for index in rewrite_indices:
+        voiceover = str(rewritten["scenes"][index].get("voiceover") or "").strip()
+        text_overlay = str(rewritten["scenes"][index].get("text_overlay") or "").strip()[:24]
+        if any(phrase in voiceover for phrase in (
+            "Buffalo先核对", "Buffalo核对做稳", "核对做稳",
+        )):
+            raise ValueError("MiniMax 镜头专项修订仍使用固定承接句")
+        compact_length = len("".join(voiceover.split()))
+        maximum = voiceover_limits[index] if index < len(voiceover_limits) else None
+        minimum = voiceover_minimums[index] if index < len(voiceover_minimums) else None
+        if maximum is not None and compact_length > maximum:
+            raise ValueError(f"MiniMax 第 {index + 1} 镜旁白超过 {maximum} 字时长上限")
+        if minimum is not None and compact_length < minimum:
+            raise ValueError(f"MiniMax 第 {index + 1} 镜旁白少于 {minimum} 字时长下限")
+        if video_topic_contract.incomplete_sentence_issues(
+            {"scenes": [{"voiceover": voiceover}]}
+        ):
+            raise ValueError(f"MiniMax 第 {index + 1} 镜旁白不是完整句子")
+
+        source_scene = scenes[index] if index < len(scenes) else {}
+        grounded_actions = _visible_action_terms_for_scene(source_scene)
+        if grounded_actions and not any(term in voiceover for term in grounded_actions):
+            raise ValueError(f"MiniMax 第 {index + 1} 镜没有使用锁定镜头中的真实可见动作")
+        bridge_window = _owned_bridge_window_indices(scenes)
+        bridge_position = (
+            bridge_window.index(index) if index in bridge_window else None
+        )
+        if bridge_position is not None:
+            if not grounded_actions:
+                raise ValueError("锁定 Buffalo 镜头没有可供模型引用的可见动作")
+            if bridge_position == 0:
+                if "buffalo" not in voiceover.casefold():
+                    raise ValueError("MiniMax 第一承接镜没有点明 Buffalo")
+                if not any(term in voiceover for term in _LOGISTICS_IMPACT_TERMS):
+                    raise ValueError("MiniMax 第一承接镜没有说明热点带来的物流影响")
+            if (bridge_position > 0 or len(bridge_window) == 1) and not any(
+                term in voiceover for term in _BRAND_ADVANTAGE_TERMS
+            ):
+                raise ValueError(
+                    f"MiniMax 第 {index + 1} 镜没有把真实可见动作写成 Buffalo 品牌优势"
+                )
+
+        rewritten["scenes"][index] = {
+            **rewritten["scenes"][index],
+            "voiceover": voiceover,
+            "text_overlay": text_overlay or voiceover.rstrip("。！？；")[:24],
+            "copy_source": "repair",
+            "copy_repair_reason": (
+                "model_dynamic_brand_cta_rewrite"
+                if str(source_scene.get("scene_role") or "") == "brand_cta"
+                else (
+                    "model_bridge_rewrite"
+                    if index in bridge_window
+                    else "model_targeted_scene_rewrite"
+                )
+            ),
+        }
+
+    normalized = _planner_json(
+        _json.dumps(rewritten, ensure_ascii=False),
+        len(scenes),
+        voiceover_limits,
+        voiceover_minimums,
+        hotspot_scene_count=hotspot_count,
+    )
+    normalized = _repair_generated_topic_contract(
+        normalized,
+        brief=brief,
+        scenes=scenes,
+        event=event,
+        voiceover_minimums=voiceover_minimums,
+        voiceover_limits=voiceover_limits,
+    )
+    _validate_formal_copy_specificity(normalized)
+    _validate_complete_formal_voiceovers(normalized)
+    _validate_generated_topic_anchor(normalized, brief, has_event_anchor=bool(event))
+    _validate_formal_narrative(normalized, scenes, event)
+    return normalized
+
+
+def _apply_model_bridge_rewrite(
+    generated: dict,
+    content: str,
+    *,
+    bridge_index: int,
+    scenes: list[dict],
+    brief: dict,
+    event: dict | None,
+    voiceover_minimums: list[int | None],
+    voiceover_limits: list[int | None],
+    hotspot_count: int,
+) -> dict:
+    """Compatibility wrapper for a one-scene dedicated bridge rewrite."""
+    raw = str(content or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        payload = _json.loads(raw)
+    except Exception as exc:
+        raise ValueError("MiniMax 承接镜专项修订未返回合法 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("MiniMax 承接镜专项修订返回结构无效")
+    wrapped = _json.dumps({
+        "scenes": [{
+            "scene": bridge_index + 1,
+            "voiceover": payload.get("voiceover"),
+            "text_overlay": payload.get("text_overlay"),
+        }],
+    }, ensure_ascii=False)
+    return _apply_model_scene_rewrites(
+        generated,
+        wrapped,
+        rewrite_indices=[bridge_index],
+        bridge_index=bridge_index,
+        scenes=scenes,
+        brief=brief,
+        event=event,
+        voiceover_minimums=voiceover_minimums,
+        voiceover_limits=voiceover_limits,
+        hotspot_count=hotspot_count,
+    )
 
 
 def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict]) -> dict:
@@ -2675,20 +4971,46 @@ def _compact_topic_evidence(brief: dict, event: dict | None, scenes: list[dict])
         "voiceover_max_chars": _scene_voiceover_max_chars(item),
         "voiceover_min_chars": _scene_voiceover_min_chars(item),
     } for item in scenes]
+    topic_contract = video_topic_contract.build_topic_contract(
+        str(brief.get("raw_input") or brief.get("requested_topic") or brief.get("subject") or ""),
+        has_event_anchor=bool(event),
+    )
+    narrative_contract = ({
+        "beat_1": "明确说出 Hook 发生了什么，不能只说‘现场’或复述标题。",
+        "beat_2": "解释这个事实为什么会影响运输、存储或配送安全；优先使用 facts[0].logistics_question 提出的具体物流问题。",
+        "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接，并把一个具体优势落到画面。",
+        "beat_4": (
+            "每个后续镜头只讲一个可见动作；最后一个品牌 CTA 也由 MiniMax "
+            "针对本片动态收束，承接已出现的物流影响或可见动作并落到具体 Buffalo 品牌优势。"
+        ),
+    } if event else {
+        "beat_1": topic_contract["opening_hook"],
+        "beat_2": topic_contract["opening_bridge"],
+        "beat_3": topic_contract["safe_angle"],
+        "beat_4": "每个后续镜头只讲一个与原主题相关的 Buffalo 可见动作和具体品牌优势。",
+    })
+    topic_requirements = {
+        "intent": str(topic_contract.get("intent") or ""),
+        "label": str(topic_contract.get("label") or ""),
+        "opening_mode": str(topic_contract.get("opening_mode") or ""),
+        "opening_hook": str(topic_contract.get("opening_hook") or ""),
+        "opening_bridge": str(topic_contract.get("opening_bridge") or ""),
+        "title_requirements": [
+            list(group) for group in topic_contract.get("title_groups") or []
+        ],
+        "narrative_requirements": [
+            list(group) for group in topic_contract.get("narrative_groups") or []
+        ],
+    }
     return {
         "brief": {
             **{key: brief.get(key) for key in ("raw_input", "subject", "angle", "audience", "goal", "logistics_nodes", "must_avoid")},
-            "topic_anchor_contract": _topic_anchor_contract(
-                str(brief.get("raw_input") or brief.get("subject") or "")
-            ),
+            "topic_anchor_contract": topic_contract,
+            "topic_requirements": topic_requirements,
         },
         "facts": facts,
-        "narrative_contract": {
-            "beat_1": "明确说出 Hook 发生了什么，不能只说‘现场’或复述标题。",
-            "beat_2": "解释这个事实为什么会影响运输、存储或配送安全；优先使用 facts[0].logistics_question 提出的具体物流问题。",
-            "beat_3": "用 Buffalo 可见的仓储、分拣、运输或交付动作承接，并把一个具体优势（风险前置、动作可核对、异常可留痕或交接更稳）落到画面；不能只喊口号。",
-            "beat_4": "每个后续镜头只讲一个可见动作，最后再用统一 CTA 收束。",
-        },
+        "narrative_contract": narrative_contract,
+        "topic_requirements": topic_requirements,
         "allowed_scenes": allowed_scenes,
     }
 
@@ -2907,9 +5229,16 @@ def _marketing_hook_candidates(
             question = "政策或规则变化后，进入南非市场前要重查哪些准备？"
         else:
             question = "订单与配送需求变化时，仓配动作如何影响客户体验？"
-        headline = str(hotspot.get("title_zh") or hotspot.get("title") or "").strip()
-        if not headline or headline.casefold().startswith("what’s happening across") or headline.casefold().startswith("what's happening across"):
-            headline = str(hooks[0].get("content_description") or "") if hooks else headline
+        source_headline = str(hotspot.get("title_zh") or hotspot.get("title") or "").strip()
+        if not source_headline or source_headline.casefold().startswith("what’s happening across") or source_headline.casefold().startswith("what's happening across"):
+            source_headline = str(hooks[0].get("content_description") or "") if hooks else source_headline
+        hook_evidence = (event_clips[0].get("evidence") or {}) if event_clips else {}
+        hook_fact = str(hook_evidence.get("what_happened") or "").strip()
+        # Only an audited question may shape the retention headline.  The
+        # broader retrieval question is for planning and can be unrelated to
+        # the selected visual fact.
+        hook_question = str(hook_evidence.get("logistics_question") or "").strip()
+        attention_title = hotspot_hook_copy.attention_headline(hook_fact, hook_question, source_headline)
         reuse_bias = 2 if len(hooks) >= 2 else 0
         mismatch_penalty = 0
         if "border" in event_profile and not topic_profile & {"border", "warehouse"}:
@@ -2947,7 +5276,9 @@ def _marketing_hook_candidates(
         
         candidates.append({
             "hotspot_id": hotspot["id"], "event_clip_id": hooks[0]["event_clip_id"] if hooks else None,
-            "title": headline[:200],
+            "title": attention_title[:200] or source_headline[:200],
+            "attention_title": attention_title[:200],
+            "source_title": source_headline[:200],
             "summary": (str(hotspot.get("summary_zh") or hotspot.get("summary") or "") + " " + hook_context_text)[:500],
             "source_url": hotspot.get("source_url"), "published_at": hotspot.get("published_at"),
             "published_ts": published_ts,
@@ -3169,13 +5500,11 @@ async def autopilot_topic_brief_video(brief_id: str, body: TopicAutoPilotRequest
         raise HTTPException(404, "选题简报不存在")
     chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
     if chain_mode == "owned_only":
-        result = await _generate_topic_brief_video(
-            brief_id,
-            TopicBriefGenerateRequest(hotspot_event_id=None, platform=body.platform,
-                                      target_duration_ms=body.target_duration_ms, chain_mode="owned_only"),
-            user,
-        )
-        return {**result, "autopilot": {"chain_mode": "owned_only", "hotspot_id": None, "hook_clips": []}}
+        raise HTTPException(409, {
+            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook。",
+            "required": {"hotspot_video": 1},
+            "next_action": "返回热点审核台，先选择与主题相关的 Hook，再创建视频项目。",
+        })
     candidates, kb_context, brand_evidence, _funnel = _marketing_hook_candidates(brief, limit=20)
     candidates, model_meta = await _model_decide_marketing_hooks(brief, candidates, kb_context, brand_evidence, limit=5)
     chosen = next((item for item in candidates if item.get("can_render_video") and item.get("event_clip_id")), None)
@@ -3217,51 +5546,67 @@ async def _generate_topic_brief_video(
     if not brief:
         raise HTTPException(404, "选题简报不存在")
     chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
+    if chain_mode == "owned_only":
+        raise HTTPException(409, {
+            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；不再支持自有素材直出兜底。",
+            "required": {"hotspot_video": 1},
+            "next_action": "先绑定至少 1 条相关热点 Hook，再重新创建视频项目。",
+        })
     event = db.get_hotspot_event_clip(body.hotspot_event_id) if body.hotspot_event_id else None
     if event:
         event = _with_soft_logistics_bridge(event)
-    if chain_mode != "owned_only" and not event:
+    if not event:
         raise HTTPException(404, "热点事件不存在")
+    requested_hook_event_ids = list(dict.fromkeys(
+        int(event_id) for event_id in body.approved_hook_event_ids if int(event_id) > 0
+    ))
     approved_hook_event_ids: list[int] = []
     source_hotspot: dict = {}
     related_events: list[dict] = []
-    if chain_mode != "owned_only":
-        approved_hook_event_ids = list(dict.fromkeys(
-            int(event_id) for event_id in body.approved_hook_event_ids if int(event_id) > 0
-        ))
-        if approved_hook_event_ids:
-            if int(event["id"]) not in approved_hook_event_ids:
-                approved_hook_event_ids.insert(0, int(event["id"]))
-            if not 1 <= len(approved_hook_event_ids) <= 2:
-                raise HTTPException(409, "聊天成片必须锁定一至两段已确认 Hook。")
-            locked_events = []
-            for event_id in approved_hook_event_ids:
-                clip = db.get_hotspot_event_clip(event_id)
-                locked_events.append(_with_soft_logistics_bridge(clip) if clip else None)
-            if (
-                any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
-                or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
-                       for item in locked_events)
-                or not _is_same_confirmed_hotspot_event(locked_events)
-            ):
-                raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
-            if len(locked_events) == 2:
-                first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
-                if int(second["start_ms"]) < int(first["end_ms"]):
-                    raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
-        source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
-        related_events = [
-            _with_soft_logistics_bridge(item)
-            for item in db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
-        ]
-        # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
-        if approved_hook_event_ids:
-            known_ids = {int(e.get("id") or 0) for e in related_events}
-            for clip_id in approved_hook_event_ids:
-                clip = db.get_hotspot_event_clip(int(clip_id))
-                clip = _with_soft_logistics_bridge(clip) if clip else None
-                if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
-                    related_events.append(clip)
+    if requested_hook_event_ids:
+        approved_hook_event_ids = requested_hook_event_ids
+        if int(event["id"]) not in approved_hook_event_ids:
+            approved_hook_event_ids.insert(0, int(event["id"]))
+        if not 1 <= len(approved_hook_event_ids) <= 2:
+            raise HTTPException(409, "正式出片必须锁定一至两段已确认 Hook。")
+        locked_events = []
+        for event_id in approved_hook_event_ids:
+            clip = db.get_hotspot_event_clip(event_id)
+            locked_events.append(_with_soft_logistics_bridge(clip) if clip else None)
+    else:
+        # The primary Hook is still a hard binding.  An empty explicit list only
+        # means “let the planner add one complementary Hook from this same
+        # confirmed source”; it must not narrow the planner to the primary clip.
+        locked_events = [event]
+    if (
+        any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
+        or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
+               for item in locked_events)
+        or not _is_same_confirmed_hotspot_event(locked_events)
+    ):
+        raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
+    if len(locked_events) == 2:
+        first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
+        if int(second["start_ms"]) < int(first["end_ms"]):
+            raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
+    requested_topic = str(
+        brief.get("raw_input") or brief.get("subject") or brief.get("angle") or "南非物流"
+    ).strip()
+    binding_assessment = _hook_binding_assessment(requested_topic, locked_events)
+    hook_binding_mode = binding_assessment["mode"]
+    source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
+    related_events = [
+        _with_soft_logistics_bridge(item)
+        for item in db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+    ]
+    # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
+    if approved_hook_event_ids:
+        known_ids = {int(e.get("id") or 0) for e in related_events}
+        for clip_id in approved_hook_event_ids:
+            clip = db.get_hotspot_event_clip(int(clip_id))
+            clip = _with_soft_logistics_bridge(clip) if clip else None
+            if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
+                related_events.append(clip)
     owned_segments = [item for item in db.list_asset_segments(limit=20_000) if not item.get("asset_hotspot_id")]
     owned_images = [
         item for item in db.list_assets(file_type="image", status="active")
@@ -3270,6 +5615,17 @@ async def _generate_topic_brief_video(
     planning_brief = hotspot_logistics_planner.build_brief(
         {**source_hotspot, **event} if event else {}, owned_segments, brief
     )
+    # The user's topic is the immutable editorial contract.  A Hook may enrich
+    # the opener and logistics question, but must never replace the title/topic
+    # requirement used by scripting, resume or quality review.
+    planning_brief["logistics_topic"] = requested_topic
+    planning_brief["requested_topic"] = requested_topic
+    planning_brief["topic_contract"] = video_topic_contract.build_topic_contract(
+        requested_topic,
+        has_event_anchor=True,
+    )
+    planning_brief["hook_binding_mode"] = hook_binding_mode
+    planning_brief["hook_compatibility_issues"] = binding_assessment["issues"]
     if event:
         planning_brief.update({
             "hotspot_id": event.get("hotspot_id"),
@@ -3284,6 +5640,7 @@ async def _generate_topic_brief_video(
         int(item["duration_ms"]) for item in hotspot_video_planner.BRAND_ENDCARD_SCENES
     )
     base_duration_ms = max(50_000, body.target_duration_ms - endcard_duration_ms)
+    planner_rescue_reason = ""
     try:
         scenes = hotspot_video_planner.plan_followup_scenes(
             planning_brief, related_events, owned_segments, target_duration_ms=base_duration_ms,
@@ -3292,34 +5649,89 @@ async def _generate_topic_brief_video(
             chain_mode=chain_mode,
         )
     except ValueError as exc:
-        # Planner input originates from verified Hooks and reviewed internal
-        # assets. A sparse or non-renderable combination is a user-actionable
-        # coverage gate, never an opaque server failure in the chat flow.
-        logger.info("双素材视频规划未通过素材门禁: %s", exc)
-        raise HTTPException(409, {
-            "message": "当前已锁定热点，但可用素材组合无法形成可渲染分镜。",
-            "reason": str(exc)[:240],
-            "next_action": "请确认 Hook 仍可播放，或补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
-        }) from exc
-    hotspot_count = sum(item.get("evidence_type") == "hotspot_video" for item in scenes)
+        scenes = []
+        planner_rescue_reason = str(exc)[:240]
+
+    # Topic-specific indexing can be sparse even when the owned library has
+    # enough unique, reviewed warehouse and delivery footage.  A production
+    # request must not stop at that retrieval miss.  Retry once with the same
+    # immutable user topic and Hook, but widen only the *visual* roles to the
+    # common Buffalo operating chain.  The copy contract is unchanged, so the
+    # fallback cannot pretend a generic warehouse shot proves the exact topic.
+    planned_content_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
+    if not scenes or planned_content_ms + endcard_duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
+        rescue_brief = {
+            **planning_brief,
+            "logistics_nodes": list(dict.fromkeys(
+                list(planning_brief.get("logistics_nodes") or [])
+                + ["仓储", "入库", "分拣", "交接", "配送", "运输"]
+            )),
+            "required_evidence": {
+                **(planning_brief.get("required_evidence") or {}),
+                "owned_video": "adaptive",
+            },
+        }
+        try:
+            scenes = hotspot_video_planner.plan_followup_scenes(
+                rescue_brief,
+                related_events,
+                owned_segments,
+                target_duration_ms=50_000,
+                owned_images=owned_images,
+                allow_adaptation=True,
+                chain_mode=chain_mode,
+            )
+            planner_rescue_reason = planner_rescue_reason or "topic_specific_media_capacity_below_50s"
+            logger.warning(
+                "主题素材规划降级为通用 Buffalo 作业链: brief=%s reason=%s",
+                brief_id,
+                planner_rescue_reason,
+            )
+        except ValueError as rescue_exc:
+            logger.error(
+                "双素材视频规划及通用作业链兜底均失败: brief=%s initial=%s rescue=%s",
+                brief_id,
+                planner_rescue_reason,
+                rescue_exc,
+            )
+            raise HTTPException(409, {
+                "message": "真实 Hook 或本地可播放素材已实际不可用，自动修复后仍无法形成成片。",
+                "reason": str(rescue_exc)[:240],
+                "next_action": "请恢复至少一条可播放真实 Hook；系统会自动使用现有 Buffalo 视频和图片完成其余镜头。",
+            }) from rescue_exc
+    content_scenes = scenes
+    hotspot_count = sum(item.get("evidence_type") == "hotspot_video" for item in content_scenes)
     owned_count = sum(
         item.get("evidence_type") == "owned_video"
         and str(item.get("asset_source") or "") != "za_stock_license"
-        for item in scenes
+        for item in content_scenes
     )
-    za_stock_count = sum(str(item.get("asset_source") or "") == "za_stock_license" for item in scenes)
-    image_count = sum(item.get("evidence_type") == "image" for item in scenes)
-    planned_duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
-    # 品牌 CTA 会在下方统一追加；准入时应按终片时长判断，而不是把尚未追加的
-    # 固定结尾误判为“素材不足”。
-    final_planned_duration_ms = planned_duration_ms + sum(
-        int(item["duration_ms"]) for item in hotspot_video_planner.BRAND_ENDCARD_SCENES
+    za_stock_count = sum(
+        str(item.get("asset_source") or "") == "za_stock_license"
+        for item in content_scenes
     )
-    adaptation = hotspot_video_planner.describe_plan_adaptation(scenes)
+    image_count = sum(item.get("evidence_type") == "image" for item in content_scenes)
+    adaptation = hotspot_video_planner.describe_plan_adaptation(content_scenes)
+    if planner_rescue_reason:
+        adaptation["adapted"] = True
+        adaptation["strategies"] = list(dict.fromkeys(
+            list(adaptation.get("strategies") or []) + ["broad_owned_visual_rescue"]
+        ))
+        adaptation["planner_rescue_reason"] = planner_rescue_reason
+    # The endcard visual is deterministic, but its copy belongs to the same
+    # MiniMax request as every other beat. Appending it before context/limits
+    # are built prevents a fixed sentence from overwriting a successful model
+    # script after the remote call returns.
+    scenes = hotspot_video_planner.append_brand_endcard_scenes(
+        content_scenes, context=planning_brief,
+    )
+    final_planned_duration_ms = sum(
+        int(item.get("duration_ms") or 0) for item in scenes
+    )
     # Hook is the hard gate. Thin owned inventory is adaptation, not a block.
-    if chain_mode != "owned_only" and (hotspot_count < 1 or not scenes):
+    if hotspot_count < 1 or not scenes:
         raise HTTPException(409, {
-            "message": "证据不足：缺少可用热点 Hook 镜头，不能生成成片。",
+            "message": "证据不足：正式出片至少需要 1 条真实热点 Hook 镜头，不能生成成片。",
             "coverage": {
                 "hotspot_video": hotspot_count,
                 "owned_video": owned_count,
@@ -3330,14 +5742,6 @@ async def _generate_topic_brief_video(
             "required": {"hotspot_video": 1, "owned_video": "adaptive"},
             "adaptation": adaptation,
             "next_action": "重新锁定强相关热点 Hook，或换用已确认可渲染的事件片段。",
-        })
-    if chain_mode == "owned_only" and not scenes:
-        raise HTTPException(409, {
-            "message": "证据不足：缺少可用的 Buffalo 自有素材，不能生成纯自有成片。",
-            "coverage": {"owned_video": owned_count, "za_stock": za_stock_count, "image": image_count,
-                         "duration_ms": final_planned_duration_ms},
-            "required": {"owned_video": 1},
-            "next_action": "补充至少一段未重复、每段不少于 3 秒的 Buffalo 自有视频。",
         })
     if final_planned_duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
         raise HTTPException(409, _formal_duration_insufficient_detail(
@@ -3352,15 +5756,24 @@ async def _generate_topic_brief_video(
             adaptation=adaptation,
             chain_mode=chain_mode,
         ))
-    if not model_router.key_is_available("planner_text"):
-        raise HTTPException(503, "内容规划模型未配置，无法生成正式文案；请先配置当前模型路由对应的 API Key。")
+    # Remote copy generation can improve wording, but it is not an
+    # availability gate.  Keep the deterministic scene bounds ready before
+    # the call so a missing key, timeout, malformed JSON or two failed repairs
+    # can all fall back to an evidence-bounded local script.
+    voiceover_limits = [_scene_voiceover_max_chars(scene) for scene in scenes]
+    voiceover_minimums = [_scene_voiceover_min_chars(scene) for scene in scenes]
     context = _compact_topic_evidence(brief, event, scenes)
     if chain_mode == "owned_only":
         hotspot_story_contract = (
             "全片只描述 Buffalo 镜头可见动作，不引用任何未提供的热点事实，也不得伪装为热点追更。"
-            "每段开头用一句简短剪辑衔接（如‘镜头转到仓内’）再描述可见动作。"
+            "第1段必须使用 brief.topic_anchor_contract.opening_hook，承担主题型开场；"
+            "第2段必须使用 opening_bridge，明确展开原主题。后续每段只讲一个与原主题相关的可见动作。"
         )
         hotspot_quota_line = "无热点 Hook；全片使用自有镜头。"
+        fact_requirement_line = (
+            "owned_only 没有 facts；禁止虚构事件。第1、2段分别锁定主题开场和主题桥接，"
+            "其余段落必须持续回应用户原主题。"
+        )
     elif hotspot_count == 1:
         hotspot_story_contract = (
             "叙事开场只有第1段热点 Hook：必须用允许 Hook 的 what_happened 明确说明发生了什么，"
@@ -3369,6 +5782,10 @@ async def _generate_topic_brief_video(
             "再把 Buffalo 镜头里的一个可见动作接上，并明确该动作体现的品牌优势；禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
+        fact_requirement_line = (
+            "第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成"
+            "‘事件事实→物流安全问题→Buffalo可见动作→品牌优势’的桥接。"
+        )
     else:
         hotspot_story_contract = (
             "前两段是同一事件的热点事实：第1段前两秒给出强现场事实和卖家问题，第2段只补充同一现场可见情况。"
@@ -3376,6 +5793,21 @@ async def _generate_topic_brief_video(
             "第1个自有镜头必须承担事件到物流安全动作的营销桥接，并把动作转成 Buffalo 的一个可见品牌优势；禁止把‘镜头转到仓内’作为完整旁白。"
         )
         hotspot_quota_line = f"允许分镜只有 {hotspot_count} 个热点 Hook；不得凭空补出其他热点事实。"
+        fact_requirement_line = (
+            "第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成"
+            "‘事件事实→物流安全问题→Buffalo可见动作→品牌优势’的桥接。"
+        )
+    if hook_binding_mode != _HOOK_BINDING_EXACT:
+        hotspot_story_contract = (
+            "第1段仍必须如实说明已锁定热点 Hook 发生了什么，但它只是真实行业现场和注意力引子，"
+            "不得宣称它直接证明、导致或代表用户当前主题。"
+            "第1个 Buffalo 自有镜头必须明确说明‘外部现场只作提醒’，再回到用户原主题，"
+            "通过可见的核对、分拣、仓配或交接动作展示 Buffalo 的稳定性和可核对优势。"
+        )
+        fact_requirement_line = (
+            "第1段只陈述 facts.what_happened；后续必须把该现场标明为行业提醒而非主题证据，"
+            "然后回到用户原主题和 Buffalo 可见动作。"
+        )
     scene_count_line = f"必须严格输出 {len(scenes)} 个分镜，分镜条数与 allowed_scenes 完全一致，不得多不得少。"
     messages = [
         {"role": "system", "content": (
@@ -3384,15 +5816,19 @@ async def _generate_topic_brief_video(
             + hotspot_quota_line
             + "热点事实不得写‘堵死’、全面瘫痪、完全停摆或全线停摆等原始事实未证实的夸张断言。"
             "Buffalo 只描述镜头可见的动作，不能把热点当作品牌服务证明；但必须把该动作转成一个有证据的品牌优势，如风险前置、动作可核对、异常可留痕或交接更稳。不得复述空泛的“热点变化、提前准备、承接每一步”等套话；"
+            "承接文案必须根据本次热点事实和下一镜可见动作动态写，禁止输出‘Buffalo先核对’、‘Buffalo核对做稳’、‘核对做稳’等固定句；"
             "自有镜头旁白只能描述画面可见动作；没有清关、入库前或派送前事实时，不得凭画面推断这些节点已经发生。"
-            "每段必须提供新的具体信息。第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成‘事件事实→物流安全问题→Buffalo可见动作→品牌优势’的桥接。"
-            "禁止使用‘镜头转到仓内’、‘先看执行现场’、‘问题摆在这里’等空转场句作为整段旁白。"
+            "每段必须提供新的具体信息。" + fact_requirement_line
+            + "禁止使用‘镜头转到仓内’、‘先看执行现场’、‘问题摆在这里’等空转场句作为整段旁白。"
             "不得编造清关完成、时效、安全、覆盖率或客户结果。不得改变场景数量、不得推荐新素材。"
             + scene_count_line
             + "用户主题是整条视频的标题和叙事主线；热点 Hook 只能作为开场事实或外部背景，绝不能改写、取代或缩窄用户主题。"
-            "若 brief.topic_anchor_contract 存在，标题必须命中其 title 任一词，并且 title_all 中的词必须全部出现；旁白必须展开其 narrative 任一词。"
+            "先读取 brief.topic_requirements。title_requirements 和 narrative_requirements 每组至少命中一个词；同组词是合法同义表达，不要求把整组词全部重复。"
+            "opening_hook 存在时，主题型第一镜必须围绕它自然展开；opening_bridge 存在时，后续必须把主题桥接到物流动作。"
+            "若 brief.topic_anchor_contract 存在，标题必须命中其 title_groups 每组至少一个词；旁白必须展开其 narrative_groups 每组至少一个词。"
             "不满足时不要改写成热点标题，必须按原用户主题重写标题和旁白。"
             "每个允许分镜中的 voiceover_max_chars 和 voiceover_min_chars 都是硬边界（null 的品牌 CTA 除外）。旁白必须落在两者之间：不能超出真实画面，也不能过短而留下无声的真实画面。请用事实、可见动作或条件式核对问题自然补足，不得用空泛口号填充。"
+            "最后一个 role=brand_cta 镜头也必须由你针对本次主题动态写：点名 Buffalo，承接本片已经出现的物流影响或可见动作，并收束成一个具体品牌优势。不得照抄固定结束语，不得编造服务结果或承诺。"
             + douyin_copywriting_sop.prompt_for_video_planner()
             + "只返回 JSON：{\"title\":\"\",\"angle\":\"\",\"scenes\":[{\"voiceover\":\"\",\"text_overlay\":\"\"}]}。"
         )},
@@ -3406,45 +5842,42 @@ async def _generate_topic_brief_video(
         max(1, int(model_router.get_route("planner_text").get("max_tokens") or 1_800)),
     )
     model_router.create_budget(
-        job_id, max_calls=3, max_input_tokens=15_000,
-        max_output_tokens=3 * model_router.required_output_budget("planner_text", planner_output_budget),
+        job_id, max_calls=9, max_input_tokens=60_000,
+        max_output_tokens=9 * model_router.required_output_budget("planner_text", planner_output_budget),
     )
     try:
+        if not model_router.key_is_available("planner_text"):
+            raise RuntimeError("planner_text 模型当前不可用")
         result = await model_router.call_text(
-            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v11",
+            job_id, "planner_text", messages, prompt_version="topic-brief-video-plan-v14",
             max_output_tokens=planner_output_budget,
             cacheable=model_router.planner_plan_is_cacheable,
         )
-        voiceover_limits = [_scene_voiceover_max_chars(scene) for scene in scenes]
-        voiceover_minimums = [_scene_voiceover_min_chars(scene) for scene in scenes]
         try:
-            # First parse the model JSON and its factual boundaries, then make
-            # a local beat-length repair before enforcing the per-scene cap.
-            # This avoids a second remote call for the common "one clause too
-            # long" case while keeping malformed JSON on the normal repair path.
-            generated_candidate = _planner_json(
-                result["content"], len(scenes), hotspot_scene_count=hotspot_count,
-            )
-            generated_candidate = _compact_long_formal_voiceovers(
-                generated_candidate, voiceover_limits,
-            )
             generated = _planner_json(
-                _json.dumps(generated_candidate, ensure_ascii=False), len(scenes), voiceover_limits,
-                hotspot_scene_count=hotspot_count,
+                result["content"], len(scenes), voiceover_limits,
+                voiceover_minimums, hotspot_scene_count=hotspot_count,
             )
-            generated = _repair_short_formal_voiceovers(
-                generated, scenes, voiceover_minimums, voiceover_limits, event,
+            generated = _stamp_copy_source(generated, "model")
+            generated = _repair_generated_topic_contract(
+                generated,
+                brief=brief,
+                scenes=scenes,
+                event=event,
+                voiceover_minimums=voiceover_minimums,
+                voiceover_limits=voiceover_limits,
             )
             _validate_formal_copy_specificity(generated)
-            _validate_generated_topic_anchor(generated, brief)
-            generated = _repair_formal_narrative_hook(generated, scenes, event)
-            generated = _repair_formal_narrative_bridge(generated, scenes)
+            _validate_complete_formal_voiceovers(generated)
+            _validate_generated_topic_anchor(
+                generated, brief, has_event_anchor=bool(event),
+            )
             _validate_formal_narrative(generated, scenes, event)
         except ValueError as initial_error:
             logger.warning(
                 "内容规划校验失败: role=planner_text model=%s prompt_version=%s validation=%s retry=%s cache_hit=%s",
                 model_router.get_route("planner_text").get("model"),
-                "topic-brief-video-plan-v11",
+                "topic-brief-video-plan-v14",
                 _planner_validation_kind(initial_error),
                 0,
                 bool(result.get("cache_hit")),
@@ -3460,76 +5893,428 @@ async def _generate_topic_brief_video(
                         "保留既定分镜数量、顺序、事实边界和所有旁白字数上下限；"
                         + scene_count_line
                         + "不得推荐或选择新素材，不得使用信息图、地图、流程图或文字卡。"
+                        "先读取 topic_requirements；title_requirements 和 narrative_requirements 每组至少命中一个同义词，不能因为没有复述某个原词就判定主题缺失。"
+                        "opening_hook/opening_bridge 是主题型开场与桥接要求，必须自然落实到对应分镜。"
                         "逐段读取 allowed_scenes 的字数上下限。短句必须改成完整、自然且与该镜头可见动作相关的句子；"
-                        "第1段必须讲清 facts.what_happened；第1个自有镜头必须完成事件到物流安全动作的桥接。"
-                        "不得保留‘镜头转到仓内’、‘先看执行现场’、‘先核对清单’、‘配送节奏要稳’这类空转场或脱离画面的短口号，也不得用‘请核对订单信息’补字。"
+                        + fact_requirement_line
+                        + "最后一个 role=brand_cta 镜头必须针对本片动态重写，点名 Buffalo，承接物流影响或可见动作并落到具体品牌优势；不得照抄固定结束语。"
+                        + "不得保留‘镜头转到仓内’、‘先看执行现场’、‘先核对清单’、‘配送节奏要稳’这类空转场或脱离画面的短口号，也不得用‘请核对订单信息’补字。"
+                        + "必须根据本次热点事实和下一镜可见动作重写营销承接，依次交代物流影响、Buffalo可见动作和品牌优势；禁止使用‘Buffalo先核对’、‘Buffalo核对做稳’、‘核对做稳’等固定句。"
                         + douyin_copywriting_sop.prompt_for_video_planner()
                     ),
                 },
                 {
                     "role": "user",
-                    "content": _json.dumps({
-                        "validation_error": str(initial_error),
-                        "invalid_draft": result["content"],
-                        "allowed_scenes": context["allowed_scenes"],
-                        "required_json": {"title": "", "angle": "", "scenes": [
-                            {"voiceover": "", "text_overlay": ""}
-                        ]},
-                    }, ensure_ascii=False),
+                    "content": _json.dumps(
+                        _planner_repair_payload(context, initial_error, result["content"]),
+                        ensure_ascii=False,
+                    ),
                 },
             ]
             repair_result = None
             repair_error = initial_error
             invalid_draft = result["content"]
+            salvage_candidates = [(
+                result["content"],
+                "model",
+                "model_initial_duration_compaction",
+            )]
             for repair_attempt in range(2):
-                repair_messages[1]["content"] = _json.dumps({
-                    "validation_error": str(repair_error),
-                    "invalid_draft": invalid_draft,
-                    "allowed_scenes": context["allowed_scenes"],
-                    "required_json": {"title": "", "angle": "", "scenes": [
-                        {"voiceover": "", "text_overlay": ""}
-                    ]},
-                }, ensure_ascii=False)
+                repair_messages[1]["content"] = _json.dumps(
+                    _planner_repair_payload(context, repair_error, invalid_draft),
+                    ensure_ascii=False,
+                )
+                repair_prompt_version = "topic-brief-video-plan-v14-repair"
                 repair_result = await model_router.call_text(
                     job_id, "planner_text", repair_messages,
-                    prompt_version="topic-brief-video-plan-v11-repair",
+                    prompt_version=repair_prompt_version,
                     max_output_tokens=planner_output_budget,
                     use_cache=False,
                     cacheable=model_router.planner_plan_is_cacheable,
                 )
                 try:
-                    repaired_candidate = _planner_json(
-                        repair_result["content"], len(scenes), hotspot_scene_count=hotspot_count,
-                    )
-                    repaired_candidate = _compact_long_formal_voiceovers(
-                        repaired_candidate, voiceover_limits,
-                    )
                     generated = _planner_json(
-                        _json.dumps(repaired_candidate, ensure_ascii=False), len(scenes), voiceover_limits,
-                        hotspot_scene_count=hotspot_count,
+                        repair_result["content"], len(scenes), voiceover_limits,
+                        voiceover_minimums, hotspot_scene_count=hotspot_count,
                     )
-                    generated = _repair_short_formal_voiceovers(
-                        generated, scenes, voiceover_minimums, voiceover_limits, event,
+                    generated = _stamp_copy_source(
+                        generated,
+                        "repair",
+                        reason=f"model_validation_retry_{repair_attempt + 1}",
+                    )
+                    generated = _repair_generated_topic_contract(
+                        generated,
+                        brief=brief,
+                        scenes=scenes,
+                        event=event,
+                        voiceover_minimums=voiceover_minimums,
+                        voiceover_limits=voiceover_limits,
                     )
                     _validate_formal_copy_specificity(generated)
-                    _validate_generated_topic_anchor(generated, brief)
-                    generated = _repair_formal_narrative_hook(generated, scenes, event)
-                    generated = _repair_formal_narrative_bridge(generated, scenes)
+                    _validate_complete_formal_voiceovers(generated)
+                    _validate_generated_topic_anchor(
+                        generated, brief, has_event_anchor=bool(event),
+                    )
                     _validate_formal_narrative(generated, scenes, event)
                     break
                 except ValueError as exc:
                     logger.warning(
                         "内容规划校验失败: role=planner_text model=%s prompt_version=%s validation=%s retry=%s cache_hit=%s",
                         model_router.get_route("planner_text").get("model"),
-                        "topic-brief-video-plan-v11-repair",
+                        repair_prompt_version,
                         _planner_validation_kind(exc),
                         repair_attempt + 1,
                         bool(repair_result.get("cache_hit")),
                     )
                     repair_error = exc
                     invalid_draft = repair_result["content"]
+                    salvage_candidates.append((
+                        invalid_draft,
+                        "repair",
+                        f"model_validation_retry_{repair_attempt + 1}",
+                    ))
             else:
-                raise repair_error
+                # A reachable MiniMax endpoint is not "unavailable" merely
+                # because its otherwise-valid copy overruns one measured beat.
+                # Preserve the latest model draft and compact only trailing
+                # clauses.  Category templates remain reserved for actual
+                # transport/auth/model-service failures handled below.
+                # A later repair can regress while an earlier MiniMax draft is
+                # already factually complete and only too long.  Audit all
+                # model-authored candidates, newest first, and retain the
+                # first one that passes the full fact/topic/bridge contract
+                # after model-preserving compaction.
+                salvage_failure: ValueError | None = None
+                generated = None
+                for draft, draft_source, draft_reason in reversed(salvage_candidates):
+                    try:
+                        generated = _salvage_remote_formal_script(
+                            draft,
+                            brief=brief,
+                            scenes=scenes,
+                            event=event,
+                            voiceover_minimums=voiceover_minimums,
+                            voiceover_limits=voiceover_limits,
+                            hotspot_count=hotspot_count,
+                            source=draft_source,
+                            reason=draft_reason,
+                        )
+                        break
+                    except ValueError as exc:
+                        salvage_failure = exc
+                if generated is not None:
+                    repair_result = {
+                        **(repair_result or {}),
+                        "content": _json.dumps(generated, ensure_ascii=False),
+                        "cache_hit": False,
+                        "usage": {
+                            **((repair_result or {}).get("usage") or {}),
+                            "model_duration_compaction": True,
+                            "deterministic_fallback": False,
+                        },
+                    }
+                    logger.info(
+                        "MiniMax 文案保留成功，仅压缩超出镜头时长的尾句: brief=%s validation=%s",
+                        brief_id, repair_error,
+                    )
+                else:
+                    bridge_base = None
+                    rewrite_indices = None
+                    bridge_index = None
+                    bridge_base_failure: ValueError | None = salvage_failure
+                    for draft, draft_source, draft_reason in reversed(salvage_candidates):
+                        try:
+                            bridge_base, rewrite_indices, bridge_index = _prepare_remote_formal_script_for_bridge(
+                                draft,
+                                brief=brief,
+                                scenes=scenes,
+                                event=event,
+                                voiceover_minimums=voiceover_minimums,
+                                voiceover_limits=voiceover_limits,
+                                hotspot_count=hotspot_count,
+                                source=draft_source,
+                                reason=draft_reason,
+                            )
+                            break
+                        except ValueError as exc:
+                            bridge_base_failure = exc
+                            logger.warning(
+                                "MiniMax 镜头专项修订准备失败: brief=%s source=%s validation=%s",
+                                brief_id,
+                                draft_source,
+                                _planner_validation_kind(exc),
+                            )
+                    if bridge_base is None or not rewrite_indices or bridge_index is None:
+                        raise bridge_base_failure or repair_error
+                    bridge_window = _owned_bridge_window_indices(scenes)
+                    targeted_scenes = []
+                    for rewrite_index in rewrite_indices:
+                        locked_scene = scenes[rewrite_index]
+                        targeted_scenes.append({
+                            "scene": rewrite_index + 1,
+                            "role": str(locked_scene.get("scene_role") or ""),
+                            "visual": str(
+                                locked_scene.get("copy_anchor")
+                                or locked_scene.get("visual")
+                                or ""
+                            )[:240],
+                            "allowed_visible_action_terms": _visible_action_terms_for_scene(
+                                locked_scene
+                            ),
+                            "current_minimax_voiceover": str(
+                                bridge_base["scenes"][rewrite_index].get("voiceover") or ""
+                            ),
+                            "voiceover_min_chars": voiceover_minimums[rewrite_index],
+                            "voiceover_max_chars": voiceover_limits[rewrite_index],
+                            "is_first_buffalo_bridge": rewrite_index == bridge_index,
+                            "bridge_sequence_position": (
+                                bridge_window.index(rewrite_index) + 1
+                                if rewrite_index in bridge_window
+                                else None
+                            ),
+                        })
+                    bridge_context = {
+                        "topic": str(
+                            brief.get("raw_input")
+                            or brief.get("requested_topic")
+                            or brief.get("subject")
+                            or ""
+                        )[:300],
+                        "hook_fact": _selected_hotspot_fact(scenes, event),
+                        "logistics_question": str(
+                            (((event or {}).get("evidence") or {}).get("logistics_question") or "")
+                        )[:240],
+                        "scenes_to_rewrite": targeted_scenes,
+                    }
+                    bridge_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你只重写 scenes_to_rewrite 指定的短视频镜头，不改其他镜头。"
+                                "每条在 allowed_visible_action_terms 非空时，必须直接使用其中至少一个词，"
+                                "严格贴合锁定画面，不得添加镜头未证明的动作或服务承诺。"
+                                "bridge_sequence_position=1 的镜头写热点事实带来的具体物流影响、"
+                                "锁定镜头真实可见动作，并点名 Buffalo。"
+                                "bridge_sequence_position=2 的镜头必须写该镜头真实可见动作及其体现的"
+                                " Buffalo 品牌优势，例如更稳、可追踪、留痕、更可控、减少差错中的自然一种，"
+                                "但不得照抄示例或套用固定句。"
+                                "如果输入只有 bridge_sequence_position=1，则这一句必须同时写出品牌优势。"
+                                "两个承接镜合起来必须形成‘物流影响→Buffalo 可见动作→品牌优势’。"
+                                "其他镜头围绕原主题，只讲该镜头可见动作及其带来的具体价值。"
+                                "role=brand_cta 的镜头必须点名 Buffalo，承接本片已经出现的物流影响或可见动作，"
+                                "再收束到一个具体品牌优势；不得照抄固定结束语，也不得编造服务结果。"
+                                "禁止‘Buffalo先核对’、‘Buffalo核对做稳’、‘核对做稳’等固定句。"
+                                "每条严格满足各自字数上下限，写成一句完整、自然、适合抖音口播的中文。"
+                                "每句必须以句号、问号或感叹号结尾；不得以逗号、顿号、连接词、"
+                                "‘可’或‘去’等残词结尾。"
+                                "只返回 JSON：{\"scenes\":[{\"scene\":2,\"voiceover\":\"\",\"text_overlay\":\"\"}]}；"
+                                "scene 编号必须与输入完全一致，不得缺少或增加。"
+                            ),
+                        },
+                        {"role": "user", "content": _json.dumps(bridge_context, ensure_ascii=False)},
+                    ]
+                    targeted_specs = {
+                        int(spec["scene"]) - 1: spec for spec in targeted_scenes
+                    }
+                    accepted_rewrites: dict[int, dict] = {}
+                    pending_rewrites = set(rewrite_indices)
+                    targeted_errors: dict[int, ValueError] = {}
+                    bridge_result = None
+                    previous_failure_signature: tuple[tuple[int, str], ...] | None = None
+                    # Valid beats are frozen after each pass.  Six bounded
+                    # passes let MiniMax focus on the shrinking remainder;
+                    # this is still model-authored repair, never stock-copy
+                    # substitution.  Production traces commonly converged
+                    # from six pending beats to one after the third pass.
+                    targeted_max_attempts = 6
+                    for targeted_attempt in range(1, targeted_max_attempts + 1):
+                        attempt_context = {
+                            **bridge_context,
+                            "scenes_to_rewrite": [
+                                targeted_specs[index]
+                                for index in sorted(pending_rewrites)
+                            ],
+                        }
+                        if targeted_errors:
+                            attempt_context["previous_validation_errors"] = {
+                                str(index + 1): str(error)[:240]
+                                for index, error in targeted_errors.items()
+                                if index in pending_rewrites
+                            }
+                        bridge_messages[1]["content"] = _json.dumps(
+                            attempt_context,
+                            ensure_ascii=False,
+                        )
+                        candidate_result = await model_router.call_text(
+                            job_id,
+                            "planner_text",
+                            bridge_messages,
+                            prompt_version="topic-brief-video-targeted-rewrite-v9",
+                            max_output_tokens=min(960, 240 + len(pending_rewrites) * 180),
+                            json_mode=True,
+                            use_cache=False,
+                        )
+                        try:
+                            candidate_rows = _parse_model_scene_rewrites(
+                                candidate_result["content"]
+                            )
+                            received_rows: dict[int, dict] = {}
+                            for row in candidate_rows:
+                                if not isinstance(row, dict):
+                                    raise ValueError("MiniMax 镜头专项修订包含无效分镜")
+                                try:
+                                    row_index = int(row.get("scene")) - 1
+                                except (TypeError, ValueError) as exc:
+                                    raise ValueError("MiniMax 镜头专项修订缺少分镜编号") from exc
+                                if row_index in received_rows:
+                                    raise ValueError("MiniMax 镜头专项修订包含重复分镜")
+                                received_rows[row_index] = row
+                            if set(received_rows) != pending_rewrites:
+                                raise ValueError("MiniMax 镜头专项修订未完整覆盖本轮指定分镜")
+                        except ValueError as exc:
+                            targeted_errors = {
+                                index: exc for index in pending_rewrites
+                            }
+                            logger.warning(
+                                "MiniMax 镜头专项修订结构未通过: brief=%s attempt=%s/%s validation=%s pending=%s",
+                                brief_id,
+                                targeted_attempt,
+                                targeted_max_attempts,
+                                _planner_validation_kind(exc),
+                                ",".join(str(index + 1) for index in sorted(pending_rewrites)),
+                            )
+                            failure_signature = _targeted_repair_failure_signature(
+                                pending_rewrites, targeted_errors,
+                            )
+                            if failure_signature and failure_signature == previous_failure_signature:
+                                logger.warning(
+                                    "MiniMax 镜头专项修订连续无进展，提前切换证据脚本: brief=%s attempt=%s signature=%s",
+                                    brief_id,
+                                    targeted_attempt,
+                                    failure_signature,
+                                )
+                                raise next(iter(targeted_errors.values()))
+                            previous_failure_signature = failure_signature
+                            continue
+
+                        failed_this_round: dict[int, ValueError] = {}
+                        for index in sorted(pending_rewrites):
+                            try:
+                                accepted_rewrites[index] = _normalize_model_scene_rewrite_row(
+                                    received_rows[index],
+                                    index=index,
+                                    bridge_index=bridge_index,
+                                    scenes=scenes,
+                                    voiceover_minimums=voiceover_minimums,
+                                    voiceover_limits=voiceover_limits,
+                                )
+                            except ValueError as exc:
+                                failed_this_round[index] = exc
+                                accepted_rewrites.pop(index, None)
+                        pending_rewrites = set(failed_this_round)
+                        targeted_errors = failed_this_round
+                        if pending_rewrites:
+                            logger.warning(
+                                "MiniMax 镜头专项修订部分未通过: brief=%s attempt=%s/%s pending=%s validations=%s",
+                                brief_id,
+                                targeted_attempt,
+                                targeted_max_attempts,
+                                ",".join(str(index + 1) for index in sorted(pending_rewrites)),
+                                ",".join(
+                                    f"{index + 1}:{_planner_validation_kind(error)}"
+                                    for index, error in sorted(targeted_errors.items())
+                                ),
+                            )
+                            failure_signature = _targeted_repair_failure_signature(
+                                pending_rewrites, targeted_errors,
+                            )
+                            if failure_signature and failure_signature == previous_failure_signature:
+                                logger.warning(
+                                    "MiniMax 镜头专项修订连续无进展，提前切换证据脚本: brief=%s attempt=%s signature=%s",
+                                    brief_id,
+                                    targeted_attempt,
+                                    failure_signature,
+                                )
+                                raise next(iter(targeted_errors.values()))
+                            previous_failure_signature = failure_signature
+                            continue
+
+                        combined_content = _json.dumps({
+                            "scenes": [
+                                accepted_rewrites[index]
+                                for index in sorted(rewrite_indices)
+                            ],
+                        }, ensure_ascii=False)
+                        try:
+                            generated = _apply_model_scene_rewrites(
+                                bridge_base,
+                                combined_content,
+                                rewrite_indices=rewrite_indices,
+                                bridge_index=bridge_index,
+                                scenes=scenes,
+                                brief=brief,
+                                event=event,
+                                voiceover_minimums=voiceover_minimums,
+                                voiceover_limits=voiceover_limits,
+                                hotspot_count=hotspot_count,
+                            )
+                        except ValueError as exc:
+                            bridge_retry = {
+                                index for index in bridge_window
+                                if index in rewrite_indices
+                            } or set(rewrite_indices)
+                            pending_rewrites = bridge_retry
+                            targeted_errors = {
+                                index: exc for index in pending_rewrites
+                            }
+                            for index in pending_rewrites:
+                                accepted_rewrites.pop(index, None)
+                            logger.warning(
+                                "MiniMax 镜头专项修订聚合未通过: brief=%s attempt=%s/%s validation=%s retry_scenes=%s",
+                                brief_id,
+                                targeted_attempt,
+                                targeted_max_attempts,
+                                _planner_validation_kind(exc),
+                                ",".join(str(index + 1) for index in sorted(pending_rewrites)),
+                            )
+                            failure_signature = _targeted_repair_failure_signature(
+                                pending_rewrites, targeted_errors,
+                            )
+                            if failure_signature and failure_signature == previous_failure_signature:
+                                logger.warning(
+                                    "MiniMax 镜头专项修订连续无进展，提前切换证据脚本: brief=%s attempt=%s signature=%s",
+                                    brief_id,
+                                    targeted_attempt,
+                                    failure_signature,
+                                )
+                                raise next(iter(targeted_errors.values()))
+                            previous_failure_signature = failure_signature
+                            continue
+
+                        bridge_result = candidate_result
+                        repair_result = {
+                            **bridge_result,
+                            "content": _json.dumps(generated, ensure_ascii=False),
+                            "cache_hit": False,
+                            "usage": {
+                                **(bridge_result.get("usage") or {}),
+                                "model_targeted_scene_rewrite": True,
+                                "model_targeted_scene_rewrite_attempts": targeted_attempt,
+                                "deterministic_fallback": False,
+                            },
+                        }
+                        logger.info(
+                            "MiniMax 镜头专项修订通过: brief=%s scenes=%s bridge=%s attempt=%s/%s",
+                            brief_id,
+                            ",".join(str(index + 1) for index in rewrite_indices),
+                            bridge_index + 1,
+                            targeted_attempt,
+                            targeted_max_attempts,
+                        )
+                        break
+                    else:
+                        final_error = next(iter(targeted_errors.values()), None)
+                        raise final_error or ValueError("MiniMax 镜头专项修订连续失败")
             result = {
                 **repair_result,
                 "cache_hit": bool(result.get("cache_hit")) and bool(repair_result.get("cache_hit")),
@@ -3539,43 +6324,203 @@ async def _generate_topic_brief_video(
                     "output_tokens": int((result.get("usage") or {}).get("output_tokens") or 0)
                     + int((repair_result.get("usage") or {}).get("output_tokens") or 0),
                     "repair_attempted": True,
+                    "deterministic_fallback": bool(
+                        (repair_result.get("usage") or {}).get("deterministic_fallback")
+                    ),
                 },
             }
+    except ValueError as exc:
+        # A reachable model can still violate the immutable topic, fact or
+        # duration contract.  That is a recoverable provider-output failure,
+        # not a reason to strand the user's production job.  Rebuild from the
+        # locked Hook fact, topic contract and reviewed Buffalo scene anchors;
+        # keep the reason on every scene so the report never disguises the
+        # fallback as model-authored copy.
+        logger.warning(
+            "MiniMax 动态文案连续校验失败，切换证据脚本: brief=%s validation=%s",
+            brief_id, exc,
+        )
+        generated = _deterministic_formal_script(
+            brief,
+            scenes,
+            event,
+            hook_binding_mode=hook_binding_mode,
+            fallback_reason=f"remote_model_output_invalid:{_planner_validation_kind(exc)}",
+        )
+        result = {
+            "content": _json.dumps(generated, ensure_ascii=False),
+            "cache_hit": False,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "deterministic_fallback": True,
+                "model_output_rejected": True,
+            },
+            "fallback_reason": str(exc)[:240],
+        }
     except Exception as exc:
-        logger.exception("内容规划失败: %s", brief_id)
-        raise HTTPException(502, f"内容规划失败：{str(exc)[:160]}") from exc
-    generated = _enforce_formal_scene_copy_contract(generated, scenes)
-    generated = _repair_formal_narrative_hook(generated, scenes, event)
-    generated = _repair_formal_narrative_bridge(generated, scenes)
-    generated = _compact_long_formal_voiceovers(generated, voiceover_limits)
-    generated = _repair_short_formal_voiceovers(
-        generated, scenes, voiceover_minimums, voiceover_limits, event,
-    )
-    generated = _repair_repeated_formal_voiceovers(
-        generated, scenes, voiceover_minimums, voiceover_limits,
-    )
+        logger.warning(
+            "内容规划远端链路不可用，切换确定性脚本: brief=%s error=%r",
+            brief_id, exc,
+        )
+        generated = _deterministic_formal_script(
+            brief, scenes, event, hook_binding_mode=hook_binding_mode,
+        )
+        result = {
+            "content": _json.dumps(generated, ensure_ascii=False),
+            "cache_hit": False,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "deterministic_fallback": True},
+            "fallback_reason": repr(exc)[:240],
+        }
     try:
-        _validate_formal_copy_specificity(generated)
-        _validate_generated_topic_anchor(generated, brief)
-        _validate_formal_narrative(generated, scenes, event)
-        generated = _planner_json(
-            _json.dumps(generated, ensure_ascii=False), len(scenes), voiceover_limits,
-            voiceover_minimums, hotspot_scene_count=hotspot_count,
+        generated = _finalize_formal_script_candidate(
+            generated,
+            brief=brief,
+            scenes=scenes,
+            event=event,
+            hook_binding_mode=hook_binding_mode,
+            voiceover_minimums=voiceover_minimums,
+            voiceover_limits=voiceover_limits,
+            hotspot_count=hotspot_count,
+            allow_fallback_bridge=bool(
+                (result.get("usage") or {}).get("deterministic_fallback")
+            ),
         )
     except ValueError as exc:
-        raise HTTPException(409, f"内容质量门禁未通过：{exc}") from exc
+        if not bool((result.get("usage") or {}).get("deterministic_fallback")):
+            logger.warning(
+                "MiniMax 文案最终门禁失败，切换证据脚本: brief=%s validation=%s",
+                brief_id, exc,
+            )
+        else:
+            logger.warning(
+                "证据脚本后处理未通过，重建确定性脚本: brief=%s validation=%s",
+                brief_id, exc,
+            )
+        generated = _deterministic_formal_script(
+            brief,
+            scenes,
+            event,
+            hook_binding_mode=hook_binding_mode,
+            fallback_reason=f"final_copy_gate_rescue:{_planner_validation_kind(exc)}",
+        )
+        generated = _finalize_formal_script_candidate(
+            generated,
+            brief=brief,
+            scenes=scenes,
+            event=event,
+            hook_binding_mode=hook_binding_mode,
+            voiceover_minimums=voiceover_minimums,
+            voiceover_limits=voiceover_limits,
+            hotspot_count=hotspot_count,
+            allow_fallback_bridge=True,
+        )
+        result["cache_hit"] = False
+        result.setdefault("usage", {})["deterministic_fallback"] = True
     # 清关 preparation 模式文案门禁：所有文案修复/字数校验之后的最后一道
     # 确定性拦截。非真 customs 素材在清关节点下宣称已完成受监管结果时，
     # 不放行模型那句，回退安全准备式模板，确保过度宣称无法进入渲染。
+    before_overclaim = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
+    overclaim_guard_nodes = _immutable_topic_guard_nodes(planning_brief)
     overclaim_records = hotspot_preview_narration.apply_overclaim_guard(
-        generated["scenes"], scenes, planning_brief.get("logistics_nodes") or [],
+        generated["scenes"], scenes, overclaim_guard_nodes,
     )
-    # 清关安全门禁会在最后阶段把借用清关上下文的仓库镜头统一收敛到
-    # preparation 兜底句。安全性不能撤掉，但同一句不能继续占满正式成片：
-    # 用已审核的可见动作候选做一次最终去重，并继续服从每镜真实字数窗口。
-    generated = _repair_repeated_formal_voiceovers(
-        generated, scenes, voiceover_minimums, voiceover_limits,
+    # MiniMax and MiniMax-repair copy is not rewritten here. The remaining
+    # deterministic normalization is reserved for the explicit offline path.
+    is_deterministic_fallback = bool(
+        (result.get("usage") or {}).get("deterministic_fallback")
     )
+    if is_deterministic_fallback:
+        generated = _repair_repeated_formal_voiceovers(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
+        generated = _enforce_generated_topic_opening(generated, brief, scenes, event)
+        generated = _repair_formal_narrative_hook(generated, scenes, event)
+        generated = _repair_formal_narrative_bridge(
+            generated, scenes, hook_binding_mode=hook_binding_mode,
+        )
+        generated = _repair_repeated_formal_voiceovers(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
+        generated = _repair_dangling_formal_voiceovers(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
+        generated = _repair_formal_narrative_hook(generated, scenes, event)
+    generated = _annotate_copy_revisions(
+        before_overclaim,
+        generated,
+        reason="post_model_policy_guard",
+    )
+    try:
+        _validate_formal_copy_specificity(generated)
+        _validate_complete_formal_voiceovers(generated)
+        _validate_generated_topic_anchor(
+            generated, brief, has_event_anchor=bool(event),
+        )
+        _validate_formal_narrative(generated, scenes, event)
+    except ValueError as exc:
+        if not is_deterministic_fallback:
+            logger.warning(
+                "MiniMax 文案经安全规则修订后未通过门禁，切换证据脚本: brief=%s validation=%s",
+                brief_id, exc,
+            )
+            is_deterministic_fallback = True
+        # A late policy guard can rewrite copy after the first deterministic
+        # finalization. Rebuild once from immutable evidence and re-run every
+        # guard in the production order. This is bounded and still ends at the
+        # same hard factual/topic/narrative validation; it does not waive it.
+        logger.warning(
+            "最终文案门禁触发，执行一次证据脚本重建: brief=%s validation=%s",
+            brief_id, exc,
+        )
+        generated = _deterministic_formal_script(
+            brief,
+            scenes,
+            event,
+            hook_binding_mode=hook_binding_mode,
+            fallback_reason=f"post_policy_gate_rescue:{_planner_validation_kind(exc)}",
+        )
+        generated = _finalize_formal_script_candidate(
+            generated,
+            brief=brief,
+            scenes=scenes,
+            event=event,
+            hook_binding_mode=hook_binding_mode,
+            voiceover_minimums=voiceover_minimums,
+            voiceover_limits=voiceover_limits,
+            hotspot_count=hotspot_count,
+            allow_fallback_bridge=True,
+        )
+        overclaim_records = hotspot_preview_narration.apply_overclaim_guard(
+            generated["scenes"], scenes, overclaim_guard_nodes,
+        )
+        generated = _enforce_generated_topic_opening(generated, brief, scenes, event)
+        generated = _repair_formal_narrative_hook(generated, scenes, event)
+        generated = _repair_formal_narrative_bridge(
+            generated, scenes, hook_binding_mode=hook_binding_mode,
+        )
+        generated = _repair_repeated_formal_voiceovers(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
+        generated = _repair_dangling_formal_voiceovers(
+            generated, scenes, voiceover_minimums, voiceover_limits,
+        )
+        generated = _repair_formal_narrative_hook(generated, scenes, event)
+        try:
+            _validate_formal_copy_specificity(generated)
+            _validate_complete_formal_voiceovers(generated)
+            _validate_generated_topic_anchor(
+                generated, brief, has_event_anchor=bool(event),
+            )
+            _validate_formal_narrative(generated, scenes, event)
+        except ValueError as final_exc:
+            logger.error(
+                "证据脚本重建仍未通过硬门禁: brief=%s validation=%s",
+                brief_id, final_exc,
+            )
+            raise HTTPException(500, f"确定性内容规划失败：{final_exc}") from final_exc
+        result["cache_hit"] = False
+        result.setdefault("usage", {})["deterministic_fallback"] = True
     for record in overclaim_records:
         scene_index = int(record.get("scene") or 0) - 1
         if 0 <= scene_index < len(generated["scenes"]):
@@ -3584,7 +6529,11 @@ async def _generate_topic_brief_video(
             record["distinct_safe_repair"] = final_voiceover != record.get("replaced_voiceover")
     for scene, generated_scene in zip(scenes, generated["scenes"]):
         scene.update(generated_scene)
-    scenes = hotspot_video_planner.append_brand_endcard_scenes(scenes, context=planning_brief)
+    for scene in scenes:
+        if not scene.get("copy_source"):
+            scene["copy_source"] = "fallback"
+            scene["copy_repair_reason"] = "remote_model_chain_unavailable"
+    copy_provenance = _copy_provenance_rows(scenes)
     duration_ms = sum(int(item.get("duration_ms") or 0) for item in scenes)
     if duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
         raise HTTPException(409, _formal_duration_insufficient_detail(
@@ -3613,7 +6562,10 @@ async def _generate_topic_brief_video(
         "model": model_router.get_route("planner_text").get("model"), "model_cache_hit": result.get("cache_hit", False),
         "copywriting_sop": douyin_copywriting_sop.metadata(),
         "overclaim_guard": overclaim_records,
+        "copy_provenance": copy_provenance,
         "adaptation": adaptation,
+        "hook_binding_mode": hook_binding_mode,
+        "hook_compatibility_issues": binding_assessment["issues"],
         "provenance": {
             "hotspot_video": hotspot_count,
             "owned_video": owned_count,
@@ -3632,9 +6584,15 @@ async def _generate_topic_brief_video(
         "target_duration_ms": formal_target_ms,
         "formal_target_duration_ms": formal_target_ms,
         "source_type": "topic_brief_dual_library",
-        "brief": {**planning_brief, "angle": generated["angle"]}, "scenes": scenes,
+        "brief": {
+            **planning_brief,
+            "angle": generated["angle"],
+            "hook_binding_mode": hook_binding_mode,
+            "hook_compatibility_issues": binding_assessment["issues"],
+        }, "scenes": scenes,
         "adaptation": adaptation,
         "provenance": project_snapshot["provenance"],
+        "copy_provenance": copy_provenance,
     }
     tts_provider = str((source_snapshot or {}).get("tts_provider") or "")
     tts_voice = str((source_snapshot or {}).get("voice") or "")
@@ -3680,6 +6638,7 @@ async def _generate_topic_brief_video(
         "adaptation": adaptation,
         "overclaim_guard": overclaim_records,
         "provenance": project_snapshot["provenance"],
+        "copy_provenance": copy_provenance,
     }
 
 
@@ -3793,36 +6752,58 @@ def _build_video_generation_handlers(static_dir: Path):
         _project, snapshot = await asyncio.to_thread(_chat_snapshot_for_job, job)
         if not snapshot:
             return video_generation.PipelineStage.PLANNING
+        report = dict(job.get("quality_report") or {})
         hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
         owned_only = str(snapshot.get("chain_mode") or "") == "owned_only" and not hook_ids
         if owned_only:
-            report = dict(job.get("quality_report") or {})
-            report["chat_generation"] = {
-                **(report.get("chat_generation") or {}),
-                "locked_hook_event_ids": [],
-                "fallback_mode": "owned_only_no_matching_hook",
-                "next_step": "生成正式脚本",
-                "stage": video_generation.PipelineStage.HOOK_LOCKING.value,
-            }
-            await asyncio.to_thread(
-                db.update_video_generation_job,
-                job["id"],
-                progress=video_generation._STAGE_PROGRESS[video_generation.PipelineStage.HOOK_LOCKING],
-                quality_report=report,
-            )
-            return video_generation.PipelineStage.SCRIPTING
+            raise RuntimeError("正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook")
         events = [await asyncio.to_thread(db.get_hotspot_event_clip, event_id) for event_id in hook_ids]
-        if not 1 <= len(events) <= 2 or any(event is None or not _is_confirmed_renderable_hotspot_hook(event) for event in events):
-            raise RuntimeError("锁定的热点 Hook 已失效，请重新发起对话检索")
+        hook_rebound = False
+        binding_mode = str(snapshot.get("hook_binding_mode") or _HOOK_BINDING_CONTEXTUAL)
+        if not 1 <= len(events) <= 2 or any(
+            event is None or not _is_confirmed_renderable_hotspot_hook(event)
+            for event in events
+        ):
+            recovered = await _retrieve_confirmed_chat_hooks(
+                str(snapshot.get("topic") or "南非物流"),
+                int(job["created_by"]),
+                str(snapshot.get("session_id") or ""),
+            )
+            recovered_ids = [
+                int(item["event_clip_id"])
+                for item in (recovered.get("hooks") or [])
+                if item.get("event_clip_id")
+            ][:2]
+            events = [
+                await asyncio.to_thread(db.get_hotspot_event_clip, event_id)
+                for event_id in recovered_ids
+            ]
+            if not events or any(
+                event is None or not _is_confirmed_renderable_hotspot_hook(event)
+                for event in events
+            ):
+                raise RuntimeError("真实 Hook 库当前没有任何已确认且可播放的片段")
+            hook_rebound = True
+            binding_mode = str(recovered.get("hook_binding_mode") or _HOOK_BINDING_CONTEXTUAL)
         ordered = sorted(events, key=lambda event: int(event["start_ms"]))
         if not _is_same_confirmed_hotspot_event(ordered):
-            raise RuntimeError("锁定的热点 Hook 不属于同一已确认事件")
+            # Keep the freshest recovered opener rather than failing because a
+            # stale two-clip group partially survived retention cleanup.
+            ordered = ordered[:1]
+            hook_rebound = True
         if len(ordered) == 2 and int(ordered[1]["start_ms"]) < int(ordered[0]["end_ms"]):
-            raise RuntimeError("锁定的热点 Hook 时间范围重叠")
-        report = dict(job.get("quality_report") or {})
+            ordered = ordered[:1]
+            hook_rebound = True
+        assessed = _hook_binding_assessment(
+            str(snapshot.get("topic") or "南非物流"),
+            ordered,
+        )
+        binding_mode = str(assessed.get("mode") or binding_mode)
         report["chat_generation"] = {
             **(report.get("chat_generation") or {}),
             "locked_hook_event_ids": [int(item["id"]) for item in ordered],
+            "hook_binding_mode": binding_mode,
+            "hook_rebound": hook_rebound,
             "next_step": "生成正式脚本",
             "stage": video_generation.PipelineStage.HOOK_LOCKING.value,
         }
@@ -3838,10 +6819,18 @@ def _build_video_generation_handlers(static_dir: Path):
         project, snapshot = await asyncio.to_thread(_chat_snapshot_for_job, job)
         if not snapshot:
             return video_generation.PipelineStage.PLANNING
-        hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
+        existing_report = dict(job.get("quality_report") or {})
+        chat_generation = existing_report.get("chat_generation") or {}
+        hook_ids = [
+            int(item) for item in (
+                chat_generation.get("locked_hook_event_ids")
+                or snapshot.get("matched_event_clip_ids")
+                or []
+            )
+        ]
         chain_mode = str(snapshot.get("chain_mode") or "hotspot_owned")
-        if not hook_ids and chain_mode != "owned_only":
-            raise RuntimeError("缺少锁定 Hook，无法生成正式脚本")
+        if not hook_ids or chain_mode == "owned_only":
+            raise RuntimeError("正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook")
         brief_for_chain = await asyncio.to_thread(
             db.get_topic_brief, str(snapshot.get("topic_brief_id") or ""), job["created_by"]
         )
@@ -3869,7 +6858,15 @@ def _build_video_generation_handlers(static_dir: Path):
                     "id": int(job["created_by"]),
                     "username": str(snapshot.get("username") or "system"),
                 },
-                source_snapshot=snapshot,
+                source_snapshot={
+                    **snapshot,
+                    "matched_event_clip_ids": hook_ids,
+                    "hook_binding_mode": str(
+                        chat_generation.get("hook_binding_mode")
+                        or snapshot.get("hook_binding_mode")
+                        or _HOOK_BINDING_CONTEXTUAL
+                    ),
+                },
                 target_project_id=job["project_id"],
                 target_revision_id=job["revision_id"],
             )
@@ -4585,6 +7582,23 @@ def _remap_hooks_to_original_timestamps(
     return remapped
 
 
+def _hotspot_segment_has_meaningful_evidence(segment: dict) -> bool:
+    """Reject title-only placeholder segments from the reusable-analysis cache."""
+    if str(segment.get("transcript") or "").strip() or str(segment.get("ocr_text") or "").strip():
+        return True
+    if str(segment.get("primary_category_source") or "") != "model":
+        return False
+    description = " ".join(str(segment.get("description") or "").split()).casefold()
+    asset_name = " ".join(str(segment.get("asset_name") or "").split()).casefold()
+    if description and description != asset_name:
+        return True
+    return any(str(tag.get("source") or "") == "model" for tag in (segment.get("tags") or []))
+
+
+def _has_meaningful_hotspot_analysis(segments: list[dict]) -> bool:
+    return any(_hotspot_segment_has_meaningful_evidence(segment) for segment in segments)
+
+
 async def _run_hotspot_media_materialization(media_id: int, created_by: int):
     item = db.get_hotspot_media(media_id)
     if not item:
@@ -4706,9 +7720,8 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
             reusable_segments = [
                 segment for segment in db.list_asset_segments(asset_id=asset["id"], limit=500)
                 if segment.get("processing_version") == asset_processing.PROCESSING_VERSION
-                and str(segment.get("description") or "").strip()
             ]
-        has_reusable_analysis = bool(reusable_segments)
+        has_reusable_analysis = _has_meaningful_hotspot_analysis(reusable_segments)
         db.set_asset_retention(
             asset["id"],
             "hotspot_source",
@@ -4753,6 +7766,13 @@ async def _run_hotspot_media_materialization(media_id: int, created_by: int):
             job = db.get_asset_processing_job(job_id) or {}
             if job.get("status") != "succeeded":
                 raise RuntimeError(job.get("error") or "热点视频分析未完成")
+            reusable_segments = [
+                segment for segment in db.list_asset_segments(asset_id=asset["id"], limit=500)
+                if segment.get("processing_version") == asset_processing.PROCESSING_VERSION
+            ]
+            if not _has_meaningful_hotspot_analysis(reusable_segments):
+                detail = str(job.get("error") or "视觉、ASR 与 OCR 均未形成可核验证据")[:360]
+                raise RuntimeError(f"热点视频分析证据为空，禁止标记 ready：{detail}")
         hook_count = 0
         curation_status = "图片素材已完成分析"
         if asset.get("file_type") == "video":
@@ -5696,7 +8716,8 @@ def _topic_media_by_asset(events: list[dict]) -> dict[int, dict]:
 
 
 def _match_buckets_for_topic(topic: str) -> tuple[dict, dict]:
-    query = topic_hook_pipeline.structure_topic(topic)
+    normalized_topic = video_topic_contract.normalize_topic_input(topic)
+    query = topic_hook_pipeline.structure_topic(normalized_topic)
     events = db.list_hotspot_event_clips()
     buckets = topic_hook_pipeline.match_topic_hooks(
         query,
@@ -5705,7 +8726,323 @@ def _match_buckets_for_topic(topic: str) -> tuple[dict, dict]:
         is_ready=_is_confirmed_renderable_hotspot_hook,
         is_audit=_is_audited_hotspot_hook,
     )
+    # The score matcher may still find a generic logistics phrase through a
+    # broad node. Re-check the verified event fact against the immutable topic
+    # contract before exposing it as directly usable.
+    for bucket_name in ("matched_ready", "matched_audit_only"):
+        kept = []
+        for row in buckets.get(bucket_name) or []:
+            event_id = row.get("event_clip_id")
+            event = db.get_hotspot_event_clip(int(event_id)) if event_id is not None else None
+            issues = video_topic_contract.topic_hook_compatibility_issues(
+                normalized_topic, [event] if event else [],
+            )
+            if issues:
+                row["gaps"] = list(row.get("gaps") or []) + issues
+                buckets.setdefault("unmatched", []).append(row)
+            else:
+                kept.append(row)
+        buckets[bucket_name] = kept
     return query, buckets
+
+
+_HOOK_BINDING_EXACT = "exact"
+_HOOK_BINDING_ADJACENT = "logistics_adjacent"
+_HOOK_BINDING_CONTEXTUAL = "contextual_attention"
+
+
+def _hook_topic_direct_fit_score(topic: str, event: dict) -> int:
+    """Rank grounded logistics scenes before freshness/reuse tie-breakers."""
+    scenes = _grounded_chat_hook_scene_keys(event)
+    if not scenes:
+        return 0
+    contract = video_topic_contract.build_topic_contract(topic)
+    intent = str(contract.get("intent") or "")
+    intent_weights = {
+        "local_courier_comparison": {
+            "last_mile": 100, "road": 85, "warehouse": 65,
+            "disruption": 40, "border": 25, "customs": 20, "port": 10,
+        },
+        "same_city_delivery_sla": {
+            "last_mile": 100, "road": 90, "warehouse": 60,
+            "disruption": 35, "border": 20, "customs": 15, "port": 5,
+        },
+        "peak_overflow_response": {
+            "warehouse": 100, "disruption": 85, "last_mile": 55,
+            "road": 45, "port": 35, "border": 25, "customs": 20,
+        },
+        "peak_full_cycle_review": {
+            "warehouse": 100, "last_mile": 90, "road": 80,
+            "port": 65, "disruption": 55, "border": 35, "customs": 30,
+        },
+        "policy_change_verification": {
+            "customs": 100, "border": 95, "port": 75,
+            "warehouse": 45, "road": 30, "last_mile": 20, "disruption": 15,
+        },
+    }
+    weights = intent_weights.get(intent)
+    if weights is None:
+        contract_nodes = {str(item).casefold() for item in (contract.get("nodes") or [])}
+        node_scene_map = {
+            "末端": "last_mile", "配送": "last_mile", "道路": "road",
+            "运输": "road", "仓储": "warehouse", "分拣": "warehouse",
+            "港口": "port", "清关": "customs", "边境": "border",
+        }
+        requested_scenes = {
+            scene for node, scene in node_scene_map.items()
+            if node.casefold() in contract_nodes
+        }
+        return 80 + 5 * len(scenes & requested_scenes) if scenes & requested_scenes else 20
+    score = max((weights.get(scene, 0) for scene in scenes), default=0)
+    # Scene labels express where a clip happened, not what business fact the
+    # clip proves.  A passenger customs tutorial therefore must not outrank a
+    # cargo vessel for a freight-policy topic merely because ``customs`` has a
+    # nominal weight of 100.  Keep contextual Hooks available for mandatory
+    # output, but cap their direct-fit score until the audited fact supports
+    # the requested intent.
+    if not _hook_fact_supports_exact_topic_intent(topic, event):
+        contextual_caps = {
+            "local_courier_comparison": 55,
+            "same_city_delivery_sla": 60,
+            "peak_overflow_response": 55,
+            "peak_full_cycle_review": 60,
+        }
+        if intent == "policy_change_verification":
+            evidence = event.get("evidence") or {}
+            fact_text = " ".join(str(value or "") for value in (
+                event.get("title_zh"), event.get("title_en"),
+                evidence.get("what_happened"), evidence.get("event_identity"),
+            )).casefold()
+            freight_terms = (
+                "货物", "货运", "货车", "卡车", "集装箱", "码头", "港口",
+                "parcel", "cargo", "freight", "truck", "container", "warehouse",
+            )
+            # A cargo scene is a defensible contextual bridge for a policy
+            # topic even when the clip itself does not prove a policy change.
+            # Passenger-only customs footage is not freight evidence and must
+            # rank below that bridge.
+            score = min(score, 75 if any(term in fact_text for term in freight_terms) else 45)
+        else:
+            score = min(score, contextual_caps.get(intent, score))
+    return score
+
+
+def _hook_editorial_fit_score(topic: str, event: dict, parent: dict | None = None) -> int:
+    """Prefer visible logistics operations over generic breaking-news footage.
+
+    Mandatory-Hook mode may need a contextual clip when there is no exact
+    event.  Freshness alone is a poor tie-breaker in that bucket: it can put a
+    crime/tribute headline ahead of an older but visibly relevant freight
+    operation.  This score uses only audited facts and source titles.  It does
+    not claim that the clip proves the user's topic.
+    """
+    evidence = event.get("evidence") or {}
+    audit = evidence.get("visual_audit") or {}
+    fact_text = " ".join(str(value or "") for value in (
+        event.get("title_zh"), event.get("title_en"),
+        evidence.get("what_happened"), evidence.get("event_identity"),
+        " ".join(str(item or "") for item in (audit.get("visible_objects") or [])),
+        " ".join(str(item or "") for item in (audit.get("visible_actions") or [])),
+    )).casefold()
+    source_text = " ".join(str(value or "") for value in (
+        (parent or {}).get("title_zh"), (parent or {}).get("title"),
+        evidence.get("source_title"),
+    )).casefold()
+    intent = str(video_topic_contract.build_topic_contract(topic).get("intent") or "")
+    scenes = _grounded_chat_hook_scene_keys(event)
+    direct_freight_terms = (
+        "快递", "配送", "派送", "末端", "包裹", "货物", "货运", "货车",
+        "卡车", "厢式", "集装箱", "港口", "码头", "仓库", "仓储", "分拣",
+        "courier", "delivery", "parcel", "cargo", "freight", "truck",
+        "container", "warehouse",
+    )
+    operational_terms = (
+        "行驶", "通行", "排队", "装卸", "周转", "交接", "分拣", "航行",
+        "驶过", "运输", "moving", "driving", "queue", "loading", "sorting",
+    )
+    emergency_terms = (
+        "救护车", "警车", "警员", "法医", "警戒", "担架", "葬礼", "悼念",
+        "拳击", "champion", "tribute", "funeral", "forensic", "ambulance",
+    )
+    incident_terms = (
+        "起火", "燃烧", "火焰", "浓烟", "侧翻", "碰撞", "事故", "crash", "fire",
+    )
+    broadcast_terms = (
+        "sabcnews", "sabc news", "headlines", "south africa today",
+        "what’s happening", "what's happening",
+    )
+
+    score = 0
+    if any(term in fact_text for term in direct_freight_terms):
+        score += 2
+    if any(term in fact_text for term in operational_terms):
+        score += 1
+    if any(term in fact_text for term in emergency_terms):
+        score -= 3
+    if any(term in source_text for term in broadcast_terms):
+        score -= 1
+
+    # Comparison and service-level topics should open on an observable
+    # logistics operation.  A fire/accident can illustrate resilience, but it
+    # is a weaker editorial fit than ordinary freight movement or handoff.
+    if intent in {"local_courier_comparison", "same_city_delivery_sla"}:
+        if any(term in fact_text for term in incident_terms):
+            score -= 2
+        if scenes & {"border", "customs", "port"}:
+            score -= 1
+    return score
+
+
+def _hook_fact_supports_exact_topic_intent(topic: str, event: dict) -> bool:
+    """Require visible/source facts for a specific intent before calling it exact.
+
+    A shared broad node such as ``road`` is enough for a contextual logistics
+    bridge, but it does not prove a courier comparison, warehouse overflow or
+    freight-policy change.  Keeping that distinction here prevents a generic
+    road clip from outranking a stronger real-world fallback while preserving
+    the mandatory real-Hook output path.
+    """
+    contract = video_topic_contract.build_topic_contract(topic)
+    intent = str(contract.get("intent") or "")
+    evidence = event.get("evidence") or {}
+    parent = db.get_hotspot(int(event.get("hotspot_id") or 0)) or {}
+    fact_text = " ".join(str(value or "") for value in (
+        event.get("title_zh"), event.get("title_en"),
+        evidence.get("what_happened"), evidence.get("event_identity"),
+        parent.get("title_zh"), parent.get("title"),
+    )).casefold()
+    scenes = _grounded_chat_hook_scene_keys(event)
+    courier_terms = (
+        "快递", "配送", "派送", "末端", "同城", "courier", "delivery",
+        "last mile", "parcel",
+    )
+    warehouse_terms = (
+        "仓库", "仓储", "分拣", "堆积", "爆仓", "库位", "仓配", "warehouse",
+        "sorting", "storage", "overflow",
+    )
+    freight_terms = (
+        "货物", "货运", "货车", "卡车", "集装箱", "码头", "港口", "仓库",
+        "分拣", "配送", "订单", "parcel", "cargo", "freight", "truck",
+        "container", "warehouse", "delivery",
+    )
+    policy_terms = (
+        "政策", "法规", "海关", "关税", "税率", "申报", "许可证", "监管",
+        "policy", "regulation", "customs", "tariff", "declaration", "permit",
+    )
+    contains = lambda terms: any(term in fact_text for term in terms)
+    if intent not in {
+        "local_courier_comparison",
+        "same_city_delivery_sla",
+        "peak_overflow_response",
+        "peak_full_cycle_review",
+        "policy_change_verification",
+        "custom_logistics_topic",
+    }:
+        return True
+    if intent == "custom_logistics_topic":
+        nodes = {str(item) for item in (contract.get("custom_topic_nodes") or [])}
+        if "清关" in nodes:
+            return contains(policy_terms)
+        if "仓储" in nodes and (contains(warehouse_terms) or "warehouse" in scenes):
+            return True
+        if "末端" in nodes and (contains(courier_terms) or "last_mile" in scenes):
+            return True
+        if nodes & {"港口", "道路", "铁路"}:
+            return bool(scenes)
+        return False
+    if intent in {"local_courier_comparison", "same_city_delivery_sla"}:
+        return "last_mile" in scenes or contains(courier_terms)
+    if intent == "peak_overflow_response":
+        return (
+            "warehouse" in scenes and contains(warehouse_terms)
+        ) or "disruption" in scenes
+    if intent == "peak_full_cycle_review":
+        return bool(scenes & {"warehouse", "last_mile", "road", "port"}) and contains(freight_terms)
+    if intent == "policy_change_verification":
+        return bool(scenes & {"customs", "border", "port"}) and contains(policy_terms) and contains(freight_terms)
+    return True
+
+
+def _hook_binding_assessment(topic: str, events: list[dict]) -> dict:
+    """Classify relevance without turning editorial fit into an availability gate."""
+    # ``logistics_scenes`` on legacy rows may have been inferred from the
+    # curator-authored logistics question.  That bridge is useful for copy but
+    # cannot turn a border queue into warehouse footage.  Exact compatibility
+    # therefore uses only source/visual facts and recomputes adjacent nodes
+    # from the same grounded text.
+    grounded_events = [{**event, "logistics_scenes": []} for event in events]
+    issues = video_topic_contract.topic_hook_compatibility_issues(topic, grounded_events)
+    if not issues and all(_hook_fact_supports_exact_topic_intent(topic, event) for event in events):
+        return {
+            "mode": _HOOK_BINDING_EXACT,
+            "issues": [],
+            "reason": "热点事实与当前主题的实体或物流节点直接匹配。",
+        }
+    query_nodes = {
+        str(item).casefold()
+        for item in (topic_hook_pipeline.structure_topic(topic).get("logistics_nodes") or [])
+        if str(item).strip()
+    }
+    event_nodes: set[str] = set()
+    for event in events:
+        evidence = event.get("evidence") or {}
+        fact_text = " ".join(str(value or "") for value in (
+            event.get("title_zh"), event.get("title_en"),
+            evidence.get("what_happened"), evidence.get("event_identity"),
+        ))
+        event_nodes.update(_chat_hook_event_profile(fact_text))
+    if query_nodes and event_nodes and query_nodes & event_nodes:
+        return {
+            "mode": _HOOK_BINDING_ADJACENT,
+            "issues": issues,
+            "reason": "热点与主题共享真实物流节点，将作为相邻场景风险引子，不冒充主题直接证据。",
+        }
+    return {
+        "mode": _HOOK_BINDING_CONTEXTUAL,
+        "issues": issues,
+        "reason": "未找到精确事件，使用最新真实物流现场作为行业注意力开场；该现场不被表述为主题直接证据。",
+    }
+
+
+def _force_output_hook_candidates(topic: str, *, recently_used: set[int] | None = None) -> list[dict]:
+    """Return real timely Hooks ordered for exact→adjacent→latest fallback."""
+    recent = {int(item) for item in (recently_used or set())}
+    rows = []
+    for event in db.list_hotspot_event_clips():
+        if str(event.get("hook_kind") or "timely_event") != "timely_event":
+            continue
+        if not _is_confirmed_renderable_hotspot_hook(event):
+            continue
+        if not _grounded_chat_hook_scene_keys(event):
+            continue
+        event = _with_soft_logistics_bridge(event)
+        binding = _hook_binding_assessment(topic, [event])
+        parent = db.get_hotspot(int(event.get("hotspot_id") or 0)) or {}
+        published_ts = _event_date_seconds(parent.get("published_at"))
+        mode_rank = {
+            _HOOK_BINDING_EXACT: 3,
+            _HOOK_BINDING_ADJACENT: 2,
+            _HOOK_BINDING_CONTEXTUAL: 1,
+        }[binding["mode"]]
+        topic_fit = _hook_topic_direct_fit_score(topic, event)
+        editorial_fit = _hook_editorial_fit_score(topic, event, parent)
+        rows.append({
+            "event": event,
+            "parent": parent,
+            "binding": binding,
+            "topic_fit": topic_fit,
+            "editorial_fit": editorial_fit,
+            "published_ts": published_ts,
+            "sort_key": (
+                mode_rank,
+                topic_fit,
+                0 if int(event.get("id") or 0) in recent else 1,
+                editorial_fit,
+                published_ts,
+                int(event.get("id") or 0),
+            ),
+        })
+    return sorted(rows, key=lambda item: item["sort_key"], reverse=True)
 
 
 async def _retrieve_confirmed_chat_hooks(
@@ -5716,369 +9053,280 @@ async def _retrieve_confirmed_chat_hooks(
     content_mode: str = "hotspot",
     event_anchor: dict | None = None,
 ) -> dict:
-    """Let the deployed internal planner retrieve only confirmed, renderable Hooks.
+    """Always bind the strongest real Hook available for a valid logistics topic.
 
-    Chat never downloads a video directly.  Broad topics without an event anchor
-    only try audited generic logistics openers and never enqueue discovery.
-    Concrete timely topics may open a targeted-collection request when the
-    Hook library cannot support them.
+    Exact semantic fit is preferred, but it is an editorial ranking signal,
+    not a production-availability gate.  A contextual fallback remains a real,
+    confirmed and playable external Hook and is explicitly narrated as
+    industry context rather than evidence of the user's exact subject.
     """
-    normalized_topic = " ".join(str(topic or "").split())[:300]
+    normalized_topic = video_topic_contract.normalize_topic_input(topic)
     if not normalized_topic:
-        return {"status": "not_requested", "hooks": [], "failure_class": "no_event_anchor"}
+        return {
+            "status": "not_requested",
+            "hooks": [],
+            "failure_class": "empty_topic",
+            "message": "没有提取到有效主题，无法创建视频项目。",
+        }
     anchor = event_anchor or chat_intent.assess_event_anchor(normalized_topic)
+    query = topic_hook_pipeline.structure_topic(normalized_topic)
+    recently_used = db.recent_user_hook_event_ids(user_id)
+    if session_id:
+        recently_used.update(db.recent_session_hook_event_ids(session_id, user_id))
+
+    # First preserve the established fact-grounded retrieval path.  It can
+    # return two non-overlapping clips from the same verified event and carries
+    # stronger exact-match evidence than a library-wide freshness sort.  The
+    # force-output inventory is only the fallback when this path has no usable
+    # group; otherwise a newer but unrelated clip could replace an exact Hook.
     brief = {
-        "id": f"chat-{hashlib.sha256(normalized_topic.encode()).hexdigest()[:16]}",
         "raw_input": normalized_topic,
-        "subject": normalized_topic[:120],
-        "angle": normalized_topic[:180],
-        "goal": "为 Buffalo 物流内容选择已确认热点 Hook",
+        "subject": normalized_topic,
+        "angle": normalized_topic,
+        "goal": "为 Buffalo 物流内容选择真实、已确认、可播放的热点 Hook",
     }
-    use_generic = not anchor.get("has_event_anchor")
-    hook_kind = "generic_logistics" if use_generic else "timely_event"
-    query, buckets = _match_buckets_for_topic(normalized_topic)
-    funnel = {
-        "scanned": buckets.get("checked") or 0,
-        "scene_mismatch": 0,
-        "relevance_low": 0,
-        "not_playable": 0,
-        "kind_filtered": 0,
-        "duplicate_or_recent": 0,
-        "passed": len(buckets.get("matched_ready") or []),
-        "selected": 0,
-        "matched_ready": len(buckets.get("matched_ready") or []),
-        "matched_audit_only": len(buckets.get("matched_audit_only") or []),
-    }
-    if not use_generic and buckets.get("matched_ready"):
-        ready_row = buckets["matched_ready"][0]
-        locked = db.get_hotspot_event_clip(int(ready_row["event_clip_id"]))
-        if locked and _is_confirmed_renderable_hotspot_hook(locked):
-            locked = _with_soft_logistics_bridge(locked)
-            selected_hooks = [{
-                "event_clip_id": locked["id"],
-                "asset_id": locked["asset_id"],
-                "event_identity": (locked.get("evidence") or {}).get("event_identity"),
-                "content_description": (locked.get("evidence") or {}).get("what_happened"),
-                "start_ms": locked.get("start_ms"),
-                "end_ms": locked.get("end_ms"),
-            }]
-            delivery_readiness = _chat_video_delivery_readiness(normalized_topic, [
-                db.get_hotspot_event_clip(int(hook["event_clip_id"])) for hook in selected_hooks
-                if db.get_hotspot_event_clip(int(hook["event_clip_id"]))
-            ])
-            funnel["selected"] = len(selected_hooks)
-            return {
-                "status": "matched",
-                "topic": normalized_topic,
-                "hooks": [{
-                    "event_clip_id": hook.get("event_clip_id"),
-                    "asset_id": hook.get("asset_id"),
-                    "title": locked.get("title_zh") or locked.get("title_en"),
-                    "event_identity": hook.get("event_identity"),
-                    "description": hook.get("content_description"),
-                    "marketing_question": (locked.get("evidence") or {}).get("logistics_question"),
-                } for hook in selected_hooks],
-                "model": {"used": False, "fallback": "topic_entity_match"},
-                "failure_class": None,
-                "event_anchor": {**anchor, "topic_query": query},
-                "hook_kind": hook_kind,
-                "funnel": funnel,
-                "match_buckets": {
-                    "matched_ready": buckets["matched_ready"][:5],
-                    "matched_audit_only": buckets["matched_audit_only"][:5],
-                    "unmatched": [],
-                },
-                "relevance": {
-                    "level": "strong",
-                    "reason": "；".join(ready_row.get("hits") or ["主题实体与物流场景命中"]),
-                },
-                "video": {
-                    "status": "ready",
-                    "hotspot_event_ids": [int(hook["event_clip_id"]) for hook in selected_hooks],
-                    "source_asset_id": int(selected_hooks[0]["asset_id"]),
-                    "delivery_readiness": delivery_readiness,
-                },
-                "producible_topics": [],
-                "candidates_debug": [],
-                "message": "已自动绑定与当前主题匹配的物流 Hook，可直接创建 60 秒视频项目。",
-            }
-    candidates, kb_context, brand_evidence, marketing_funnel = _marketing_hook_candidates(
-        brief,
-        limit=8,
-        hook_kind=hook_kind,
-        require_scene_overlap=use_generic,
-        allow_broad_match=use_generic,
-    )
-    funnel = {**funnel, **(marketing_funnel or {})}
-    # Evergreen topics often lack scene keywords; still try generic logistics
-    # openers so one-click production can auto-lock a real Hook.
-    if use_generic and not candidates:
-        candidates, kb_context, brand_evidence, marketing_funnel = _marketing_hook_candidates(
+    marketing_funnel: dict = {}
+    try:
+        marketing_candidates, _kb_context, _brand_evidence, marketing_funnel = _marketing_hook_candidates(
             brief,
             limit=8,
-            hook_kind="generic_logistics",
+            hook_kind="timely_event",
             require_scene_overlap=False,
             allow_broad_match=True,
         )
-        funnel = {**funnel, **(marketing_funnel or {}), "generic_relaxed": True}
-    # 同一聊天 session 内不应连续把同一段 Hook 当开场：对近期已用过的候选
-    # 降权（不排除），素材库很小时仍能在没有更优选项时复用。
-    recently_used = db.recent_session_hook_event_ids(session_id, user_id) if session_id else set()
-    if recently_used and candidates:
-        for item in candidates:
-            hook_event_ids = {
-                int(hook["event_clip_id"]) for hook in item.get("hook_clips") or []
-                if hook.get("event_clip_id") is not None
-            }
-            if hook_event_ids & recently_used:
-                item["score"] = item.get("score", 0) - 25
-                funnel["duplicate_or_recent"] = int(funnel.get("duplicate_or_recent") or 0) + 1
-        candidates.sort(
-            key=lambda item: (item["score"], item.get("published_ts") or 0, int(item["hotspot_id"])),
-            reverse=True,
-        )
-    selected_event_ids: set[int] = set()
-    selected = []
-    model_meta: dict = {"used": False}
-    if candidates:
-        selected, model_meta = await _model_decide_marketing_hooks(
-            brief, candidates, kb_context, brand_evidence, limit=2,
-        )
-        # Official-operator topics (Transnet/SANRAL) must stay in matched_ready.
-        # Other timely logistics topics may still use the marketing candidate set.
-        strict_topic = bool(query.get("preferred_publishers"))
-        if not selected:
-            fallback = dict(candidates[0])
-            hooks = _select_chat_video_hook_pair(fallback.get("hook_clips") or [])
-            ready_ids = {
-                int(item["event_clip_id"]) for item in (buckets.get("matched_ready") or [])
-                if item.get("event_clip_id") is not None
-            }
-            fallback_ids = {int(hook["event_clip_id"]) for hook in hooks if hook.get("event_clip_id") is not None}
-            if hooks and (use_generic or not strict_topic or fallback_ids <= ready_ids):
-                fallback["hook_clips"] = hooks
-                fallback["can_render_video"] = True
-                selected = [fallback]
-                model_meta = {
-                    **(model_meta or {}),
-                    "used": False,
-                    "fallback": "auto_lock_top_candidate",
-                }
-        if not use_generic and selected and strict_topic:
-            ready_ids = {
-                int(item["event_clip_id"]) for item in (buckets.get("matched_ready") or [])
-                if item.get("event_clip_id") is not None
-            }
-            filtered = []
-            for item in selected:
-                hook_ids = {
-                    int(hook["event_clip_id"])
-                    for hook in (item.get("hook_clips") or [])
-                    if hook.get("event_clip_id") is not None
-                }
-                if hook_ids and hook_ids <= ready_ids:
-                    filtered.append(item)
-            selected = filtered
-        for item in selected:
-            selected_hooks = _select_chat_video_hook_pair(item.get("hook_clips") or [])
-            if not selected_hooks:
-                continue
-            selected_event_ids = {int(hook["event_clip_id"]) for hook in selected_hooks}
-            funnel["selected"] = len(selected_event_ids)
-            hooks = [{
-                "event_clip_id": hook.get("event_clip_id"),
-                "asset_id": hook.get("asset_id"),
-                "title": item.get("title"),
-                "event_identity": hook.get("event_identity"),
-                "description": hook.get("content_description"),
-                "marketing_question": item.get("marketing_question"),
-            } for hook in selected_hooks]
-            hook_count = len(selected_hooks)
-            locked_events = []
-            for hook in selected_hooks:
-                locked = db.get_hotspot_event_clip(int(hook["event_clip_id"]))
-                if locked:
-                    locked_events.append(_with_soft_logistics_bridge(locked))
-            locked_events = [event for event in locked_events if event]
-            delivery_readiness = _chat_video_delivery_readiness(normalized_topic, locked_events)
-            ready_events = [
-                event for event in db.list_hotspot_event_clips()
-                if _is_confirmed_renderable_hotspot_hook(event)
-            ]
-            hotspots_by_id = {
-                int(item["id"]): item
-                for item in db.list_hotspots(limit=200)
-            }
-            producible = producible_topics.recommend_producible_topics(
-                ready_events, limit=5, hotspots_by_id=hotspots_by_id,
-            )
-            return {
-                "status": "matched", "topic": normalized_topic, "hooks": hooks, "model": model_meta,
-                "failure_class": None,
-                "event_anchor": {**anchor, "topic_query": query},
-                "hook_kind": hook_kind,
-                "funnel": funnel,
-                "match_buckets": {
-                    "matched_ready": buckets.get("matched_ready") or [],
-                    "matched_audit_only": buckets.get("matched_audit_only") or [],
-                },
-                "relevance": item.get("relevance") or {
-                    "level": "strong", "reason": "内置模型确认该 Hook 可直接解释当前物流问题。",
-                },
-                "video": {
-                    "status": "ready",
-                    "hotspot_event_ids": [int(hook["event_clip_id"]) for hook in selected_hooks],
-                    "source_asset_id": int(selected_hooks[0]["asset_id"]),
-                    "delivery_readiness": delivery_readiness,
-                },
-                "producible_topics": [] if not use_generic else producible,
-                "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
-                "message": (
-                    "已自动锁定常青物流 Hook（Buffalo 可见仓配开场，非时效新闻）；可直接创建 60 秒视频项目。"
-                    if hook_kind == "generic_logistics" else
-                    "已自动锁定热点 Hook；可在卡片中更换，或直接创建 60 秒视频项目。"
-                    if use_generic else
-                    (
-                        "已由内置模型锁定同一事件的两段已确认 Hook；成片会用双段现场增强开场。"
-                        if hook_count == 2 else
-                        "已自动绑定与当前主题匹配的物流 Hook，可直接创建 60 秒视频项目。"
-                    )
-                ),
-            }
+    except Exception as exc:  # retrieval diagnostics must never break output
+        logger.warning("精确 Hook 检索失败，切换真实库存兜底: %r", exc)
+        marketing_candidates = []
 
-    ready_events = [
-        event for event in db.list_hotspot_event_clips()
-        if _is_confirmed_renderable_hotspot_hook(event)
-    ]
-    hotspots_by_id = {
-        int(item["id"]): item
-        for item in db.list_hotspots(limit=200)
+    preferred_groups: list[dict] = []
+    mode_rank = {
+        _HOOK_BINDING_EXACT: 3,
+        _HOOK_BINDING_ADJACENT: 2,
+        _HOOK_BINDING_CONTEXTUAL: 1,
     }
-    producible = producible_topics.recommend_producible_topics(
-        ready_events, limit=5, hotspots_by_id=hotspots_by_id,
-    )
-
-    # A missing timely Hook no longer blocks production when Buffalo's own
-    # inventory can carry the topic. Keep the fallback explicit: it is an
-    # owned-only video, with no hotspot facts and no unrelated news filler.
-    owned_fallback_readiness = _chat_video_delivery_readiness(
-        normalized_topic, [], chain_mode="owned_only",
-    )
-    if owned_fallback_readiness.get("delivery_ready"):
-        return {
-            "status": "owned_fallback",
-            "topic": normalized_topic,
-            "hooks": [],
-            "request_id": None,
-            "video": {
-                "status": "ready",
-                "chain_mode": "owned_only",
-                "hotspot_event_ids": [],
-                "delivery_readiness": owned_fallback_readiness,
-            },
-            "failure_class": None,
-            "event_anchor": {**anchor, "topic_query": query},
-            "hook_kind": "owned_only_fallback",
-            "funnel": funnel,
-            "match_buckets": {
-                "matched_ready": buckets.get("matched_ready") or [],
-                "matched_audit_only": buckets.get("matched_audit_only") or [],
-            },
-            "producible_topics": producible if use_generic else [],
-            "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
-            "message": (
-                "当前没有匹配的时效 Hook，已直接切换 Buffalo 自有素材链路。"
-                "视频会围绕主题和可见物流动作生成，不伪装成热点追更，也不使用无关新闻。"
-            ),
-        }
-
-    if use_generic or not chat_intent.should_enqueue_hotspot_discovery(content_mode, anchor):
-        failure = "no_event_anchor" if use_generic else (
-            "gate_blocked" if int(funnel.get("scanned") or 0) > 0 and int(funnel.get("passed") or 0) == 0
-            else "coverage_gap"
+    for candidate in marketing_candidates:
+        selected_hooks = _select_chat_video_hook_pair(candidate.get("hook_clips") or [])
+        locked_events = []
+        for hook in selected_hooks:
+            event_id = hook.get("event_clip_id")
+            event = db.get_hotspot_event_clip(int(event_id)) if event_id is not None else None
+            if (
+                event
+                and _is_confirmed_renderable_hotspot_hook(event)
+                and _grounded_chat_hook_scene_keys(event)
+            ):
+                locked_events.append(_with_soft_logistics_bridge(event))
+        if not locked_events:
+            continue
+        binding = _hook_binding_assessment(normalized_topic, locked_events)
+        topic_fit = max(
+            (_hook_topic_direct_fit_score(normalized_topic, event) for event in locked_events),
+            default=0,
         )
-        message = {
-            "no_event_anchor": (
-                "当前话题没有自动命中可用 Hook。"
-                "请在下方点选一个库内 Hook（绑定到你的原主题，无需改写输入框），或补充具体口岸/港口/道路事件后再试。"
+        recent_hit = any(int(event.get("id") or 0) in recently_used for event in locked_events)
+        preferred_groups.append({
+            "events": locked_events,
+            "candidate": candidate,
+            "binding": binding,
+            "topic_fit": topic_fit,
+            "sort_key": (
+                mode_rank[binding["mode"]],
+                topic_fit,
+                0 if recent_hit else 1,
+                float(candidate.get("score") or 0),
+                max(int(event.get("id") or 0) for event in locked_events),
             ),
-            "gate_blocked": (
-                "库内有候选 Hook，但未通过确认/可播/场景相关度门禁；"
-                "不会用无关事故画面硬配成片。请点选下方可绑定 Hook。"
-            ),
-            "coverage_gap": (
-                "主题需要时效事件 Hook，但当前库未覆盖；"
-                "请点选下方可绑定 Hook，或等待定向补采。"
-            ),
-        }.get(failure, "当前没有可用的强相关 Hook。")
+        })
+    preferred_groups.sort(key=lambda item: item["sort_key"], reverse=True)
+
+    inventory_candidates = _force_output_hook_candidates(
+        normalized_topic, recently_used=recently_used,
+    )
+    if not preferred_groups and not inventory_candidates:
+        refresh_started = bool(topic_hook_pipeline.autofetch_enabled() and sched.request_targeted_hotspot_refresh())
         return {
-            "status": "not_requested",
+            "status": "unavailable",
             "topic": normalized_topic,
             "hooks": [],
             "request_id": None,
-            "video": {"status": "disabled"},
-            "failure_class": failure,
+            "failure_class": "no_real_hook_inventory",
             "event_anchor": {**anchor, "topic_query": query},
-            "hook_kind": hook_kind,
-            "funnel": funnel,
-            "match_buckets": {
-                "matched_ready": buckets.get("matched_ready") or [],
-                "matched_audit_only": buckets.get("matched_audit_only") or [],
-            },
-            "producible_topics": producible if use_generic else [],
-            "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
-            "reason": failure,
-            "message": message,
+            "hook_kind": "timely_event",
+            "video": {"status": "disabled", "hotspot_event_ids": []},
+            "message": (
+                "当前库中没有任何真实、已确认、可播放的时效 Hook，不能伪造热点。"
+                + (" 已立即启动补库。" if refresh_started else " 请先恢复热点抓取任务。")
+            ),
         }
 
-    request = db.enqueue_hotspot_discovery_request(
+    inventory_by_event_id = {
+        int(item["event"]["id"]): item for item in inventory_candidates
+    }
+    for group in preferred_groups:
+        effective_binding = group["binding"]
+        for grouped_event in group["events"]:
+            inventory_item = inventory_by_event_id.get(int(grouped_event["id"]))
+            if (
+                inventory_item
+                and mode_rank[inventory_item["binding"]["mode"]]
+                > mode_rank[effective_binding["mode"]]
+            ):
+                effective_binding = inventory_item["binding"]
+        group["effective_binding"] = effective_binding
+        group["effective_sort_key"] = (
+            mode_rank[effective_binding["mode"]],
+            group["topic_fit"],
+            *group["sort_key"][2:],
+        )
+        group["published_ts"] = max(
+            (
+                _event_date_seconds(
+                    (db.get_hotspot(int(item.get("hotspot_id") or 0)) or {}).get("published_at")
+                )
+                for item in group["events"]
+            ),
+            default=0.0,
+        )
+    preferred_groups.sort(key=lambda item: item["effective_sort_key"], reverse=True)
+
+    chosen_group = preferred_groups[0] if preferred_groups else None
+    chosen_inventory = inventory_candidates[0] if inventory_candidates else None
+    # Compare both retrieval paths before locking a Hook.  A lower-quality
+    # contextual marketing candidate must never hide an exact/adjacent match
+    # already present in the confirmed inventory.  For contextual ties prefer
+    # the inventory path because it is explicitly ordered by freshness.
+    group_priority = (
+        mode_rank[chosen_group["effective_binding"]["mode"]],
+        int(chosen_group.get("topic_fit") or 0),
+    ) if chosen_group else (-1, -1)
+    inventory_priority = (
+        mode_rank[chosen_inventory["binding"]["mode"]],
+        int(chosen_inventory.get("topic_fit") or 0),
+    ) if chosen_inventory else (-1, -1)
+    prefer_group = bool(chosen_group) and (
+        chosen_inventory is None
+        or group_priority > inventory_priority
+        or (
+            group_priority == inventory_priority
+            and (
+                chosen_group["effective_binding"]["mode"] != _HOOK_BINDING_CONTEXTUAL
+                or chosen_group["published_ts"] >= chosen_inventory["published_ts"]
+            )
+        )
+    )
+    if prefer_group:
+        locked_events = chosen_group["events"]
+        selected_candidate = chosen_group["candidate"]
+        binding = chosen_group["effective_binding"]
+        selection_source = "fact_grounded_retrieval"
+    else:
+        chosen = chosen_inventory
+        locked_events = [chosen["event"]]
+        selected_candidate = {}
+        binding = chosen["binding"]
+        selection_source = "force_output_inventory"
+    event = locked_events[0]
+    parent = db.get_hotspot(int(event.get("hotspot_id") or 0)) or {}
+    readiness = _chat_video_delivery_readiness(
         normalized_topic,
-        user_id,
-        query=query,
-        max_candidates=query.get("max_candidates"),
-        source_classes=query.get("source_classes"),
+        locked_events,
+        hook_binding_mode=binding["mode"],
     )
-    refresh_started = False
-    if topic_hook_pipeline.autofetch_enabled():
-        refresh_started = sched.request_targeted_hotspot_refresh()
-    audit_gaps = [
-        f"{item.get('title') or 'Hook'}：{'；'.join(item.get('gaps') or [])}"
-        for item in (buckets.get("matched_audit_only") or [])[:3]
-        if item.get("gaps")
-    ]
-    started_note = (
-        "已启动定向采集（任务进行中）。"
-        if refresh_started else
-        "任务已入库，等待定向采集执行。"
-    )
+    hooks = []
+    for locked in locked_events:
+        evidence = locked.get("evidence") or {}
+        locked_parent = db.get_hotspot(int(locked.get("hotspot_id") or 0)) or parent
+        source_title = str(
+            locked.get("title_zh") or locked.get("title_en")
+            or locked_parent.get("title_zh") or locked_parent.get("title") or ""
+        ).strip()
+        attention_title = str(
+            selected_candidate.get("attention_title")
+            or evidence.get("attention_title")
+            or hotspot_hook_copy.attention_headline(
+                str(evidence.get("what_happened") or ""),
+                str(evidence.get("logistics_question") or ""),
+                source_title,
+            )
+        ).strip()
+        hooks.append({
+            "event_clip_id": int(locked["id"]),
+            "asset_id": int(locked["asset_id"]),
+            "title": selected_candidate.get("title") or attention_title or source_title,
+            "attention_title": attention_title,
+            "source_title": source_title,
+            "event_identity": evidence.get("event_identity"),
+            "description": evidence.get("what_happened"),
+            "marketing_question": (
+                selected_candidate.get("marketing_question")
+                or evidence.get("logistics_question")
+            ),
+            "published_at": locked_parent.get("published_at"),
+        })
+    mode_messages = {
+        _HOOK_BINDING_EXACT: "已自动绑定与当前主题直接匹配的真实热点 Hook，可直接创建 60 秒视频项目。",
+        _HOOK_BINDING_ADJACENT: "已绑定共享物流节点的真实热点 Hook；它只作为相邻风险引子，随后回到你的原主题和 Buffalo 可见动作。",
+        _HOOK_BINDING_CONTEXTUAL: "未找到精确事件，已绑定最新真实物流现场作为行业注意力开场；不会把该现场冒充为你的主题证据，仍可直接出片。",
+    }
     return {
-        "status": "queued",
+        "status": "matched",
         "topic": normalized_topic,
-        "hooks": [],
-        "request_id": request["id"],
-        "discovery": topic_hook_pipeline.discovery_payload(request),
-        "video": {"status": "disabled"},
-        "failure_class": "coverage_gap",
+        "hooks": hooks,
+        "model": {"used": False, "fallback": selection_source},
+        "failure_class": None,
         "event_anchor": {**anchor, "topic_query": query},
-        "hook_kind": hook_kind,
-        "funnel": funnel,
-        "match_buckets": {
-            "matched_ready": [],
-            "matched_audit_only": buckets.get("matched_audit_only") or [],
+        "hook_kind": "timely_event",
+        "hook_binding_mode": binding["mode"],
+        "compatibility_issues": binding["issues"],
+        "relevance": selected_candidate.get("relevance") or {
+            "level": binding["mode"], "reason": binding["reason"],
         },
+        "funnel": {
+            **(marketing_funnel or {}),
+            "inventory_scanned": len(inventory_candidates),
+            "selected": len(locked_events),
+            "exact": sum(item["binding"]["mode"] == _HOOK_BINDING_EXACT for item in inventory_candidates),
+            "adjacent": sum(item["binding"]["mode"] == _HOOK_BINDING_ADJACENT for item in inventory_candidates),
+            "contextual": sum(item["binding"]["mode"] == _HOOK_BINDING_CONTEXTUAL for item in inventory_candidates),
+        },
+        "match_buckets": {},
         "producible_topics": [],
-        "candidates_debug": _chat_hook_candidates_debug(candidates, recently_used, selected_event_ids),
-        "message": (
-            f"当前没有可成片的匹配 Hook。已创建定向采集任务 #{request['id']}，阶段 {request.get('stage') or 'queued'}。"
-            f"{started_note}"
-            + ((" 相关但不可成片：" + " / ".join(audit_gaps) + "。") if audit_gaps else "")
-            + "完成下载、分析、事实核验前不会用无关新闻强行成片。"
-        ),
+        "candidates_debug": [
+            {
+                "event_clip_id": int(item["event"]["id"]),
+                "binding_mode": item["binding"]["mode"],
+                "published_at": item["parent"].get("published_at"),
+            }
+            for item in inventory_candidates[:8]
+        ],
+        "video": {
+            "status": "ready" if readiness.get("delivery_ready") else "adapting",
+            "chain_mode": "hotspot_owned",
+            "hook_binding_mode": binding["mode"],
+            "hotspot_event_ids": [int(item["id"]) for item in locked_events],
+            "source_asset_id": int(event["asset_id"]),
+            "delivery_readiness": readiness,
+        },
+        "message": mode_messages[binding["mode"]],
     }
 
 
 def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
     """Derive a conservative owned-media role from the approved Hook evidence."""
+    contract = video_topic_contract.build_topic_contract(
+        topic, has_event_anchor=bool(events),
+    )
+    contract_nodes = [
+        str(node) for node in (contract.get("custom_topic_nodes") or (
+            contract.get("nodes") if contract.get("is_named_contract") else []
+        ) or [])
+        if str(node) in {"清关", "末端", "配送", "仓储", "运输", "分拣"}
+    ]
+    # The original topic owns the primary logistics nodes. A retrieved event
+    # may add evidenced bridge actions, but can never replace the requested
+    # subject. Do not return early: a broad transport topic can legitimately
+    # need warehouse/delivery actions when the approved Hook proves them.
+    nodes = list(contract_nodes)
     evidence_text = " ".join(
         str(value or "")
         for event in events
@@ -6088,10 +9336,10 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
         )
     )
     candidates = _topic_keywords(" ".join((topic, evidence_text)))
-    nodes = [
+    nodes.extend(
         node for node in candidates
         if node in {"清关", "末端", "配送", "仓储", "运输"}
-    ]
+    )
     # When there is no matched Hook, preserve the structured topic's logistics
     # meaning instead of reducing an operator topic to a generic delivery line.
     structured_nodes = set(
@@ -6134,7 +9382,7 @@ def _chat_video_logistics_nodes(topic: str, events: list[dict]) -> list[str]:
     # The Hook curator has already confirmed a logistics bridge.  Without a
     # narrower node, use transport only as a preparation/action category; the
     # planner prompt still forbids claiming a completed delivery outcome.
-    return list(dict.fromkeys(nodes)) or ["运输"]
+    return list(dict.fromkeys(nodes)) or ["仓储", "配送"]
 
 
 def _hotspot_batch_age() -> str | None:
@@ -6168,19 +9416,36 @@ def _chat_video_delivery_readiness(
     locked_events: list[dict],
     *,
     chain_mode: str = "hotspot_owned",
+    hook_binding_mode: str | None = None,
 ) -> dict:
     """Preflight the formal 50–90s plan without creating a project or calling a model.
 
-    Hotspot-owned production requires a locked Hook. The explicit owned_only
-    fallback may plan directly from Buffalo inventory when a topic has no
-    relevant Hook; it never fabricates a hotspot fact.
+    Formal production always requires at least one locked, confirmed, playable
+    hotspot Hook. Buffalo-owned footage remains the bridge and proof layer; it
+    is never a replacement for the required real Hook.
     """
-    if not locked_events and chain_mode != "owned_only":
+    if chain_mode == "owned_only" or not locked_events:
         return {
             "status": "needs_hook", "delivery_ready": False,
-            "message": "尚未锁定可用于正式成片的热点 Hook。",
+            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；Buffalo 自有素材不能替代热点开场。",
+            "required": {"hotspot_video": 1, "duration_ms": "50000–90000"},
             "adaptation": {"adapted": False, "strategies": []},
         }
+    # Callers created before the media proxy was materialized can hold a stale
+    # event dict without ``clip_path``/``clip_status``.  Rehydrate every locked
+    # id here so a valid database-backed Hook is not incorrectly reported as
+    # unavailable merely because the chat card kept an older snapshot.
+    resolved_events: list[dict] = []
+    for event in locked_events:
+        try:
+            persisted = db.get_hotspot_event_clip(int(event.get("id") or 0))
+        except (TypeError, ValueError):
+            persisted = None
+        resolved_events.append(persisted or event)
+    locked_events = resolved_events
+    binding = _hook_binding_assessment(topic, locked_events)
+    binding_mode = hook_binding_mode or binding["mode"]
+    compatibility_issues = binding["issues"]
     primary = locked_events[0] if locked_events else {}
     owned_segments = [
         item for item in db.list_asset_segments(limit=20_000)
@@ -6206,6 +9471,8 @@ def _chat_video_delivery_readiness(
             "platforms": ["douyin"],
         },
     )
+    planning_brief["hook_binding_mode"] = binding_mode
+    planning_brief["hook_compatibility_issues"] = compatibility_issues
     if primary:
         planning_brief.update({
             "hotspot_id": primary["hotspot_id"],
@@ -6264,84 +9531,54 @@ def _chat_video_delivery_readiness(
         "image": image_count,
         "duration_ms": duration_ms,
     }
-    if chain_mode == "owned_only":
-        # This is an explicit no-Hook production mode: all factual claims must
-        # come from the topic copy and visible Buffalo-owned actions.
-        delivery_ready = bool(not planner_issue and scenes and hotspot_count == 0 and duration_ok)
-        if delivery_ready and not adaptation.get("adapted"):
-            message = "未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出。"
-            status = "owned_only_ready"
-        elif delivery_ready:
-            if owned_matching_mode == "broad_operational_fallback":
-                message = (
-                    "未匹配到可用热点 Hook，已切换 Buffalo 自有履约动作链路；"
-                    f"当前使用 {owned_count} 段可见仓配素材，系统不会把它们冒充为热点事实。"
-                )
-            else:
-                message = (
-                    f"未匹配到可用热点 Hook，已切换 Buffalo 自有素材直出；当前自有动态 {owned_count} 段，"
-                    "系统将按现有库存自适应规划。"
-                )
-            status = "owned_only_ready_adapted"
-        elif planner_issue:
-            message = "未匹配到热点 Hook，且当前 Buffalo 自有素材无法形成可渲染分镜。"
-            status = "needs_owned_media"
-        elif not duration_ok:
-            message = "未匹配到热点 Hook，且当前 Buffalo 自有素材不足以形成 50–90 秒正式成片。"
-            status = "needs_owned_media"
+    # A validated real Hook is the only chat-time production gate.  Sparse
+    # owned footage and a short preflight plan are adaptation signals: the
+    # formal planner can extend the plan with distinct Buffalo still images.
+    # Expose the preflight truth for audit, but never turn it into a disabled
+    # create button after a real playable Hook has already been locked.
+    preflight_ready = bool(not planner_issue and hotspot_count >= 1 and duration_ok)
+    delivery_ready = bool(locked_events and all(_is_confirmed_renderable_hotspot_hook(item) for item in locked_events))
+    if preflight_ready and not adaptation.get("adapted"):
+        message = "真实热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
+        status = "delivery_ready"
+    elif preflight_ready:
+        if owned_matching_mode == "broad_operational_fallback":
+            message = (
+                "真实热点 Hook 已锁定；同节点自有视频不足，已切换到 Buffalo 可见仓配动作桥接，"
+                f"当前 {owned_count} 段，不把自有画面冒充为热点事实。"
+            )
         else:
-            message = "未匹配到热点 Hook，当前自有素材规划未产出可用分镜。"
-            status = "needs_owned_media"
+            message = (
+                f"真实热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
+                f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
+            )
+        status = "delivery_ready_adapted"
+    elif delivery_ready and planner_issue:
+        message = "真实热点 Hook 已锁定；预规划素材偏少，将使用 Buffalo 静态图与可见仓配动作补齐后继续出片。"
+        status = "adaptation_queued"
+    elif delivery_ready and not duration_ok:
+        message = "真实热点 Hook 已锁定；预规划不足 50 秒，将以 Buffalo 静态图慢推镜头补足正式时长后继续出片。"
+        status = "adaptation_queued"
     else:
-        # Hard gate: locked Hook must yield at least one hotspot scene. Owned < 4
-        # is adaptation, not a block. Formal delivery also requires 50–90s coverage.
-        delivery_ready = bool(not planner_issue and hotspot_count >= 1 and duration_ok)
-        if delivery_ready and not adaptation.get("adapted"):
-            message = "强相关热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
-            status = "delivery_ready"
-        elif delivery_ready:
-            if owned_matching_mode == "broad_operational_fallback":
-                message = (
-                    "热点 Hook 已锁定；同节点自有视频不足，已切换到 Buffalo 可见仓配动作桥接，"
-                    f"当前 {owned_count} 段，不把自有画面冒充为热点事实。"
-                )
-            else:
-                message = (
-                    f"热点 Hook 已锁定；Buffalo 自有动态目前 {owned_count} 段"
-                    f"（理想 ≥4）。系统将按现有库存自适应规划并继续出片。"
-                )
-            status = "delivery_ready_adapted"
-        elif planner_issue:
-            message = "热点 Hook 已匹配，但当前素材组合无法形成可渲染分镜。"
-            status = "needs_owned_media"
-        elif not duration_ok and hotspot_count >= 1:
-            message = "热点 Hook 已匹配，但当前素材不足以形成 50–90 秒正式成片。"
-            status = "needs_owned_media"
-        else:
-            message = "热点 Hook 已匹配，但规划未产出可用热点镜头。"
-            status = "needs_owned_media"
+        message = "真实热点 Hook 已匹配，但规划未产出可用热点镜头。"
+        status = "needs_owned_media"
     result = {
         "status": status,
         "delivery_ready": delivery_ready,
+        "preflight_ready": preflight_ready,
+        "hook_binding_mode": binding_mode,
+        "compatibility_issues": compatibility_issues,
         "coverage": coverage,
-        "required": (
-            {"owned_video": 1, "duration_ms": "50000–90000"}
-            if chain_mode == "owned_only"
-            else {"hotspot_video": 1, "owned_video": "adaptive", "duration_ms": "50000–90000"}
-        ),
-        "ideal": (
-            {"owned_video": 4, "duration_ms": "50000–90000"}
-            if chain_mode == "owned_only"
-            else {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"}
-        ),
+        "required": {"hotspot_video": 1, "owned_video": "adaptive", "duration_ms": "50000–90000"},
+        "ideal": {"hotspot_video": 1, "owned_video": 4, "duration_ms": "50000–90000"},
         "logistics_nodes": nodes,
         "message": message,
         "planner_issue": planner_issue or None,
         "owned_matching_mode": owned_matching_mode,
         "adaptation": adaptation,
     }
-    # Observation only when inventory looks thin or delivery is blocked.
-    if owned_count < 4 or not delivery_ready:
+    # Observation only when inventory looks thin or preflight needs adaptation.
+    if owned_count < 4 or not preflight_ready:
         # hotspot_pool must scan the full confirmed hook library for the topic,
         # not only the locked parent video's related clips.
         result["diagnostics"] = _compose_owned_matching_diagnostics(
@@ -6431,15 +9668,20 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
     degraded_from_comparison = False
 
     if content_mode == "comparison_research" and evidence["evidence_state"] != "sufficient":
-        # 商务团队一键生产：对比题材无真实资料时，自动降级为科普视角，
-        # 重写消息后走正常生产链（通用物流 Hook 兜底 → 可创建视频项目）。
+        # Preserve the exact user topic.  Missing comparison evidence changes
+        # only the evidence boundary, never the subject or its logistics nodes.
         degraded_from_comparison = True
-        latest_topic = chat_intent.comparison_to_evergreen_topic(latest_topic)
         messages = list(messages)
-        if messages and messages[-1].get("role") == "user":
-            messages[-1] = {**messages[-1], "content": latest_topic}
-        content_mode = chat_intent.classify_content_mode(latest_topic)
-        event_anchor = chat_intent.assess_event_anchor(latest_topic, context=req.context or "")
+        contract = video_topic_contract.build_topic_contract(latest_topic)
+        messages.append({
+            "role": "system",
+            "content": (
+                "必须保留用户原主题，不得改写成泛化物流话题。"
+                + contract["safe_angle"]
+                + " 标题和正文必须明确回应原主题。"
+            ),
+        })
+        content_mode = "evergreen"
 
     if content_mode == "comparison_research" and evidence["evidence_state"] != "sufficient":
         hotspot_retrieval = {
@@ -6455,7 +9697,11 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         outputs = ai_engine.build_comparison_framework(latest_topic, platforms, evidence)
     else:
         hotspot_task = None
-        if chat_intent.should_attempt_hook_retrieval(content_mode):
+        # Every normal Douyin request is a video production command.  Content
+        # classification may influence copy style, but it must never skip the
+        # real-Hook stage for custom/evergreen topics.
+        video_production_request = req.command is None and "douyin" in platforms
+        if video_production_request or chat_intent.should_attempt_hook_retrieval(content_mode):
             hotspot_task = asyncio.create_task(
                 _retrieve_confirmed_chat_hooks(
                     latest_topic,
@@ -6561,7 +9807,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         (hotspot_retrieval or {}).get("hook_kind")
         or ("generic_logistics" if content_mode in {"evergreen", "general_copy"} else "timely_event")
     )
-    return {
+    response_payload = {
         "content": context_content,
         "title": first["title"], "body": first["body"],
         "hashtags": first["hashtags"], "outputs": outputs,
@@ -6587,8 +9833,7 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
             "status": (
                 "ready"
                 if (
-                    not generation_unavailable
-                    and (hotspot_retrieval or {}).get("status") in {"matched", "owned_fallback"}
+                    (hotspot_retrieval or {}).get("status") == "matched"
                     and ((hotspot_retrieval or {}).get("video") or {}).get("status") == "ready"
                     and readiness.get("delivery_ready", True)
                 )
@@ -6602,16 +9847,84 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
             "delivery_readiness": readiness,
             "session_id": req.session_id,
             "block_reason": (
-                "AI 文案服务不可用，当前仅为提示文本"
-                if generation_unavailable
-                else (
-                    readiness.get("message")
-                    or (hotspot_retrieval or {}).get("message")
-                    or "尚未匹配可用于正式成片的热点 Hook"
-                )
+                readiness.get("message")
+                or (hotspot_retrieval or {}).get("message")
+                or "尚未匹配可用于正式成片的热点 Hook"
             ),
         },
     }
+    # The chat request itself is the production command. Once a real playable
+    # Hook is locked, create one durable generation job immediately; project
+    # creation is local/transactional and does not wait for planning/rendering.
+    workflow = response_payload["video_workflow"]
+    if (
+        req.command is None
+        and "douyin" in platforms
+        and workflow.get("status") == "ready"
+        and workflow.get("hotspot_event_ids")
+    ):
+        try:
+            # Automatic production uses the configured provider when healthy,
+            # and a configured fallback when it is temporarily unavailable.
+            # Audio integrity is still enforced by final technical QC.
+            tts_provider, voice = video_renderer.resolve_tts_selection(
+                None, None, strict=False,
+            )
+            queued = _queue_chat_dual_library_video_job(
+                ChatDualLibraryVideoRequest(
+                    topic=latest_topic or first.get("title") or "南非物流话题",
+                    hotspot_event_ids=[
+                        int(item) for item in workflow["hotspot_event_ids"][:2]
+                    ],
+                    platform="douyin",
+                    target_duration_ms=60_000,
+                    chain_mode=str(
+                        ((hotspot_retrieval or {}).get("video") or {}).get("chain_mode")
+                        or "hotspot_owned"
+                    ),
+                    session_id=req.session_id,
+                    tts_provider=tts_provider,
+                    voice=voice,
+                ),
+                user,
+            )
+            response_payload["video_task"] = {
+                "status": str((queued.get("job") or {}).get("status") or "queued"),
+                "stage": str((queued.get("job") or {}).get("stage") or "queued"),
+                "job_id": queued["job_id"],
+                "project_id": queued["project"]["id"],
+                "poll_url": queued["poll_url"],
+                "created": bool(queued.get("created")),
+                "message": queued.get("message") or "视频已自动进入生产队列",
+            }
+            for item in outputs:
+                if item.get("platform") == "douyin":
+                    item["video_project_id"] = queued["project"]["id"]
+                    item["video_generation_job_id"] = queued["job_id"]
+        except HTTPException as exc:
+            logger.warning(
+                "AI 对话自动入队被业务门禁拒绝: topic=%s detail=%s",
+                latest_topic, exc.detail,
+            )
+            response_payload["video_task"] = {
+                "status": "blocked",
+                "stage": "queueing",
+                "message": str(exc.detail),
+            }
+        except Exception as exc:
+            logger.exception("AI 对话自动入队失败: topic=%s", latest_topic)
+            response_payload["video_task"] = {
+                "status": "queue_failed",
+                "stage": "queueing",
+                "message": f"自动建立视频任务失败：{exc}",
+            }
+    elif "douyin" in platforms:
+        response_payload["video_task"] = {
+            "status": "waiting_hook",
+            "stage": "hook_retrieval",
+            "message": workflow.get("block_reason") or "正在等待真实热点 Hook",
+        }
+    return response_payload
 
 
 @app.get("/api/hotspot-discovery-requests/{request_id}")
@@ -6632,9 +9945,16 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
                 if event.get("review_status") != "confirmed":
                     continue
                 evidence = event.get("evidence") or {}
+                source_title = str(event.get("title_zh") or event.get("title_en") or "").strip()
                 hooks.append({
                     "event_clip_id": event["id"],
-                    "title": event.get("title_zh") or event.get("title_en"),
+                    "title": evidence.get("attention_title") or hotspot_hook_copy.attention_headline(
+                        str(evidence.get("what_happened") or ""),
+                        str(evidence.get("logistics_question") or ""),
+                        source_title,
+                    ) or source_title,
+                    "attention_title": evidence.get("attention_title") or "",
+                    "source_title": source_title,
                     "description": evidence.get("what_happened") or "",
                     "asset_id": event.get("asset_id"),
                 })
@@ -6666,22 +9986,16 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
             else readiness.get("message") or "Hook 已找到，但当前素材尚不足以形成正式成片。"
         )
     if status in {"unmatched", "no_match", "failed"}:
-        fallback_readiness = _chat_video_delivery_readiness(
-            str(item.get("topic") or ""), [], chain_mode="owned_only",
-        )
-        payload["owned_fallback"] = {
-            "status": "owned_fallback" if fallback_readiness.get("delivery_ready") else "blocked",
-            "chain_mode": "owned_only",
-            "video": {
-                "status": "ready" if fallback_readiness.get("delivery_ready") else "blocked",
-                "chain_mode": "owned_only",
-                "hotspot_event_ids": [],
-                "delivery_readiness": fallback_readiness,
-            },
-            "message": fallback_readiness.get("message"),
+        payload["video"] = {
+            "status": "blocked",
+            "chain_mode": "hotspot_owned",
+            "hotspot_event_ids": [],
+            "delivery_readiness": _chat_video_delivery_readiness(
+                str(item.get("topic") or ""), [],
+            ),
         }
     payload["recovery"] = (
-        "定向采集已完成，但没有合格物流 Hook；可直接切换 Buffalo 自有素材链路"
+        "定向采集已完成，但没有合格物流 Hook；正式出片保持阻断，不切换 Buffalo 自有素材直出"
         if status in {"unmatched", "no_match", "failed"}
         else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
     )
@@ -6749,19 +10063,19 @@ def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:
 
 def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: dict) -> dict:
     """Persist the user request; planning begins only after the HTTP response."""
-    owned_only_fallback = body.chain_mode == "owned_only" and not body.hotspot_event_ids
-    ordered_events = [] if owned_only_fallback else _validated_chat_video_events(body.hotspot_event_ids)
-    readiness = _chat_video_delivery_readiness(
-        body.topic.strip(), ordered_events, chain_mode=body.chain_mode,
-    )
-    if not readiness.get("delivery_ready"):
+    if body.chain_mode == "owned_only":
         raise HTTPException(409, {
-            "message": readiness.get("message") or (
-                "当前 Buffalo 自有素材不足，无法创建直出视频项目"
-                if owned_only_fallback else "热点 Hook 未就绪，无法创建视频项目"
-            ),
-            "delivery_readiness": readiness,
+            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；不支持自有素材直出。",
+            "required": {"hotspot_video": 1},
+            "next_action": "先从热点审核台或 AI 对话结果中选择至少 1 条相关 Hook。",
         })
+    topic = video_topic_contract.normalize_topic_input(body.topic)
+    ordered_events = _validated_chat_video_events(body.hotspot_event_ids)
+    binding = _hook_binding_assessment(topic, ordered_events)
+    readiness = _chat_video_delivery_readiness(
+        topic, ordered_events, chain_mode=body.chain_mode,
+        hook_binding_mode=binding["mode"],
+    )
     try:
         tts_provider, voice = video_renderer.resolve_tts_selection(
             body.tts_provider, body.voice, strict=True,
@@ -6770,7 +10084,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         raise HTTPException(400, str(exc)) from exc
     locked_hook_ids = [int(item["id"]) for item in ordered_events]
     idempotency_key = body.idempotency_key or _chat_dual_library_idempotency_key(
-        body.topic, locked_hook_ids, body.platform, body.target_duration_ms
+        topic, locked_hook_ids, body.platform, body.target_duration_ms
     )
     existing_job = db.get_active_video_generation_job_by_idempotency(user["id"], idempotency_key)
     if existing_job:
@@ -6789,9 +10103,11 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "delivery_readiness": readiness,
         }
 
-    topic = body.topic.strip()
     brief_input = topic if len(topic) >= 3 else f"{topic}物流热点"
     logistics_nodes = _chat_video_logistics_nodes(topic, ordered_events)
+    topic_contract = video_topic_contract.build_topic_contract(
+        topic, has_event_anchor=bool(ordered_events),
+    )
     brief = db.create_topic_brief(
         _build_topic_brief_payload(TopicBriefCreateRequest(
             raw_input=brief_input,
@@ -6811,8 +10127,13 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "topic_brief_id": brief["id"],
         "matched_event_clip_ids": locked_hook_ids,
         "chain_mode": body.chain_mode,
-        "fallback_mode": "owned_only_no_matching_hook" if owned_only_fallback else None,
+        "fallback_mode": (
+            None if binding["mode"] == _HOOK_BINDING_EXACT else binding["mode"]
+        ),
+        "hook_binding_mode": binding["mode"],
+        "hook_compatibility_issues": binding["issues"],
         "logistics_nodes": logistics_nodes,
+        "topic_contract": topic_contract,
         "platform": body.platform,
         "target_duration_ms": body.target_duration_ms,
         "tts_provider": tts_provider,
@@ -6825,6 +10146,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "coverage": readiness.get("coverage") or {},
             "message": readiness.get("message"),
         },
+        "deterministic_autopilot": True,
         "pipeline": [
             "topic_brief", "hook_locking", "scripting", "project_building",
             "script_quality_check", "asset_matching", "match_quality_check",
@@ -6854,7 +10176,10 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             "topic_brief_id": brief["id"],
             "logistics_topic": brief_input,
             "logistics_nodes": logistics_nodes,
+            "topic_contract": topic_contract,
             "approved_hook_event_ids": locked_hook_ids,
+            "hook_binding_mode": binding["mode"],
+            "hook_compatibility_issues": binding["issues"],
         },
         "scenes": [],
     }
@@ -6871,12 +10196,6 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
                 job["id"], "hooks_locked", "已锁定聊天匹配的热点 Hook",
                 {"hook_event_ids": locked_hook_ids, "topic_brief_id": brief["id"]},
             )
-        else:
-            db.add_video_generation_event(
-                job["id"], "owned_only_fallback",
-                "未匹配到相关 Hook，已切换 Buffalo 自有素材直出",
-                {"topic_brief_id": brief["id"], "fallback_mode": "owned_only_no_matching_hook"},
-            )
     db.add_audit_log(
         user["id"], user["username"], "generate_chat_dual_library_video",
         target=project["id"],
@@ -6892,9 +10211,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "poll_url": f"/api/video-generation/jobs/{job['id']}",
         "status": "queued",
         "message": (
-            "未匹配到相关 Hook，视频项目已创建；将按 Buffalo 自有素材自适应规划并后台生产"
-            if owned_only_fallback
-            else "视频项目已创建；将按现有库存自适应规划并后台生产"
+            "视频项目已创建；将按现有库存自适应规划并后台生产"
             if adapted
             else "视频生成任务已创建，脚本规划和质检将在后台串行执行"
         ),
@@ -6912,12 +10229,18 @@ async def get_chat_dual_library_video_readiness(
     if not event or not _is_confirmed_renderable_hotspot_hook(event):
         raise HTTPException(409, "匹配的热点 Hook 已失效，请重新选择可播放 Hook。")
     event = _with_soft_logistics_bridge(event)
-    readiness = _chat_video_delivery_readiness(str(topic or "").strip(), [event])
+    normalized_topic = video_topic_contract.normalize_topic_input(topic)
+    binding = _hook_binding_assessment(normalized_topic, [event])
+    readiness = _chat_video_delivery_readiness(
+        normalized_topic, [event], hook_binding_mode=binding["mode"],
+    )
     return {
         "status": "ready" if readiness.get("delivery_ready") else "blocked",
         "chain_mode": "hotspot_owned",
         "hotspot_event_ids": [int(event["id"])],
         "source_asset_id": int(event["asset_id"]),
+        "hook_binding_mode": binding["mode"],
+        "compatibility_issues": binding["issues"],
         "delivery_readiness": readiness,
     }
 
