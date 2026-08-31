@@ -3901,8 +3901,15 @@ def get_render_job(job_id: str) -> dict | None:
 
 
 def update_render_job(job_id: str, **fields):
-    allowed = {"status", "stage", "progress", "output_path", "error", "clips", "quality_report", "voice", "script"}
+    allowed = {
+        "status", "stage", "progress", "output_path", "error", "clips",
+        "quality_report", "voice", "script", "created_at",
+    }
     values = {key: value for key, value in fields.items() if key in allowed}
+    if str(values.get("status") or "") in {"pending", "running"} and "created_at" not in values:
+        # Timeout cleanup keys off created_at. A retry of the same job_id must
+        # not inherit the first attempt's clock or it is killed immediately.
+        values["created_at"] = video_state.utc_now_sql()
     for key in ("clips", "quality_report", "script"):
         if key in values and not isinstance(values[key], str):
             values[key] = json.dumps(values[key], ensure_ascii=False)

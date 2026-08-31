@@ -1651,6 +1651,19 @@ def _quality_report(
 RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT_SECONDS", "900"))
 
 
+def _format_render_error(exc: BaseException) -> str:
+    """Keep ffmpeg stderr, not just the truncated argv list."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = exc.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        stderr = " ".join(str(stderr).split())[-400:]
+        return f"FFmpeg 退出码 {exc.returncode}" + (f"：{stderr}" if stderr else "")
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"FFmpeg 超时 {int(exc.timeout or 0)} 秒"
+    return str(exc)
+
+
 def cleanup_stale_jobs():
     """清理卡住的渲染任务：running 超过 5 分钟的杀进程组并标 canceled，pending 超过 10 分钟的标 failed。
 
@@ -2241,4 +2254,6 @@ def render_job(
         output.unlink(missing_ok=True)
         db.update_render_job(job_id, status="canceled", stage="已取消", error=None)
     except Exception as exc:
-        db.update_render_job(job_id, status="failed", stage="渲染失败", error=str(exc)[:500])
+        detail = _format_render_error(exc)
+        db.update_render_job(job_id, status="failed", stage="渲染失败", error=detail[:500])
+        raise RuntimeError(detail) from exc

@@ -278,3 +278,17 @@ def test_revision_payload_update_does_not_force_generating_for_terminal_job(tmp_
     assert loaded["status"] == "draft"
     assert loaded["artifact_status"] == "absent"
     assert loaded["active_job_id"] == job["id"]
+
+
+def test_update_render_job_resets_timeout_clock_on_retry(tmp_db):
+    user_id = _user(tmp_db)
+    tmp_db.create_render_job("retry-render", {"scenes": []}, "冰糖", user_id)
+    with tmp_db.get_conn() as conn:
+        conn.execute(
+            "UPDATE video_render_jobs SET created_at='2020-01-01 00:00:00', status='failed' WHERE id=?",
+            ("retry-render",),
+        )
+    tmp_db.update_render_job("retry-render", status="pending", stage="等待渲染", error=None)
+    job = tmp_db.get_render_job("retry-render")
+    assert job["status"] == "pending"
+    assert not str(job["created_at"]).startswith("2020-01-01")

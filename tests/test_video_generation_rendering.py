@@ -608,3 +608,15 @@ def test_scene_command_portrait_source_uses_the_same_content_preserving_policy(m
     assert "overlay=(W-w)/2:(H-h)/2" in fc
     assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
     assert "crop=1080:1920:exact=1" in fc
+
+
+def test_format_render_error_keeps_ffmpeg_stderr():
+    import subprocess
+    import video_renderer
+
+    exc = subprocess.CalledProcessError(
+        1, ["ffmpeg", "-y"], stderr=b"Error opening input file missing.mp4\n",
+    )
+    text = video_renderer._format_render_error(exc)
+    assert "FFmpeg 退出码 1" in text
+    assert "missing.mp4" in text
