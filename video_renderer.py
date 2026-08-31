@@ -123,6 +123,7 @@ MIN_FOOTAGE_TO_NARRATION_RATIO = 0.5
 # A completed sentence may breathe briefly, but multi-second silent tails make
 # otherwise-grounded real footage look stalled and lower the audio QA result.
 MAX_TRAILING_NARRATION_GAP_SECONDS = 0.75
+NARRATION_TAIL_GAP_GATE_SECONDS = 0.9
 TTS_MAX_ATTEMPTS = 3
 TTS_RETRY_DELAY_SECONDS = 1.0
 _MINIMAX_TTS_REQUEST_LOCK = threading.Lock()
@@ -275,6 +276,14 @@ def formal_scene_bounds(target_duration_ms: int, *, adapted: bool = False) -> tu
     if int(target_duration_ms) >= FORMAL_MIN_DURATION_MS:
         return FORMAL_MIN_SCENES, FORMAL_MAX_SCENES
     return 4, 8
+
+
+def scene_uses_cta_timing(scene: dict) -> bool:
+    """True only for the real brand CTA. Mid-film text cards follow speech length."""
+    source = str(scene.get("asset_source") or "")
+    if source in video_state.TEXT_CARD_SOURCES:
+        return False
+    return bool(str(scene.get("brand_endcard_path") or "").strip())
 
 
 def resolve_render_endcard_rel(scene: dict) -> str:
@@ -1571,10 +1580,13 @@ def scene_render_duration(
     planned = max(0.0, float(planned_duration))
     speech = max(0.0, float(speech_duration))
     required = speech + max(0.0, float(breathing_room))
+    gate = max(float(breathing_room), float(NARRATION_TAIL_GAP_GATE_SECONDS))
     if is_brand_endcard or preserve_planned_duration:
-        return round(max(planned, required), 3)
+        # CTA may keep a readable hold, but never a silent tail the gate rejects.
+        return round(max(required, min(max(planned, required), speech + gate)), 3)
     capped = min(planned, speech + max(float(breathing_room), float(max_trailing_gap)))
-    return round(max(1.0, required, capped), 3)
+    floor = min(1.0, speech + gate)
+    return round(max(floor, required, min(capped, speech + gate)), 3)
 
 
 def _audio_tempo_command(ffmpeg: str, source: Path, output: Path, factor: float) -> list[str]:
@@ -1840,7 +1852,7 @@ def render_job(
                     "audio_seconds_after": round(speech_duration, 3),
                     "removed_seconds": round(max(0.0, original_duration - speech_duration), 3),
                 })
-            if preserve_planned_duration and not bool(scene.get("brand_endcard_path")):
+            if preserve_planned_duration and not scene_uses_cta_timing(scene):
                 slowdown = tts_slowdown_factor(
                     speech_duration,
                     float(scene["duration"]),
@@ -1866,7 +1878,7 @@ def render_job(
             # 永不截断旁白。短旁白不再被原计划镜头强行拉成数秒静音尾部。
             duration = scene_render_duration(
                 float(scene["duration"]), speech_duration,
-                is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                is_brand_endcard=scene_uses_cta_timing(scene),
                 # Formal output keeps its 50–90s promise at the whole-video
                 # timeline.  Preserving every planned beat separately caused
                 # 2–4s of silence after short TTS lines.
@@ -1989,7 +2001,7 @@ def render_job(
                     speech_duration = _probe_media(ffprobe, wav)["duration"]
                     duration = scene_render_duration(
                         float(scene["duration"]), speech_duration,
-                        is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                        is_brand_endcard=scene_uses_cta_timing(scene),
                         preserve_planned_duration=False,
                     )
                     audio_tempo_adjustments.append({
@@ -2016,7 +2028,7 @@ def render_job(
                         speech_duration = _probe_media(ffprobe, wav)["duration"]
                         duration = scene_render_duration(
                             float(scene["duration"]), speech_duration,
-                            is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                            is_brand_endcard=scene_uses_cta_timing(scene),
                             preserve_planned_duration=False,
                         )
                 if available_seconds + 0.12 < duration:
@@ -2211,7 +2223,7 @@ def render_job(
             "transition_audio_video_sync": report["transition_audio_sync"]["passed"],
             "tts_audio_unique": bool(tts_audio_uniqueness.get("passed")),
             "narration_tail_gap_controlled": all(
-                float(item.get("tail_gap_seconds") or 0) <= 0.9
+                float(item.get("tail_gap_seconds") or 0) <= NARRATION_TAIL_GAP_GATE_SECONDS
                 for item in narration_tail_gaps
             ),
             "production_duration_50_90s": (
@@ -2238,7 +2250,12 @@ def render_job(
                               "url": "/static/" + clip_rel.as_posix(), "filename": clip_rel.name,
                               "quality_report": clip_report, "quality_status": clip_report["status"]})
         if report["status"] != "passed":
-            raise RuntimeError("视频质量门禁未通过：" + "、".join(key for key, ok in report["checks"].items() if not ok))
+            failed = [key for key, ok in report["checks"].items() if not ok]
+            db.update_render_job(
+                job_id, status="failed", stage="质量检查未通过",
+                quality_report=report, error="视频质量门禁未通过：" + "、".join(failed),
+            )
+            raise RuntimeError("视频质量门禁未通过：" + "、".join(failed))
         report["clip_refs"] = used_clip_refs
         # 批13 D3 复用治理：渲染成功后记录本次实际用到的素材（含 za_stock），
         # 供 _owned_candidates 的使用惩罚/冷却降权，避免老素材霸榜。
@@ -2253,7 +2270,14 @@ def render_job(
     except RenderCanceled:
         output.unlink(missing_ok=True)
         db.update_render_job(job_id, status="canceled", stage="已取消", error=None)
+    except RuntimeError:
+        raise
     except Exception as exc:
         detail = _format_render_error(exc)
-        db.update_render_job(job_id, status="failed", stage="渲染失败", error=detail[:500])
+        extras = {}
+        if "report" in locals() and isinstance(report, dict) and report.get("checks"):
+            extras["quality_report"] = report
+        db.update_render_job(
+            job_id, status="failed", stage="渲染失败", error=detail[:500], **extras,
+        )
         raise RuntimeError(detail) from exc

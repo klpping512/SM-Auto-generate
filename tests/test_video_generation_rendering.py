@@ -160,9 +160,18 @@ def test_scene_render_duration_caps_silent_tail_without_cutting_speech():
     import video_renderer
 
     assert video_renderer.scene_render_duration(7.0, 4.16) == 4.91
-    assert video_renderer.scene_render_duration(7.0, 4.16, preserve_planned_duration=True) == 7.0
+    assert video_renderer.scene_render_duration(7.0, 4.16, preserve_planned_duration=True) == 5.06
     assert video_renderer.scene_render_duration(2.0, 0.96) == 1.71
     assert video_renderer.scene_render_duration(3.0, 3.84, is_brand_endcard=True) == 4.19
+    assert video_renderer.scene_render_duration(8.0, 3.0, is_brand_endcard=True) == 3.9
+    assert video_renderer.scene_uses_cta_timing({
+        "brand_endcard_path": "uploads/brand-endcards/buffalo-cape-town-van.png",
+        "asset_source": "diversity_text_card",
+    }) is False
+    assert video_renderer.scene_uses_cta_timing({
+        "brand_endcard_path": "uploads/brand-endcards/buffalo-cape-town-van.png",
+        "scene_role": "brand_endcard",
+    }) is True
 
 
 def test_clip_source_command_preserves_real_scene_audio_for_narration_gaps(tmp_path):
