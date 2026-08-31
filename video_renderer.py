@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 import asset_taxonomy
 import database as db
 from video_clip_refs import ClipReferenceError, resolve_clip_ref
+import video_state
 
 logger = logging.getLogger(__name__)
 from video_composition_policy import (
@@ -276,6 +277,24 @@ def formal_scene_bounds(target_duration_ms: int, *, adapted: bool = False) -> tu
     return 4, 8
 
 
+def resolve_render_endcard_rel(scene: dict) -> str:
+    """Return a usable brand-card path for CTA or diversity text-card scenes."""
+    endcard_rel = str(scene.get("brand_endcard_path") or "").strip()
+    if endcard_rel:
+        return endcard_rel
+    asset_source = str(scene.get("asset_source") or "")
+    if (
+        bool(scene.get("brand_endcard_fallback"))
+        or asset_source in video_state.TEXT_CARD_SOURCES
+        or (
+            str(scene.get("evidence_type") or "") == "brand_endcard"
+            and not scene.get("asset_id")
+        )
+    ):
+        return video_state.DEFAULT_BRAND_ENDCARD_PATH
+    return ""
+
+
 class RenderCanceled(RuntimeError):
     """Raised when a running render is canceled cooperatively."""
 
@@ -516,6 +535,8 @@ def normalize_script(
             "asset_end_ms": asset_end_ms,
             "event_clip_id": event_clip_id,
             "brand_endcard_path": str(raw.get("brand_endcard_path") or "")[:240],
+            "asset_source": str(raw.get("asset_source") or "")[:40],
+            "brand_endcard_fallback": bool(raw.get("brand_endcard_fallback")),
             "flow_role": str(raw.get("flow_role") or "")[:32],
             "copy_anchor": str(raw.get("copy_anchor") or "")[:120],
             "action_key": str(raw.get("action_key") or "")[:120],
@@ -1844,7 +1865,9 @@ def render_job(
             asset_id = scene.get("asset_id")
             asset = None
             clip_ref = None
-            endcard_rel = str(scene.get("brand_endcard_path") or "")
+            endcard_rel = resolve_render_endcard_rel(scene)
+            if endcard_rel:
+                scene["brand_endcard_path"] = endcard_rel
             animate_image = False
             if is_explanation_scene(scene):
                 raise ValueError("信息图、流程图和 PPT 卡片已禁用；请补充真实热点 Hook 或 Buffalo 自有素材")

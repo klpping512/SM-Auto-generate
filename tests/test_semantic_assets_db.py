@@ -256,3 +256,39 @@ def test_pending_asset_batch_excludes_running_jobs(tmp_db):
     assert tmp_db.recover_interrupted_asset_processing_jobs() == 1
     assert tmp_db.list_pending_asset_processing_job_ids() == []
     assert [item["id"] for item in tmp_db.list_assets_needing_processing()] == [asset_id]
+
+
+def test_owned_video_matching_segments_sample_each_parent(tmp_db):
+    first = _create_parent_asset(tmp_db)
+    second = tmp_db.create_asset({
+        "name": "开普敦仓内分拣",
+        "filepath": "assets/library/video/cape-town.mp4",
+        "file_type": "video",
+        "category": "warehouse",
+        "duration": 20.0,
+        "width": 1080,
+        "height": 1920,
+        "size": 2048,
+        "thumbnail": "assets/thumbnails/cape-town.jpg",
+        "sha256": "cape-town-sha256",
+        "source": "upload",
+        "status": "active",
+        "created_by": None,
+    })
+    for asset_id in (first, second):
+        for index in range(5):
+            tmp_db.create_asset_segment({
+                "asset_id": asset_id,
+                "segment_index": index,
+                "start_ms": index * 1000,
+                "end_ms": (index + 1) * 1000,
+                "status": "active",
+                "processing_version": "v1",
+            })
+    picked = tmp_db.list_owned_video_matching_segments(per_parent=2, limit=20)
+    by_parent: dict[int, int] = {}
+    for item in picked:
+        by_parent[int(item["asset_id"])] = by_parent.get(int(item["asset_id"]), 0) + 1
+    assert by_parent[first] == 2
+    assert by_parent[second] == 2
+    assert all(item.get("asset_file_type") == "video" for item in picked)

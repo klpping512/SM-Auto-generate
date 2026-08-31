@@ -294,6 +294,127 @@ def test_duplicate_sequence_degrades_to_text_card_when_no_alternate():
     assert scenes[0]["asset_source"] == "diversity_text_card"
     assert rematch["inventory_limited"] is True
     assert rematch["quality_hold"] is False
+    assert scenes[0]["brand_endcard_path"] == video_state.DEFAULT_BRAND_ENDCARD_PATH
+    assert video_generation.scene_has_renderable_visual(scenes[0]) is True
+
+
+def test_duplicate_sequence_uses_unused_inventory_pool_before_text_card():
+    import video_generation
+    import video_state
+
+    scenes = [
+        {"evidence_type": "owned_video", "asset_id": 1, "asset_segment_id": 10, "asset_start_ms": 0, "asset_end_ms": 5000},
+        {"evidence_type": "owned_video", "asset_id": 2, "asset_segment_id": 20, "asset_start_ms": 0, "asset_end_ms": 5000},
+        {"evidence_type": "brand_endcard", "scene_role": "brand_endcard", "brand_endcard_path": video_state.DEFAULT_BRAND_ENDCARD_PATH},
+    ]
+    original = video_state.scene_asset_signature(scenes)
+    rematch = video_generation.diversify_repeated_asset_sequence(
+        scenes,
+        [original],
+        unused_pool=[{
+            "asset_id": 99, "asset_segment_id": 990,
+            "asset_start_ms": 0, "asset_end_ms": 4000,
+            "asset_source": "owned_rematch_pool",
+        }],
+    )
+    assert rematch["rematch_applied"] is True
+    assert rematch["strategy"] == "unused_inventory_pool"
+    assert rematch["signature"] != original
+    assert scenes[1]["asset_id"] == 99
+    assert scenes[1]["asset_source"] == "owned_rematch_pool"
+    assert scenes[0]["asset_id"] == 1
+    assert rematch["quality_hold"] is False
+
+
+def test_duplicate_sequence_drops_extra_scene_before_hollow_text_card():
+    import video_generation
+    import video_state
+
+    scenes = [
+        {"evidence_type": "owned_video", "asset_id": index, "asset_segment_id": index * 10,
+         "asset_start_ms": 0, "asset_end_ms": 5000, "scene": index}
+        for index in range(1, 6)
+    ]
+    scenes.append({
+        "evidence_type": "brand_endcard",
+        "scene_role": "brand_endcard",
+        "brand_endcard_path": video_state.DEFAULT_BRAND_ENDCARD_PATH,
+        "scene": 6,
+    })
+    original = video_state.scene_asset_signature(scenes)
+    rematch = video_generation.diversify_repeated_asset_sequence(
+        scenes, [original], min_content_scenes=4,
+    )
+    assert rematch["rematch_applied"] is True
+    assert rematch["strategy"] == "drop_extra_scene"
+    assert rematch["signature"] != original
+    assert len(scenes) == 5
+    assert scenes[-1]["scene_role"] == "brand_endcard"
+    assert [item["asset_id"] for item in scenes[:-1]] == [1, 2, 3, 4]
+    assert rematch["quality_hold"] is False
+    assert all(item.get("asset_source") != "diversity_text_card" for item in scenes)
+
+
+def test_ensure_renderable_scenes_fills_hollow_text_card_path():
+    import video_generation
+    import video_state
+
+    scenes = [{
+        "evidence_type": "brand_endcard",
+        "asset_source": "diversity_text_card",
+        "brand_endcard_fallback": True,
+        "asset_id": None,
+        "scene": 10,
+    }]
+    assert video_generation.scene_has_renderable_visual(scenes[0]) is False
+    assert video_generation.ensure_renderable_scenes(scenes) == 1
+    assert scenes[0]["brand_endcard_path"] == video_state.DEFAULT_BRAND_ENDCARD_PATH
+    assert video_generation.scene_has_renderable_visual(scenes[0]) is True
+
+
+def test_renderer_uses_default_endcard_for_hollow_text_card():
+    import video_renderer
+    import video_state
+
+    rel = video_renderer.resolve_render_endcard_rel({
+        "asset_id": None,
+        "brand_endcard_path": "",
+        "asset_source": "diversity_text_card",
+        "brand_endcard_fallback": True,
+        "evidence_type": "brand_endcard",
+    })
+    assert rel == video_state.DEFAULT_BRAND_ENDCARD_PATH
+    assert video_renderer.resolve_render_endcard_rel({
+        "asset_id": 121,
+        "evidence_type": "owned_video",
+    }) == ""
+
+
+def test_unused_pool_upgrades_hollow_text_card():
+    import video_generation
+    import video_state
+
+    scenes = [
+        {"evidence_type": "owned_video", "asset_id": 1, "asset_segment_id": 10, "asset_start_ms": 0, "asset_end_ms": 5000},
+        {
+            "evidence_type": "brand_endcard",
+            "asset_source": "diversity_text_card",
+            "brand_endcard_fallback": True,
+            "asset_id": None,
+            "scene": 2,
+        },
+        {"evidence_type": "brand_endcard", "scene_role": "brand_endcard", "brand_endcard_path": video_state.DEFAULT_BRAND_ENDCARD_PATH},
+    ]
+    original = video_state.scene_asset_signature(scenes)
+    rematch = video_generation.diversify_repeated_asset_sequence(
+        scenes,
+        [original],
+        unused_pool=[{"asset_id": 77, "asset_segment_id": 770, "asset_start_ms": 0, "asset_end_ms": 4000}],
+    )
+    assert rematch["strategy"] == "unused_inventory_pool"
+    assert scenes[1]["asset_id"] == 77
+    assert scenes[1]["evidence_type"] == "owned_video"
+    assert scenes[1]["brand_endcard_fallback"] is False
 
 
 def test_custom_topic_opening_hook_is_a_complete_sentence():

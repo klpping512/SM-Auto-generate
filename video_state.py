@@ -17,6 +17,8 @@ _ACTIVE_VIDEO_JOB_STATUSES = ("pending", "running", "cancel_requested")
 _GENERATING_VIDEO_JOB_STATUSES = ("pending", "running", "cancel_requested")
 _ENDCARD_ROLES = {"brand_endcard", "brand_close", "cta"}
 _ENDCARD_TYPES = {"brand_endcard"}
+DEFAULT_BRAND_ENDCARD_PATH = "uploads/brand-endcards/buffalo-cape-town-van.png"
+TEXT_CARD_SOURCES = {"text_card_fallback", "diversity_text_card"}
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -215,7 +217,7 @@ def scene_asset_token(scene: dict | None) -> str:
     role = str(scene.get("scene_role") or "")
     evidence = str(scene.get("evidence_type") or "")
     source = str(scene.get("asset_source") or "")
-    if source in {"text_card_fallback", "diversity_text_card"}:
+    if source in TEXT_CARD_SOURCES:
         return f"textcard:{source}:{scene.get('scene') or ''}:{scene.get('duration_ms') or 0}"
     if role in _ENDCARD_ROLES or evidence in _ENDCARD_TYPES:
         return ""

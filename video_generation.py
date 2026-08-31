@@ -865,6 +865,13 @@ async def run_claimed_job(
 
 
 def _scene_is_locked_visual(scene: dict) -> bool:
+    """True for real CTA / hotspot clips that rematch must not steal.
+
+    Hollow text cards are rematchable so unused Buffalo footage can replace them.
+    """
+    source = str(scene.get("asset_source") or "")
+    if source in video_state.TEXT_CARD_SOURCES:
+        return False
     evidence = str(scene.get("evidence_type") or "")
     role = str(scene.get("scene_role") or "")
     return (
@@ -875,16 +882,48 @@ def _scene_is_locked_visual(scene: dict) -> bool:
     )
 
 
+def _content_scene_indexes(scenes: list[dict]) -> list[int]:
+    indexes = []
+    for index, scene in enumerate(scenes):
+        role = str(scene.get("scene_role") or "")
+        evidence = str(scene.get("evidence_type") or "")
+        source = str(scene.get("asset_source") or "")
+        if role in {"brand_cta", "brand_endcard", "brand_close", "cta"} and source not in video_state.TEXT_CARD_SOURCES:
+            continue
+        if evidence == "brand_endcard" and source not in video_state.TEXT_CARD_SOURCES:
+            continue
+        indexes.append(index)
+    return indexes
+
+
+def _reindex_scenes(scenes: list[dict]) -> None:
+    for index, scene in enumerate(scenes, 1):
+        scene["scene"] = index
+
+
+def _scene_is_real_cta(scene: dict) -> bool:
+    role = str(scene.get("scene_role") or "")
+    source = str(scene.get("asset_source") or "")
+    return (
+        role in {"brand_cta", "brand_endcard", "brand_close", "cta"}
+        and source not in video_state.TEXT_CARD_SOURCES
+    )
+
+
 def diversify_repeated_asset_sequence(
     scenes: list[dict],
     recent_signatures: list[str],
     *,
     alternate_segments: dict[int, list[dict]] | None = None,
+    unused_pool: list[dict] | None = None,
+    min_content_scenes: int = 4,
 ) -> dict:
     """Rematch or explicitly degrade when the owned sequence repeats a recent job.
 
     ``alternate_segments`` maps scene index to candidate dicts with
     ``asset_id`` / ``asset_segment_id`` / optional timing and score fields.
+    ``unused_pool`` is extra unused Buffalo footage from the whole inventory,
+    not just the current scene's semantic top-k.
     """
     recent = {item for item in recent_signatures if item}
     signature = video_state.scene_asset_signature(scenes)
@@ -915,15 +954,14 @@ def diversify_repeated_asset_sequence(
         if segment_id > 0:
             used_segments.add(segment_id)
 
-    for index, scene in enumerate(scenes):
-        if _scene_is_locked_visual(scene):
-            continue
+    def _try_alts(index: int, alts: list[dict]) -> bool:
+        scene = scenes[index]
         current_segment = 0
         try:
             current_segment = int(scene.get("asset_segment_id") or 0)
         except (TypeError, ValueError):
             current_segment = 0
-        for alt in (alternate_segments or {}).get(index) or []:
+        for alt in alts:
             try:
                 alt_asset = int(alt.get("asset_id") or 0)
                 alt_segment = int(alt.get("asset_segment_id") or alt.get("segment_id") or 0)
@@ -949,11 +987,21 @@ def diversify_repeated_asset_sequence(
                 "asset_end_ms": alt.get("asset_end_ms", alt.get("end_ms", scene.get("asset_end_ms"))),
                 "match_score": alt.get("match_score", scene.get("match_score")),
                 "match_reasons": alt.get("reasons") or alt.get("match_reasons") or ["近 20 条序列重复，已更换未使用镜头"],
-                "asset_source": alt.get("asset_source") or scene.get("asset_source") or "owned_rematch",
+                "asset_source": alt.get("asset_source") or "owned_rematch",
+                "evidence_type": "owned_video",
+                "event_clip_id": None,
+                "brand_endcard_path": "",
+                "brand_endcard_fallback": False,
             })
             used_assets.add(alt_asset)
             used_segments.add(alt_segment)
-            current_segment = alt_segment
+            return True
+        return False
+
+    for index, scene in enumerate(scenes):
+        if _scene_is_locked_visual(scene):
+            continue
+        if _try_alts(index, list((alternate_segments or {}).get(index) or [])):
             result["rematch_applied"] = True
             result["strategy"] = "alternate_segment"
             signature = video_state.scene_asset_signature(scenes)
@@ -961,7 +1009,39 @@ def diversify_repeated_asset_sequence(
                 result["signature"] = signature
                 result["notes"].append("近 20 条完整素材序列重复，已重新选片")
                 return result
+
+    for index in range(len(scenes) - 1, -1, -1):
+        if _scene_is_locked_visual(scenes[index]):
+            continue
+        if _try_alts(index, list(unused_pool or [])):
+            result["rematch_applied"] = True
+            result["strategy"] = "unused_inventory_pool"
+            signature = video_state.scene_asset_signature(scenes)
+            if signature not in recent:
+                result["signature"] = signature
+                result["notes"].append("近 20 条完整素材序列重复，已改用库存中未占用镜头")
+                return result
+
+    floor = max(4, int(min_content_scenes or 4))
+    while len(_content_scene_indexes(scenes)) > floor:
+        drop_at = None
+        for index in range(len(scenes) - 1, -1, -1):
+            if _scene_is_locked_visual(scenes[index]) or _scene_is_real_cta(scenes[index]):
+                continue
+            drop_at = index
             break
+        if drop_at is None:
+            break
+        scenes.pop(drop_at)
+        _reindex_scenes(scenes)
+        result["rematch_applied"] = True
+        result["strategy"] = "drop_extra_scene"
+        result["inventory_limited"] = True
+        signature = video_state.scene_asset_signature(scenes)
+        result["signature"] = signature
+        if signature not in recent:
+            result["notes"].append("近 20 条序列重复，已删掉无法差异化的多余分镜并继续出片")
+            return result
 
     for index in range(len(scenes) - 1, -1, -1):
         scene = scenes[index]
@@ -975,7 +1055,7 @@ def diversify_repeated_asset_sequence(
         signature = video_state.scene_asset_signature(scenes)
         result["signature"] = signature
         if signature not in recent:
-            result["notes"].append("近 20 条序列重复且无可用替代镜头，已降级为文字卡")
+            result["notes"].append("近 20 条序列重复且无可用替代镜头，已降级为可渲染文字卡")
             return result
 
     result["inventory_limited"] = True
@@ -992,9 +1072,19 @@ def _apply_text_card_fallback(scene: dict, index: int, reason: str) -> dict:
         "asset_segment_id": None,
         "event_clip_id": None,
         "evidence_type": "brand_endcard",
-        "scene_role": scene.get("scene_role") or "owned_context_image",
-        "asset_source": "text_card_fallback",
+        "scene_role": (
+            "owned_context_image"
+            if str(scene.get("scene_role") or "") in {
+                "logistics_explainer", "explanation", "infographic", "info_card", "presentation", ""
+            }
+            else (scene.get("scene_role") or "owned_context_image")
+        ),
+        "asset_source": scene.get("asset_source") or "text_card_fallback",
         "brand_endcard_fallback": True,
+        "brand_endcard_path": (
+            str(scene.get("brand_endcard_path") or "").strip()
+            or video_state.DEFAULT_BRAND_ENDCARD_PATH
+        ),
         "match_score": 40,
         "match_reasons": [reason],
         "cooldown": False,
@@ -1010,6 +1100,77 @@ def _apply_text_card_fallback(scene: dict, index: int, reason: str) -> dict:
         "usage_count": 0,
         "cooldown": False,
     }
+
+
+def scene_has_renderable_visual(scene: dict) -> bool:
+    if str(scene.get("brand_endcard_path") or "").strip():
+        return True
+    if str(scene.get("asset_source") or "") in video_state.TEXT_CARD_SOURCES:
+        return False
+    try:
+        if int(scene.get("asset_id") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if int(scene.get("event_clip_id") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+def ensure_renderable_scenes(scenes: list[dict]) -> int:
+    """Guarantee every beat has a file the renderer can open."""
+    repaired = 0
+    for index, scene in enumerate(scenes):
+        if scene_has_renderable_visual(scene):
+            continue
+        _apply_text_card_fallback(scene, index, "分镜缺少可渲染素材，已补品牌文字卡")
+        repaired += 1
+    return repaired
+
+
+def _build_unused_owned_segment_pool(
+    segments: list[dict],
+    used_owned_asset_ids: set[int],
+    used_segment_ids: set[int],
+    usage_counts: dict[str, int],
+    *,
+    limit: int = 40,
+) -> list[dict]:
+    """One unused owned-video parent at a time, from the full matching inventory."""
+    pool: list[dict] = []
+    seen_parents = set(used_owned_asset_ids)
+    for item in segments:
+        try:
+            asset_id = int(item.get("asset_id") or 0)
+            segment_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if asset_id <= 0 or segment_id <= 0:
+            continue
+        if item.get("asset_hotspot_id"):
+            continue
+        if str(item.get("asset_file_type") or "video") != "video":
+            continue
+        if asset_id in seen_parents or segment_id in used_segment_ids:
+            continue
+        if _asset_is_cooled(asset_id, usage_counts):
+            continue
+        pool.append({
+            "asset_id": asset_id,
+            "asset_segment_id": segment_id,
+            "asset_start_ms": item.get("start_ms"),
+            "asset_end_ms": item.get("end_ms"),
+            "match_score": 62,
+            "reasons": ["近 20 条序列重复，改用库存中未占用的 Buffalo 镜头"],
+            "asset_source": "owned_rematch_pool",
+        })
+        seen_parents.add(asset_id)
+        if len(pool) >= limit:
+            break
+    return pool
 
 
 def _asset_is_cooled(asset_id, usage_counts: dict[str, int], *, limit: int = 3) -> bool:
@@ -1351,10 +1512,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         # Prefer dynamic Buffalo clips.  When the inventory cannot provide a
         # unique video segment, a unique owned still is the deterministic
         # availability fallback explicitly allowed by the production policy.
-        segments = [
-            item for item in await asyncio.to_thread(db.list_asset_segments, None, "active", 1000)
-            if not item.get("asset_hotspot_id") and item.get("asset_file_type") == "video"
-        ]
+        segments = await asyncio.to_thread(db.list_owned_video_matching_segments, 8, 2000)
         assignments = semantic_matching.assign_candidates(
             atoms,
             segments,
@@ -1633,8 +1791,27 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     })
                 if alts:
                     alternate_segments[index] = alts
+            unused_pool = _build_unused_owned_segment_pool(
+                segments, used_owned_asset_ids, used_segment_ids, usage_counts,
+            )
+            adapted = bool((script.get("adaptation") or {}).get("adapted"))
+            try:
+                target_ms = int(
+                    script.get("duration_target_ms")
+                    or job.get("target_duration_ms")
+                    or 60_000
+                )
+            except (TypeError, ValueError):
+                target_ms = 60_000
+            min_content_scenes, _ = video_renderer.formal_scene_bounds(
+                target_ms, adapted=adapted,
+            )
             rematch = diversify_repeated_asset_sequence(
-                scenes, recent_signatures, alternate_segments=alternate_segments,
+                scenes,
+                recent_signatures,
+                alternate_segments=alternate_segments,
+                unused_pool=unused_pool,
+                min_content_scenes=min_content_scenes,
             )
             signature = rematch["signature"]
             script["scenes"] = scenes
@@ -1648,6 +1825,38 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 })
             if rematch.get("quality_hold"):
                 report["quality_hold_reason"] = "asset_sequence_exhausted"
+        repaired = ensure_renderable_scenes(scenes)
+        if rematch.get("rematch_applied") or repaired:
+            script["scenes"] = scenes
+            signature = video_state.scene_asset_signature(scenes)
+            refreshed = []
+            for index, scene in enumerate(scenes):
+                source = str(scene.get("asset_source") or "")
+                refreshed.append({
+                    "scene": index + 1,
+                    "score": int(scene.get("match_score") or 70),
+                    "hard_failures": [],
+                    "issues": list(scene.get("match_reasons") or [])[:4],
+                    "asset_id": scene.get("asset_id"),
+                    "library_origin": (
+                        "text_card_fallback"
+                        if source in video_state.TEXT_CARD_SOURCES
+                        else scene.get("library_origin") or "owned"
+                    ),
+                    "usage_count": scene.get("usage_count") or 0,
+                    "cooldown": bool(scene.get("cooldown")),
+                })
+            scene_reports = refreshed + [
+                item for item in scene_reports if item.get("scene") == "全片"
+            ]
+            if repaired:
+                scene_reports.append({
+                    "scene": "全片",
+                    "score": 70,
+                    "hard_failures": [],
+                    "issues": [f"已为 {repaired} 个缺素材分镜补上可渲染品牌文字卡"],
+                })
+                inventory_limited = True
         usage = source_usage_report(scenes)
         if not usage["passed"]:
             # Repeated source is a quality hold, not a reason to discard an already

@@ -4739,6 +4739,47 @@ def list_asset_segments(asset_id: int | None = None, status: str = "active", lim
         return items
 
 
+def list_owned_video_matching_segments(per_parent: int = 8, limit: int = 2000) -> list[dict]:
+    """Return a parent-diverse owned-video slice for production matching.
+
+    ``list_asset_segments(..., limit=1000)`` is ordered by asset_id and will
+    starve later Buffalo parents when a few early videos have hundreds of
+    segments. Matching then keeps recycling the same 8 clips until rematch
+    degrades to a hollow text card.
+    """
+    per_parent = max(1, min(int(per_parent or 8), 24))
+    cap = max(per_parent, min(int(limit or 2000), 20_000))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT s.*,a.name AS asset_name,a.filepath AS asset_filepath,
+                      a.file_type AS asset_file_type,a.hotspot_id AS asset_hotspot_id,a.source AS asset_source,
+                      a.category AS asset_category,
+                      a.rights_status AS asset_rights_status,a.source_url AS asset_source_url,
+                      a.attribution AS asset_attribution,a.license AS asset_license,
+                      a.deprecated AS asset_deprecated,
+                      a.usage_count AS asset_usage_count,a.last_used_at AS asset_last_used_at,
+                      a.event_at,a.created_at AS asset_created_at
+               FROM asset_segments s JOIN assets a ON a.id=s.asset_id
+               WHERE s.status='active' AND a.status='active'
+                 AND a.file_type='video'
+                 AND IFNULL(a.hotspot_id, 0)=0
+               ORDER BY s.asset_id,s.segment_index,s.id"""
+        ).fetchall()
+        picked: list[dict] = []
+        counts: dict[int, int] = {}
+        for row in rows:
+            asset_id = int(row["asset_id"])
+            if counts.get(asset_id, 0) >= per_parent:
+                continue
+            item = dict(row)
+            item["tags"] = _segment_tags(conn, item["id"])
+            picked.append(item)
+            counts[asset_id] = counts.get(asset_id, 0) + 1
+            if len(picked) >= cap:
+                break
+        return picked
+
+
 def replace_hotspot_event_clips(asset_id: int, hotspot_id: int, events: list[dict]) -> list[dict]:
     with get_conn() as conn:
         asset_row = conn.execute("SELECT duration FROM assets WHERE id=?", (asset_id,)).fetchone()
