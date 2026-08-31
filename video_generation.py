@@ -1267,6 +1267,27 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     )
                 contract_errors = video_topic_contract.validate_generated_topic_contract(script, contract)
                 sentence_errors = video_topic_contract.incomplete_sentence_issues(script)
+                opening_errors = [
+                    error for error in contract_errors if "主题型开场" in str(error)
+                ]
+                if opening_errors and (script.get("scenes") or []):
+                    opening_hook = str(contract.get("opening_hook") or "").strip()
+                    if opening_hook:
+                        if opening_hook[-1] not in "。！？；":
+                            opening_hook = opening_hook.rstrip("，,") + "。"
+                        first_scene = dict(script["scenes"][0])
+                        first_scene["voiceover"] = opening_hook
+                        first_scene["text_overlay"] = opening_hook.rstrip("。！？；")[:24]
+                        first_scene["copy_source"] = "policy_repair"
+                        first_scene["copy_repair_reason"] = "owned_topic_opening"
+                        script["scenes"][0] = first_scene
+                        report["script"] = script
+                        await asyncio.to_thread(
+                            db.update_video_generation_job, job["id"], quality_report=report,
+                        )
+                        contract_errors = video_topic_contract.validate_generated_topic_contract(
+                            script, contract,
+                        )
                 recoverable = contract_errors and all(
                     str(error).startswith("标题缺少主题要素") for error in contract_errors
                 )

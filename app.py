@@ -3338,7 +3338,16 @@ def _deterministic_formal_script(
     for scene in scenes:
         role = str(scene.get("scene_role") or "")
         category = str(scene.get("primary_category") or "").casefold()
-        if role == "hotspot_evidence":
+        if (role == "topic_hook" or (not event and not generated_scenes)) and not event:
+            opening = str(contract.get("opening_hook") or "").strip()
+            if opening and opening[-1] not in "。！？；":
+                opening = opening.rstrip("，,") + "。"
+            candidates = [
+                opening,
+                str(contract.get("opening_bridge") or ""),
+                str(scene.get("voiceover") or ""),
+            ]
+        elif role == "hotspot_evidence":
             candidates = [fact_line, str(scene.get("voiceover") or ""), "外部物流现场正在发生变化。"]
         elif role == "brand_cta":
             # The endcard already carries a scene-matched corpus line.  It is
@@ -3402,6 +3411,13 @@ def _deterministic_formal_script(
             ]
             owned_ordinal += 1
         copy = bounded(candidates, scene, seed=f"{topic}|{role}|{category}|{len(generated_scenes)}")
+        if not event and not generated_scenes:
+            opening = str(contract.get("opening_hook") or "").strip()
+            if opening:
+                if opening[-1] not in "。！？；":
+                    opening = opening.rstrip("，,") + "。"
+                if opening not in copy:
+                    copy = opening
         scene_fallback_reason = fallback_reason
         if role == "brand_cta":
             scene_fallback_reason += f";brand_endcard_corpus:{scene.get('outro_id') or 'selected'}"
@@ -4751,14 +4767,26 @@ def _salvage_remote_formal_script(
 
 
 def _first_owned_bridge_index(scenes: list[dict]) -> int | None:
-    """Return the first Buffalo proof beat after the verified Hook."""
+    """Return the first Buffalo proof beat after the verified Hook.
+
+    owned_only plans have no hotspot_evidence. In that case the first
+    owned_proof / topic_bridge (or the first scene) is the bridge.
+    """
     hotspot_seen = False
+    first_owned = None
     for index, scene in enumerate(scenes):
-        if str(scene.get("scene_role") or "") == "hotspot_evidence":
+        role = str(scene.get("scene_role") or "")
+        if role == "hotspot_evidence":
             hotspot_seen = True
             continue
-        if hotspot_seen and str(scene.get("scene_role") or "") == "owned_proof":
+        if role in {"owned_proof", "topic_bridge"} and first_owned is None:
+            first_owned = index
+        if hotspot_seen and role == "owned_proof":
             return index
+    if not hotspot_seen:
+        if first_owned is not None:
+            return first_owned
+        return 0 if scenes else None
     return None
 
 

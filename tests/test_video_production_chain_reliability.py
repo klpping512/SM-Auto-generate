@@ -294,3 +294,40 @@ def test_duplicate_sequence_degrades_to_text_card_when_no_alternate():
     assert scenes[0]["asset_source"] == "diversity_text_card"
     assert rematch["inventory_limited"] is True
     assert rematch["quality_hold"] is False
+
+
+def test_custom_topic_opening_hook_is_a_complete_sentence():
+    import video_topic_contract
+
+    contract = video_topic_contract.build_topic_contract(
+        "约翰内斯堡仓内如何避免错发漏发", has_event_anchor=False,
+    )
+    opening = contract["opening_hook"]
+    assert opening.endswith("。")
+    assert "关键核对点" in opening
+    generated = {
+        "title": contract["safe_title"],
+        "scenes": [{"voiceover": "仓内随意作业。"}, {"voiceover": contract["opening_bridge"]}],
+    }
+    errors = video_topic_contract.validate_generated_topic_contract(generated, contract)
+    assert any("第一镜没有使用主题型开场" in item for item in errors)
+    generated["scenes"][0]["voiceover"] = opening
+    remaining = video_topic_contract.validate_generated_topic_contract(generated, contract)
+    assert all("第一镜没有使用主题型开场" not in item for item in remaining)
+
+
+def test_owned_only_bridge_index_does_not_require_hotspot():
+    import app
+
+    scenes = [
+        {"scene_role": "topic_hook"},
+        {"scene_role": "owned_proof"},
+        {"scene_role": "brand_cta"},
+    ]
+    assert app._first_owned_bridge_index(scenes) == 1
+    assert app._first_owned_bridge_index([{"scene_role": "topic_hook"}]) == 0
+    hotspot_then_owned = [
+        {"scene_role": "hotspot_evidence"},
+        {"scene_role": "owned_proof"},
+    ]
+    assert app._first_owned_bridge_index(hotspot_then_owned) == 1

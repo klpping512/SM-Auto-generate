@@ -361,7 +361,11 @@ def _custom_contract(subject: str) -> dict:
         "family_priority": ["staff", "warehouse", "facility", "delivery"],
         "title_groups": title_groups,
         "narrative_groups": narrative_groups,
-        "opening_hook": f"{subject}，先把关键核对点讲清楚。"[:30],
+        "opening_hook": (
+            f"{subject[:12]}，先把关键核对点讲清楚。"
+            if len(f"{subject}，先把关键核对点讲清楚。") > 32
+            else f"{subject}，先把关键核对点讲清楚。"
+        ),
         "opening_bridge": "先把主题拆到可见的物流动作，再谈 Buffalo 的承接方式。",
         "event_context_lines": [],
         "image_bridge_lines": ["先核对主题，再安排对应动作。"],
