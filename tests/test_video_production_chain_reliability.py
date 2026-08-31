@@ -54,7 +54,10 @@ def test_incomplete_third_scene_is_repaired_locally():
 def test_copy_source_repair_normalizes_to_model_repair():
     assert video_state.normalize_copy_source("repair") == "model_repair"
     assert video_state.normalize_copy_source("model") == "model"
-    assert video_state.normalize_copy_source("minimax") == "fallback"
+    assert video_state.normalize_copy_source("minimax") == "model"
+    assert video_state.normalize_copy_source("deterministic_fallback") == "fallback"
+    assert video_state.report_copy_source("model") == "minimax"
+    assert video_state.report_copy_source("fallback") == "deterministic_fallback"
 
 
 def test_scene_asset_signature_ignores_endcard():
@@ -294,7 +297,10 @@ def test_duplicate_sequence_degrades_to_text_card_when_no_alternate():
     assert scenes[0]["asset_source"] == "diversity_text_card"
     assert rematch["inventory_limited"] is True
     assert rematch["quality_hold"] is False
-    assert scenes[0]["brand_endcard_path"] == video_state.DEFAULT_BRAND_ENDCARD_PATH
+    assert scenes[0]["render_kind"] == "text_card"
+    assert scenes[0]["evidence_type"] == "text_card"
+    assert not scenes[0].get("brand_endcard_path")
+    assert scenes[0]["text_card"]["text"]
     assert video_generation.scene_has_renderable_visual(scenes[0]) is True
 
 
@@ -355,35 +361,40 @@ def test_duplicate_sequence_drops_extra_scene_before_hollow_text_card():
     assert all(item.get("asset_source") != "diversity_text_card" for item in scenes)
 
 
-def test_ensure_renderable_scenes_fills_hollow_text_card_path():
+def test_ensure_renderable_scenes_materializes_real_text_card():
     import video_generation
-    import video_state
 
     scenes = [{
-        "evidence_type": "brand_endcard",
+        "evidence_type": "owned_video",
         "asset_source": "diversity_text_card",
-        "brand_endcard_fallback": True,
         "asset_id": None,
         "scene": 10,
     }]
     assert video_generation.scene_has_renderable_visual(scenes[0]) is False
     assert video_generation.ensure_renderable_scenes(scenes) == 1
-    assert scenes[0]["brand_endcard_path"] == video_state.DEFAULT_BRAND_ENDCARD_PATH
+    assert scenes[0]["render_kind"] == "text_card"
+    assert scenes[0]["text_card"]["text"]
+    assert not scenes[0].get("brand_endcard_path")
     assert video_generation.scene_has_renderable_visual(scenes[0]) is True
 
 
-def test_renderer_uses_default_endcard_for_hollow_text_card():
+def test_renderer_does_not_borrow_endcard_for_text_card():
     import video_renderer
     import video_state
 
-    rel = video_renderer.resolve_render_endcard_rel({
+    assert video_renderer.resolve_render_endcard_rel({
         "asset_id": None,
         "brand_endcard_path": "",
         "asset_source": "diversity_text_card",
         "brand_endcard_fallback": True,
+        "evidence_type": "text_card",
+        "render_kind": "text_card",
+    }) == ""
+    assert video_renderer.resolve_render_endcard_rel({
+        "scene_role": "brand_cta",
         "evidence_type": "brand_endcard",
-    })
-    assert rel == video_state.DEFAULT_BRAND_ENDCARD_PATH
+        "brand_endcard_path": "",
+    }) == video_state.DEFAULT_BRAND_ENDCARD_PATH
     assert video_renderer.resolve_render_endcard_rel({
         "asset_id": 121,
         "evidence_type": "owned_video",
@@ -424,8 +435,8 @@ def test_custom_topic_opening_hook_is_a_complete_sentence():
         "约翰内斯堡仓内如何避免错发漏发", has_event_anchor=False,
     )
     opening = contract["opening_hook"]
-    assert opening.endswith("。")
-    assert "关键核对点" in opening
+    assert opening.endswith("？") or opening.endswith("。")
+    assert "如何避免错发漏发" in opening
     generated = {
         "title": contract["safe_title"],
         "scenes": [{"voiceover": "仓内随意作业。"}, {"voiceover": contract["opening_bridge"]}],

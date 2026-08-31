@@ -1215,6 +1215,59 @@ def plan_followup_scenes(
     usage = source_usage_report(scenes)
     if not usage["passed"]:
         raise ValueError("成片素材重复硬门禁未通过：" + "；".join(usage["issues"]))
+    return _pad_text_cards_to_capacity(
+        scenes, brief, target_duration_ms, enabled=allow_adaptation,
+    )
+
+
+def _pad_text_cards_to_capacity(
+    scenes: list[dict],
+    brief: dict,
+    target_duration_ms: int,
+    *,
+    enabled: bool = False,
+    min_scenes: int = 7,
+    max_scenes: int = FORMAL_MAX_SCENES,
+    text_card_ms: int = 4_000,
+) -> list[dict]:
+    """Fill remaining beats with real text cards instead of inventing hollow video slots."""
+    import video_render_contract
+
+    if not enabled or not scenes:
+        return scenes
+    topic = str(
+        brief.get("raw_input") or brief.get("requested_topic")
+        or brief.get("logistics_topic") or brief.get("subject") or "物流主题"
+    ).strip()
+    cta_ms = 3_000
+    content_target = max(50_000, min(90_000, int(target_duration_ms))) - cta_ms
+    while (
+        len(scenes) < min_scenes
+        or sum(int(scene.get("duration_ms") or 0) for scene in scenes) < content_target
+    ) and len(scenes) < max_scenes:
+        voiceover = f"{topic[:12]}，第{len(scenes) + 1}步按节点核对。"
+        if voiceover[-1] not in "。！？；":
+            voiceover = voiceover.rstrip("，,") + "。"
+        card = {
+            "scene": len(scenes) + 1,
+            "scene_role": "topic_text_card",
+            "evidence_type": "text_card",
+            "duration_ms": text_card_ms,
+            "duration": text_card_ms / 1000,
+            "visual": topic[:40] or "主题文字卡",
+            "voiceover": voiceover,
+            "text_overlay": topic[:24],
+            "asset_source": "text_card_fallback",
+            "match_reasons": ["可用视频/图片已用尽，规划阶段直接生成文字卡"],
+        }
+        video_render_contract.materialize_text_card(
+            card, reason="可用素材容量不足，规划阶段生成文字卡", index=len(scenes),
+        )
+        card["duration_ms"] = text_card_ms
+        scenes.append(card)
+    for index, scene in enumerate(scenes, 1):
+        scene["scene"] = index
+        scene.setdefault("render_kind", video_render_contract.infer_render_kind(scene))
     return scenes
 
 

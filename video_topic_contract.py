@@ -361,11 +361,7 @@ def _custom_contract(subject: str) -> dict:
         "family_priority": ["staff", "warehouse", "facility", "delivery"],
         "title_groups": title_groups,
         "narrative_groups": narrative_groups,
-        "opening_hook": (
-            f"{subject[:12]}，先把关键核对点讲清楚。"
-            if len(f"{subject}，先把关键核对点讲清楚。") > 32
-            else f"{subject}，先把关键核对点讲清楚。"
-        ),
+        "opening_hook": _custom_opening_hook(subject),
         "opening_bridge": "先把主题拆到可见的物流动作，再谈 Buffalo 的承接方式。",
         "event_context_lines": [],
         "image_bridge_lines": ["先核对主题，再安排对应动作。"],
@@ -377,6 +373,25 @@ def _custom_contract(subject: str) -> dict:
         "custom_topic_nodes": explicit_nodes,
         "custom_topic_entities": explicit_entities,
     }
+
+
+def _custom_opening_hook(subject: str) -> str:
+    """Keep the user's full topic as the owned-only opener.
+
+    Truncating to 12 characters dropped the actual question (for example
+    “发南非到底怎么选才划算”) and later made the first-scene gate reject
+    the deterministic fallback that no longer contained the topic.
+    """
+    text = " ".join(str(subject or "").split()).strip()
+    if not text:
+        text = "这条物流变化"
+    if text[-1] in "？?":
+        return text if text.endswith("？") else text[:-1] + "？"
+    if text[-1] in "。！!":
+        return text if text.endswith("。") or text.endswith("！") else text[:-1] + "。"
+    if any(token in text for token in ("怎么", "如何", "怎样", "怎么办", "哪")):
+        return text + "？"
+    return f"{text}，先把关键核对点讲清楚。"
 
 
 def _normalize(value: str) -> str:
@@ -521,6 +536,49 @@ def missing_narrative_groups(generated: dict, contract: dict) -> list[tuple[str,
     ]
 
 
+def topic_opening_tokens(contract: dict | None) -> list[str]:
+    """Concrete topic pieces the first scene can answer with."""
+    contract = contract or {}
+    blob = " ".join(
+        str(contract.get(field) or "")
+        for field in ("requested_topic", "original_input", "label", "safe_title", "opening_hook")
+    )
+    tokens: list[str] = []
+    for raw in re.split(r"[\s，,。！？!?:：、/|；;]+", blob):
+        token = str(raw or "").strip()
+        if len(token) >= 2 and token not in tokens:
+            tokens.append(token)
+    for extra in list(contract.get("custom_topic_entities") or []) + list(contract.get("custom_topic_nodes") or []):
+        token = str(extra or "").strip()
+        if len(token) >= 2 and token not in tokens:
+            tokens.append(token)
+    return tokens[:12]
+
+
+def opening_scene_answers_topic(first_voiceover: str, contract: dict | None) -> bool:
+    """True when scene 1 clearly responds to the current user topic."""
+    if not contract:
+        return True
+    first = str(first_voiceover or "").strip()
+    folded = _normalize(first)
+    if not folded:
+        return False
+    opening = _normalize(contract.get("opening_hook") or "")
+    if opening and (opening in folded or folded in opening):
+        return True
+    for field in ("requested_topic", "original_input", "safe_title", "label"):
+        value = _normalize(contract.get(field) or "")
+        if len(value) >= 4 and (value in folded or folded in value):
+            return True
+    tokens = topic_opening_tokens(contract)
+    hits = sum(1 for token in tokens if _normalize(token) and _normalize(token) in folded)
+    if hits >= 2:
+        return True
+    if hits >= 1 and any(term in first for term in ("怎么", "如何", "怎样", "核对", "清关", "仓储", "配送", "时效", "选", "运", "仓")):
+        return True
+    return False
+
+
 def validate_generated_topic_contract(generated: dict, contract: dict) -> list[str]:
     """Return deterministic topic/hook violations without trusting a model score."""
     if not contract:
@@ -536,11 +594,8 @@ def validate_generated_topic_contract(generated: dict, contract: dict) -> list[s
     if contract.get("opening_mode") == "owned_topic_hook":
         if not scenes:
             errors.append("缺少主题型开场")
-        else:
-            first = _normalize(scenes[0].get("voiceover") or "")
-            required = _normalize(contract.get("opening_hook") or "")
-            if required and required not in first and first not in required:
-                errors.append("第一镜没有使用主题型开场")
+        elif not opening_scene_answers_topic(scenes[0].get("voiceover") or "", contract):
+            errors.append("第一镜没有使用主题型开场")
     return errors
 
 

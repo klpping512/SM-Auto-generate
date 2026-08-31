@@ -721,12 +721,16 @@ def test_followup_planner_can_expand_a_verified_project_to_ninety_seconds():
         [{"id": 10, "asset_id": 11, "asset_file_type": "video", "primary_category": "delivery",
           "asset_name": "Buffalo 配送现场", "asset_source": "upload", "start_ms": 0, "end_ms": 10_000}],
         target_duration_ms=90_000,
+        allow_adaptation=True,
     )
 
-    # 素材不足以支撑 90 秒时，规划器宁可返回不可发布的短计划，也绝不循环
-    # 同一条 Buffalo 或热点原视频；上层证据门禁会据此要求补充素材。
-    assert sum(scene["duration_ms"] for scene in scenes) < 50_000
-    assert len({scene["asset_id"] for scene in scenes if scene.get("scene_role") == "owned_proof"}) == 1
+    # 素材不足以支撑 90 秒时，规划器改用文字卡补齐容量，而不是循环同一条母片。
+    assert sum(scene["duration_ms"] for scene in scenes) >= 47_000
+    assert len({scene["asset_id"] for scene in scenes if scene.get("evidence_type") == "owned_video"}) == 1
+    assert any(
+        scene.get("render_kind") == "text_card" or scene.get("evidence_type") == "text_card"
+        for scene in scenes
+    )
     assert scenes[0]["voiceover"].startswith("Musina 现场，筛查让卡车排起长队")
 
 

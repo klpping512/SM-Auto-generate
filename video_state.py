@@ -217,8 +217,11 @@ def scene_asset_token(scene: dict | None) -> str:
     role = str(scene.get("scene_role") or "")
     evidence = str(scene.get("evidence_type") or "")
     source = str(scene.get("asset_source") or "")
-    if source in TEXT_CARD_SOURCES:
-        return f"textcard:{source}:{scene.get('scene') or ''}:{scene.get('duration_ms') or 0}"
+    kind = str(scene.get("render_kind") or "")
+    if source in TEXT_CARD_SOURCES or kind == "text_card" or evidence == "text_card":
+        card = scene.get("text_card") if isinstance(scene.get("text_card"), dict) else {}
+        text = str(card.get("text") or scene.get("voiceover") or "")[:40]
+        return f"textcard:{source or 'text_card'}:{scene.get('scene') or ''}:{text}"
     if role in _ENDCARD_ROLES or evidence in _ENDCARD_TYPES:
         return ""
     asset_id = scene.get("asset_id")
@@ -237,10 +240,23 @@ def scene_asset_signature(scenes: list[dict] | None) -> str:
 
 def normalize_copy_source(value: object) -> str:
     source = str(value or "").strip() or "fallback"
-    if source == "repair":
-        return "model_repair"
+    aliases = {
+        "repair": "model_repair",
+        "minimax": "model",
+        "deterministic_fallback": "fallback",
+    }
+    source = aliases.get(source, source)
     if source not in COPY_SOURCES:
         return "fallback"
+    return source
+
+
+def report_copy_source(value: object) -> str:
+    source = normalize_copy_source(value)
+    if source in {"model", "model_repair"}:
+        return "minimax"
+    if source in {"fallback", "corpus"}:
+        return "deterministic_fallback"
     return source
 
 

@@ -3032,8 +3032,11 @@ def _stamp_copy_source(
     stamped = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     for item in stamped["scenes"]:
         item["copy_source"] = source
+        if source in {"model", "model_repair"}:
+            item["model_name"] = "MiniMax"
+            item["fallback_reason"] = None
         if source == "model_repair" and not item.get("model_name"):
-            item["model_name"] = "minimax"
+            item["model_name"] = "MiniMax"
         if reason:
             item["copy_repair_reason"] = reason
         else:
@@ -3065,12 +3068,20 @@ def _annotate_copy_revisions(before: dict, after: dict, *, reason: str) -> dict:
 
 
 def _copy_provenance_rows(scenes: list[dict]) -> list[dict]:
+    import video_state
     return [
         {
             "scene": index,
             "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
-            "source": str(scene.get("copy_source") or "fallback"),
+            "copy_source": video_state.report_copy_source(scene.get("copy_source")),
+            "source": video_state.report_copy_source(scene.get("copy_source")),
             "reason": str(scene.get("copy_repair_reason") or ""),
+            "fallback_reason": (
+                None
+                if video_state.report_copy_source(scene.get("copy_source")) == "minimax"
+                else (str(scene.get("copy_repair_reason") or scene.get("fallback_reason") or "") or None)
+            ),
+            "model_name": "MiniMax" if video_state.report_copy_source(scene.get("copy_source")) == "minimax" else None,
             "voiceover": str(scene.get("voiceover") or ""),
         }
         for index, scene in enumerate(scenes, 1)
@@ -3212,6 +3223,95 @@ def _repair_formal_narrative_bridge(
     return repaired
 
 
+def _fit_topic_opening(contract: dict, scene: dict) -> str:
+    """Force scene 1 onto the current topic, then fit the formal char window."""
+    opening = str(contract.get("opening_hook") or "").strip()
+    topic = str(
+        contract.get("requested_topic") or contract.get("original_input")
+        or contract.get("label") or ""
+    ).strip()
+    if opening and opening[-1] not in "。！？；":
+        opening = opening.rstrip("，,") + "。"
+    text = opening or (f"{topic}？" if topic else "这条物流变化，先把核对点讲清楚。")
+    minimum = _scene_voiceover_min_chars(scene)
+    maximum = _scene_voiceover_max_chars(scene)
+
+    def compact(value: str) -> int:
+        return len("".join(str(value or "").split()))
+
+    if maximum and compact(text) > maximum:
+        core = topic.rstrip("。！!? ") or str(contract.get("safe_title") or "物流变化")
+        if compact(core + "？") <= maximum:
+            text = core + "？"
+        else:
+            text = core[: max(4, maximum - 1)].rstrip("，,：: ") + "？"
+    if minimum and compact(text) < minimum:
+        pad = str(contract.get("opening_bridge") or "先核对可见物流动作。").strip()
+        merged = text.rstrip("。？！") + "，" + pad
+        if merged[-1] not in "。！？；":
+            merged = merged.rstrip("，,") + "。"
+        if not maximum or compact(merged) <= maximum:
+            text = merged
+    if text[-1] not in "。！？；":
+        text = text.rstrip("，,") + "。"
+    return text
+
+
+def _topic_fallback_candidates(topic: str, contract: dict) -> tuple[str, ...]:
+    blob = topic + "".join(str(item) for item in (contract.get("nodes") or []))
+    lines: list[str] = []
+    if any(token in blob for token in ("空运", "海运", "直邮", "怎么选", "运输")):
+        lines.extend((
+            "先看货值、重量、时效和补货频率。",
+            "运输方式要对照货物条件和交付窗口。",
+        ))
+    if any(token in blob for token in ("仓储", "仓库", "分拣", "入仓")):
+        lines.extend((
+            "仓内先核对件数、库位和异常标记。",
+            "分拣顺序一乱，后面配送就会被拖住。",
+        ))
+    if any(token in blob for token in ("清关", "报关", "合规")):
+        lines.extend((
+            "清关先核文件、税则和查验要求。",
+            "资料不齐就不要把货推进下一站。",
+        ))
+    if any(token in blob for token in ("配送", "派送", "签收", "同城")):
+        lines.extend((
+            "配送要看交接、出车和签收闭环。",
+            "改地址后运单必须重新核对再出车。",
+        ))
+    if any(token in blob for token in ("丢失", "破损", "异常", "冷链", "危险品")):
+        lines.extend((
+            "货物异常要先留痕，再决定补救动作。",
+            "现场先固定责任节点，再通知后续环节。",
+        ))
+    if any(token in blob for token in ("时效", "补货", "延误")):
+        lines.extend((
+            "时效和补货频率要放在同一口径比较。",
+            "延误一旦出现，先核对下一班可执行窗口。",
+        ))
+    if any(token in blob for token in ("费用", "成本", "划算", "风险")):
+        lines.extend((
+            "费用和风险要一起看，不能只比单价。",
+            "隐性等待成本往往比运费更伤。",
+        ))
+    if any(token in blob for token in ("订单", "签收", "运单")):
+        lines.extend((
+            "订单、运单和签收记录必须对得上。",
+            "改单后要重新打印并核对收件信息。",
+        ))
+    bridge = str(contract.get("opening_bridge") or "").strip()
+    if bridge:
+        lines.append(bridge)
+    if topic:
+        lines.append(f"围绕{topic[:12]}，逐项核对可见物流动作。")
+    unique = []
+    for line in lines:
+        if line and line not in unique:
+            unique.append(line)
+    return tuple(unique or ("把当前物流节点核对清楚。",))
+
+
 def _deterministic_formal_script(
     brief: dict,
     scenes: list[dict],
@@ -3316,13 +3416,9 @@ def _deterministic_formal_script(
                 and (maximum is None or length <= maximum)
             ):
                 return candidate
-        fallbacks = (
-            "现场动作正在按流程逐项展开。",
-            "画面中的物流动作正在按流程展开。",
-            "画面中的物流作业动作正在现场逐项展开。",
-            "现场动作逐项核对。",
-            "仓内核对正在进行。",
-            "逐项核对并记录。",
+        fallbacks = _topic_fallback_candidates(topic, contract) + (
+            f"{topic[:10]}，现场按节点逐项核对。" if topic else "现场动作正在按流程逐项展开。",
+            "把当前物流节点核对清楚。",
         )
         for candidate in fallbacks:
             length = len("".join(candidate.split()))
@@ -3339,14 +3435,16 @@ def _deterministic_formal_script(
         role = str(scene.get("scene_role") or "")
         category = str(scene.get("primary_category") or "").casefold()
         if (role == "topic_hook" or (not event and not generated_scenes)) and not event:
-            opening = str(contract.get("opening_hook") or "").strip()
-            if opening and opening[-1] not in "。！？；":
-                opening = opening.rstrip("，,") + "。"
-            candidates = [
-                opening,
-                str(contract.get("opening_bridge") or ""),
-                str(scene.get("voiceover") or ""),
-            ]
+            copy = _fit_topic_opening(contract, scene)
+            generated_scenes.append({
+                "voiceover": copy,
+                "text_overlay": copy.rstrip("。！？；")[:24],
+                "copy_source": "fallback",
+                "copy_repair_reason": fallback_reason,
+                "fallback_reason": fallback_reason,
+                "model_name": None,
+            })
+            continue
         elif role == "hotspot_evidence":
             candidates = [fact_line, str(scene.get("voiceover") or ""), "外部物流现场正在发生变化。"]
         elif role == "brand_cta":
@@ -3360,40 +3458,47 @@ def _deterministic_formal_script(
             ]
         elif role == "owned_proof" and not bridge_done:
             bridge_done = True
-            category_bridges = {
-                "warehouse": [
-                    "风险影响仓储，Buffalo分拣可核对。",
-                    "风险影响仓配，Buffalo分拣更可核对。",
-                    "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
-                    "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
-                    "现场风险提醒仓内先核对，Buffalo让每件货的状态更清楚。",
-                ],
-                "staff": [
-                    "风险影响协同，Buffalo分拣可核对。",
-                    "风险影响协同，Buffalo分拣更可核对。",
-                    "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
-                    "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
-                    "现场变化越突然，Buffalo越要分工核对，让处理更可控。",
-                ],
-                "facility": [
-                    "风险影响作业，Buffalo分区可核对。",
-                    "风险影响作业，Buffalo分区核对更可控。",
-                    "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
-                    "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
-                    "现场风险提醒设施先检查，Buffalo把关键动作留痕。",
-                ],
-                "delivery": [
-                    "风险影响配送，Buffalo交接可核对。",
-                    "风险影响配送，Buffalo交接更可核对。",
-                    "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
-                    "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
-                    "道路变化影响配送节奏，Buffalo核对交接，让状态更清楚。",
-                ],
-            }
-            candidates = [
-                *_fallback_bridge_candidates(fact_line, category),
-                *(category_bridges.get(category) or category_bridges["warehouse"]),
-            ]
+            if not event:
+                candidates = [
+                    str(contract.get("opening_bridge") or ""),
+                    *_topic_fallback_candidates(topic, contract),
+                    str(scene.get("voiceover") or ""),
+                ]
+            else:
+                category_bridges = {
+                    "warehouse": [
+                        "风险影响仓储，Buffalo分拣可核对。",
+                        "风险影响仓配，Buffalo分拣更可核对。",
+                        "这类风险会放大仓内误差，Buffalo逐件核对，让异常更早留痕。",
+                        "外部变化影响仓配节奏，Buffalo逐件分拣，让处理更可核对。",
+                        "现场风险提醒仓内先核对，Buffalo让每件货的状态更清楚。",
+                    ],
+                    "staff": [
+                        "风险影响协同，Buffalo分拣可核对。",
+                        "风险影响协同，Buffalo分拣更可核对。",
+                        "这类变化考验现场协同，Buffalo逐项分拣，让动作更可核对。",
+                        "外部风险影响作业节奏，Buffalo协同核对，让异常及时留痕。",
+                        "现场变化越突然，Buffalo越要分工核对，让处理更可控。",
+                    ],
+                    "facility": [
+                        "风险影响作业，Buffalo分区可核对。",
+                        "风险影响作业，Buffalo分区核对更可控。",
+                        "这类风险会传到设施作业，Buffalo分区核对，让异常更早留痕。",
+                        "外部变化影响设备衔接，Buffalo逐项核对，让流程更可控。",
+                        "现场风险提醒设施先检查，Buffalo把关键动作留痕。",
+                    ],
+                    "delivery": [
+                        "风险影响配送，Buffalo交接可核对。",
+                        "风险影响配送，Buffalo交接更可核对。",
+                        "这类变化会影响末端交接，Buffalo出车前核对，让过程更可控。",
+                        "外部风险传到配送端，Buffalo逐项交接，让异常更早留痕。",
+                        "道路变化影响配送节奏，Buffalo核对交接，让状态更清楚。",
+                    ],
+                }
+                candidates = [
+                    *_fallback_bridge_candidates(fact_line, category),
+                    *(category_bridges.get(category) or category_bridges["warehouse"]),
+                ]
         elif role == "owned_context_image":
             candidates = [
                 topic_lines[image_ordinal % len(topic_lines)],
@@ -3411,21 +3516,16 @@ def _deterministic_formal_script(
             ]
             owned_ordinal += 1
         copy = bounded(candidates, scene, seed=f"{topic}|{role}|{category}|{len(generated_scenes)}")
-        if not event and not generated_scenes:
-            opening = str(contract.get("opening_hook") or "").strip()
-            if opening:
-                if opening[-1] not in "。！？；":
-                    opening = opening.rstrip("，,") + "。"
-                if opening not in copy:
-                    copy = opening
         scene_fallback_reason = fallback_reason
         if role == "brand_cta":
-            scene_fallback_reason += f";brand_endcard_corpus:{scene.get('outro_id') or 'selected'}"
+            scene_fallback_reason = f"{fallback_reason};brand_endcard_corpus:{scene.get('outro_id') or 'selected'}"
         generated_scenes.append({
             "voiceover": copy,
             "text_overlay": copy.rstrip("。！？；")[:24],
             "copy_source": "fallback",
             "copy_repair_reason": scene_fallback_reason,
+            "fallback_reason": scene_fallback_reason,
+            "model_name": None,
         })
     return {
         "title": contract.get("safe_title") or topic,
@@ -3469,7 +3569,13 @@ def _retrieve_topic_evidence(brief: dict) -> tuple[list[dict], dict]:
 
 def _scene_voiceover_max_chars(scene: dict) -> int | None:
     """Keep formal narration inside the one-pass visual duration before TTS starts."""
-    if str(scene.get("evidence_type") or "") == "brand_endcard":
+    if str(scene.get("render_kind") or "") == "brand_endcard":
+        return None
+    if (
+        str(scene.get("evidence_type") or "") == "brand_endcard"
+        and str(scene.get("render_kind") or "") != "text_card"
+        and str(scene.get("asset_source") or "") not in {"text_card_fallback", "diversity_text_card"}
+    ):
         return None
     try:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)
@@ -3483,7 +3589,13 @@ def _scene_voiceover_max_chars(scene: dict) -> int | None:
 
 def _scene_voiceover_min_chars(scene: dict) -> int | None:
     """Keep formal beats narrated enough to avoid a silent real-video tail."""
-    if str(scene.get("evidence_type") or "") == "brand_endcard":
+    if str(scene.get("render_kind") or "") == "brand_endcard":
+        return None
+    if (
+        str(scene.get("evidence_type") or "") == "brand_endcard"
+        and str(scene.get("render_kind") or "") != "text_card"
+        and str(scene.get("asset_source") or "") not in {"text_card_fallback", "diversity_text_card"}
+    ):
         return None
     try:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)

@@ -15,7 +15,7 @@ INFOGRAPHIC_EVIDENCE_TYPES = {
     "explanation_card", "map_card", "process_card", "data_card",
     "infographic", "info_card", "chart", "title_card", "slideshow", "presentation",
 }
-NON_REAL_EVIDENCE_TYPES = INFOGRAPHIC_EVIDENCE_TYPES | {"brand_endcard", "image"}
+NON_REAL_EVIDENCE_TYPES = INFOGRAPHIC_EVIDENCE_TYPES | {"brand_endcard", "image", "text_card"}
 
 
 def is_explanation_scene(scene: dict) -> bool:
@@ -23,12 +23,17 @@ def is_explanation_scene(scene: dict) -> bool:
 
     The name is retained for compatibility with historical scripts, but these
     scenes are now forbidden rather than rendered as a fallback.
+    Real ``text_card`` beats are an explicit render kind, not infographics.
     """
+    kind = str(scene.get("render_kind") or "")
+    evidence = str(scene.get("evidence_type") or "")
+    if kind == "text_card" or evidence == "text_card":
+        return False
     return (
         str(scene.get("scene_role") or "") in {
             "logistics_explainer", "explanation", "infographic", "info_card", "presentation",
         }
-        or str(scene.get("evidence_type") or "") in INFOGRAPHIC_EVIDENCE_TYPES
+        or evidence in INFOGRAPHIC_EVIDENCE_TYPES
     )
 
 
@@ -52,7 +57,13 @@ def scene_voiceover_char_limit(scene: dict) -> int:
 
 def formal_voiceover_char_bounds(scene: dict) -> tuple[int | None, int | None]:
     """Match the formal scripting min/max window used by app.py before TTS."""
-    if str(scene.get("evidence_type") or "") == "brand_endcard":
+    if str(scene.get("render_kind") or "") == "brand_endcard":
+        return None, None
+    if (
+        str(scene.get("evidence_type") or "") == "brand_endcard"
+        and str(scene.get("render_kind") or "") != "text_card"
+        and str(scene.get("asset_source") or "") not in {"text_card_fallback", "diversity_text_card"}
+    ):
         return None, None
     try:
         duration_seconds = max(0.0, float(scene.get("duration_ms") or 0) / 1000)

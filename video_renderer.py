@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 import asset_taxonomy
 import database as db
 from video_clip_refs import ClipReferenceError, resolve_clip_ref
+import video_render_contract
 import video_state
 
 logger = logging.getLogger(__name__)
@@ -280,28 +281,15 @@ def formal_scene_bounds(target_duration_ms: int, *, adapted: bool = False) -> tu
 
 def scene_uses_cta_timing(scene: dict) -> bool:
     """True only for the real brand CTA. Mid-film text cards follow speech length."""
-    source = str(scene.get("asset_source") or "")
-    if source in video_state.TEXT_CARD_SOURCES:
-        return False
-    return bool(str(scene.get("brand_endcard_path") or "").strip())
+    return video_render_contract.infer_render_kind(scene) == "brand_endcard"
 
 
 def resolve_render_endcard_rel(scene: dict) -> str:
-    """Return a usable brand-card path for CTA or diversity text-card scenes."""
+    """Return a brand CTA image path. Ordinary text cards must not borrow this."""
+    if video_render_contract.infer_render_kind(scene) != "brand_endcard":
+        return ""
     endcard_rel = str(scene.get("brand_endcard_path") or "").strip()
-    if endcard_rel:
-        return endcard_rel
-    asset_source = str(scene.get("asset_source") or "")
-    if (
-        bool(scene.get("brand_endcard_fallback"))
-        or asset_source in video_state.TEXT_CARD_SOURCES
-        or (
-            str(scene.get("evidence_type") or "") == "brand_endcard"
-            and not scene.get("asset_id")
-        )
-    ):
-        return video_state.DEFAULT_BRAND_ENDCARD_PATH
-    return ""
+    return endcard_rel or video_state.DEFAULT_BRAND_ENDCARD_PATH
 
 
 class RenderCanceled(RuntimeError):
@@ -528,7 +516,15 @@ def normalize_script(
         raw_duration = float(raw.get("duration") or 5)
         # 自有静态图只承担 1–2 秒的节奏过渡，不能被通用视频最短时长
         # 规则拉长为 3 秒；否则它既会破坏图片占比，又会迫使真实视频被压缩。
-        minimum_duration = 1.0 if evidence_type == "image" else 3.0
+        kind = str(raw.get("render_kind") or "") or (
+            "text_card" if str(raw.get("evidence_type") or "") == "text_card" else evidence_type
+        )
+        if kind == "image" or evidence_type == "image":
+            minimum_duration = 1.0
+        elif kind == "text_card" or evidence_type == "text_card":
+            minimum_duration = 1.5
+        else:
+            minimum_duration = 3.0
         scenes.append({
             "scene": len(scenes) + 1,
             "scene_role": scene_role,
@@ -550,8 +546,10 @@ def normalize_script(
             "copy_anchor": str(raw.get("copy_anchor") or "")[:120],
             "action_key": str(raw.get("action_key") or "")[:120],
             "primary_category": str(raw.get("primary_category") or "")[:32],
-            "copy_source": str(raw.get("copy_source") or "")[:16],
+            "copy_source": str(raw.get("copy_source") or "")[:32],
             "copy_repair_reason": str(raw.get("copy_repair_reason") or "")[:240],
+            "render_kind": str(raw.get("render_kind") or "")[:24],
+            "text_card": dict(raw["text_card"]) if isinstance(raw.get("text_card"), dict) else raw.get("text_card"),
         })
     # The planner owns narration. Rendering may preserve structural metadata,
     # but must never replace validated MiniMax copy with a fixed sentence.
@@ -570,9 +568,8 @@ def normalize_script(
     # 但不能把 10 个有效内容镜头算成 11 个而触发内容数量门禁。
     content_scenes = [
         scene for scene in scenes
-        if str(scene.get("evidence_type") or "") != "brand_endcard"
-        and str(scene.get("scene_role") or "") != "brand_cta"
-        and not scene.get("brand_endcard_path")
+        if video_render_contract.infer_render_kind(scene) != "brand_endcard"
+        and str(scene.get("scene_role") or "") not in {"brand_cta", "brand_endcard", "brand_close", "cta"}
     ]
     if not min_scenes <= len(content_scenes) <= max_scenes:
         raise ValueError(f"当前时长需要 {min_scenes}–{max_scenes} 个完整分镜")
@@ -1017,6 +1014,51 @@ def _generate_text_overlay(
         y = y0 + line_index * line_height
         draw.text((width / 2, y), value, font=font, fill="white", stroke_width=stroke_width,
                   stroke_fill="black", anchor="mm")
+    img.save(output)
+
+
+def _generate_text_card_frame(
+    text: str,
+    output: Path,
+    width: int = 1080,
+    height: int = 1920,
+    *,
+    label: str = "BUFFALO LOGISTICS",
+):
+    """Full-frame 9:16 card used when a beat has no video/image source."""
+    scale = min(width / 1080, height / 1920)
+    img = Image.new("RGB", (width, height), (11, 28, 26))
+    draw = ImageDraw.Draw(img)
+    accent = (212, 175, 106)
+    draw.rectangle((0, 0, width, max(8, round(10 * scale))), fill=accent)
+    draw.rectangle((0, height - max(8, round(10 * scale)), width, height), fill=accent)
+    body = " ".join(str(text or "").split()) or "把当前物流节点核对清楚。"
+    font_size = max(36, round(54 * scale))
+    font = _load_subtitle_font(body, font_size)
+    max_width = width * 0.78
+    lines, line = [], ""
+    for char in body:
+        candidate = line + char
+        if line and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+            lines.append(line)
+            line = char
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    lines = lines[:8]
+    line_height = max(52, round(78 * scale))
+    block_height = len(lines) * line_height
+    y0 = height / 2 - block_height / 2
+    for index, value in enumerate(lines):
+        y = y0 + index * line_height
+        draw.text(
+            (width / 2, y), value, font=font, fill="white",
+            stroke_width=max(2, round(3 * scale)), stroke_fill=(0, 0, 0),
+            anchor="mm",
+        )
+    label_font = _load_subtitle_font(label, max(18, round(24 * scale)))
+    draw.text((width / 2, height * 0.88), label, font=label_font, fill=accent, anchor="mm")
     img.save(output)
 
 
@@ -1792,6 +1834,16 @@ def render_job(
         )
 
         scenes = list(job["script"]["scenes"])
+        video_render_contract.repair_scene_render_sources(scenes)
+        contract_errors = video_render_contract.validate_render_contract(scenes, static_dir=static_dir)
+        if contract_errors:
+            video_render_contract.repair_scene_render_sources(scenes)
+            contract_errors = video_render_contract.validate_render_contract(scenes, static_dir=static_dir)
+        if contract_errors:
+            raise video_render_contract.RenderContractError(
+                "渲染契约未通过：" + "；".join(contract_errors[:6])
+            )
+        job["script"]["scenes"] = scenes
         # Parallel first-pass TTS: each scene writes an indexed WAV; video-fit
         # re-TTS stays serial inside the per-scene loop below.
         check_canceled()
@@ -1885,28 +1937,72 @@ def render_job(
                 preserve_planned_duration=False,
             )
 
-            # 2. 获取素材。没有对应的真实热点/自有素材时直接失败，
-            # 不允许以信息图、流程图或循环画面填满旁白。
+            # 2. Resolve a renderable source from the scene contract.
+            # Missing asset_id is not a film-level failure when the beat is a
+            # text_card or brand_endcard.
             asset_id = scene.get("asset_id")
             asset = None
             clip_ref = None
-            endcard_rel = resolve_render_endcard_rel(scene)
+            kind = video_render_contract.infer_render_kind(scene)
+            scene["render_kind"] = kind
+            endcard_rel = resolve_render_endcard_rel(scene) if kind == "brand_endcard" else ""
             if endcard_rel:
                 scene["brand_endcard_path"] = endcard_rel
             animate_image = False
             if is_explanation_scene(scene):
                 raise ValueError("信息图、流程图和 PPT 卡片已禁用；请补充真实热点 Hook 或 Buffalo 自有素材")
-            elif endcard_rel:
+            if kind == "text_card":
+                if not scene.get("text_card"):
+                    video_render_contract.materialize_text_card(
+                        scene, reason="渲染前补齐文字卡正文", index=index,
+                    )
+                card = scene.get("text_card") if isinstance(scene.get("text_card"), dict) else {}
+                card_path = work_root / f"text-card-{index}.png"
+                _generate_text_card_frame(
+                    str(card.get("text") or scene.get("voiceover") or scene.get("text_overlay") or ""),
+                    card_path,
+                    width=output_size[0],
+                    height=output_size[1],
+                )
+                rel = card_path.relative_to(static_dir).as_posix()
+                asset = {
+                    "id": None, "name": "主题文字卡", "file_type": "image",
+                    "filepath": rel, "hotspot_id": None,
+                }
+            elif kind == "brand_endcard" and endcard_rel:
                 candidate = (static_dir / endcard_rel).resolve()
                 if not candidate.is_relative_to(static_dir.resolve()) or not candidate.is_file():
                     raise ValueError("品牌结尾图片不存在或路径不安全")
                 asset = {"id": None, "name": "Buffalo 品牌结尾", "file_type": "image", "filepath": endcard_rel,
                          "hotspot_id": None}
-            else:
+            elif kind in {"video", "image"}:
                 asset = db.get_asset(asset_id) if asset_id else None
+                if not asset or asset.get("file_type") not in ("video", "image"):
+                    video_render_contract.materialize_text_card(
+                        scene, reason=f"第{index + 1}镜缺少可渲染{kind}源，已转为文字卡", index=index,
+                    )
+                    card = scene.get("text_card") if isinstance(scene.get("text_card"), dict) else {}
+                    card_path = work_root / f"text-card-{index}.png"
+                    _generate_text_card_frame(
+                        str(card.get("text") or scene.get("voiceover") or scene.get("text_overlay") or ""),
+                        card_path,
+                        width=output_size[0],
+                        height=output_size[1],
+                    )
+                    rel = card_path.relative_to(static_dir).as_posix()
+                    asset = {
+                        "id": None, "name": "主题文字卡", "file_type": "image",
+                        "filepath": rel, "hotspot_id": None,
+                    }
+                    kind = "text_card"
+                    scene["render_kind"] = "text_card"
+            else:
+                raise video_render_contract.RenderContractError(
+                    f"第{index + 1}镜 render_kind 非法：{kind}"
+                )
             if not asset or asset.get("file_type") not in ("video", "image"):
-                raise ValueError(
-                    f"第{index + 1}镜没有对应素材；请补充未使用的热点 Hook、Buffalo 自有视频或自有图片，禁止循环填充旁白"
+                raise video_render_contract.RenderContractError(
+                    f"第{index + 1}镜没有可执行的渲染来源"
                 )
 
             if asset["file_type"] == "video":
@@ -2187,12 +2283,21 @@ def render_job(
             {
                 "scene": index,
                 "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
-                "source": str(scene.get("copy_source") or "fallback"),
+                "copy_source": video_state.report_copy_source(scene.get("copy_source")),
+                "source": video_state.report_copy_source(scene.get("copy_source")),
                 "reason": str(scene.get("copy_repair_reason") or ""),
+                "fallback_reason": (
+                    None
+                    if video_state.report_copy_source(scene.get("copy_source")) == "minimax"
+                    else (str(scene.get("copy_repair_reason") or "") or None)
+                ),
+                "model_name": "MiniMax" if video_state.report_copy_source(scene.get("copy_source")) == "minimax" else None,
                 "voiceover": str(scene.get("voiceover") or ""),
+                "render_kind": video_render_contract.infer_render_kind(scene),
             }
             for index, scene in enumerate(scenes, 1)
         ]
+        report["render_contract"] = video_render_contract.contract_summary(scenes)
         source_usage = source_usage_report(rendered_scene_sources)
         final_subtitles = subtitle_timeline_report(
             scene_subtitles,

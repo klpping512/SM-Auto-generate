@@ -73,9 +73,9 @@ def test_hotspot_logistics_plan_returns_dynamic_brief_and_evidence_budget(tmp_db
     assert response.status_code == 200
     payload = response.json()
     assert payload["brief"]["logistics_topic"] == "本地快递时效"
-    assert payload["evidence_summary"]["planned_duration_ms"] == 47000
+    assert payload["evidence_summary"]["planned_duration_ms"] >= 47_000
     assert payload["evidence_summary"]["cta_duration_ms"] == 3000
-    assert payload["evidence_summary"]["duration_ms"] == 50000
+    assert 50_000 <= payload["evidence_summary"]["duration_ms"] <= 90_000
     assert payload["evidence_summary"]["ready"] is True
     assert payload["evidence_summary"]["hotspot_video"] == 2
     assert payload["evidence_summary"]["owned_video"] >= 4
