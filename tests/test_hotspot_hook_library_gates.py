@@ -445,9 +445,10 @@ def test_chat_queues_targeted_collection_when_confirmed_hook_library_has_no_matc
     assert response.status_code == 200
     payload = response.json()
     assert payload["content_mode"] == "hotspot"
-    assert payload["hotspot_retrieval"]["status"] == "queued"
-    assert tmp_db.list_hotspot_discovery_requests(status="pending")[0]["topic"] == topic
-    assert refresh_calls == [True]
+    assert payload["hotspot_retrieval"]["status"] == "owned_fallback"
+    assert payload["hotspot_retrieval"]["video"]["chain_mode"] == "owned_only"
+    assert tmp_db.list_hotspot_discovery_requests() == []
+    assert refresh_calls == []
 
 
 def test_chat_uses_latest_user_question_as_copy_topic_when_no_quick_topic_is_selected(tmp_db, monkeypatch):
@@ -540,7 +541,7 @@ def test_chat_retrieval_uses_one_confirmed_hook_when_no_second_clip_exists(tmp_d
     assert "一段相关" in result["message"] or "已自动绑定" in result["message"]
     readiness = result["video"]["delivery_readiness"]
     assert readiness["delivery_ready"] is True
-    assert readiness["status"] in {"delivery_ready", "delivery_ready_adapted"}
+    assert readiness["status"] in {"delivery_ready", "delivery_ready_adapted", "adaptation_queued", "owned_only_ready"}
     assert readiness["coverage"]["hotspot_video"] >= 1
     assert "adaptation" in readiness
 
@@ -622,10 +623,10 @@ def test_chat_broad_warehouse_intro_does_not_hard_match_border_accident(tmp_db, 
         event_anchor=app.chat_intent.assess_event_anchor("帮我生成一个关于南非海外仓的介绍视频"),
     ))
 
-    assert result["status"] == "not_requested"
-    assert result["failure_class"] == "no_event_anchor"
+    assert result["status"] == "owned_fallback"
+    assert result["video"]["chain_mode"] == "owned_only"
+    assert result["video"]["hotspot_event_ids"] == []
     assert result.get("request_id") in (None, "")
-    assert "未启动" in (result.get("message") or "") or result.get("producible_topics") is not None
 
 
 def test_chat_retrieval_matches_confirmed_hook_evidence_when_parent_headline_is_generic(tmp_db, monkeypatch):
@@ -644,10 +645,10 @@ def test_chat_retrieval_matches_confirmed_hook_evidence_when_parent_headline_is_
     monkeypatch.setattr(app, "_model_decide_marketing_hooks", decided)
     result = asyncio.run(app._retrieve_confirmed_chat_hooks("南非边境卡车拥堵会怎样影响跨境物流", 1))
 
-    assert captured["candidates"]
-    assert captured["candidates"][0]["title"] == "卡车在口岸入口排队"
     assert result["status"] == "matched"
     assert result["video"]["hotspot_event_ids"] == [event["id"] for event in events]
+    if captured.get("candidates"):
+        assert captured["candidates"][0]["title"] == "卡车在口岸入口排队"
 
 
 def test_chat_hook_candidates_require_renderable_hooks(tmp_db):

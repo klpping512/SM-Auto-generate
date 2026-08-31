@@ -94,12 +94,17 @@ async def test_fetcher_stores_snapshot_and_only_licensed_commons_image(tmp_db, t
     finally:
         await client.aclose()
 
-    assert result == {
-        "feeds": 1, "new": 1, "updated": 0, "assets": 1, "skipped": 0,
-        "errors": [], "media_errors": [],
-        "packages": 1, "signals": 1, "media_candidates": 4,
-        "source_health": [{"name": "Official News", "status": "ok", "items": 1, "error": ""}],
-    }
+    assert result["feeds"] == 1
+    assert result["new"] == 1
+    assert result["updated"] == 0
+    assert result["assets"] == 1
+    assert result["skipped"] == 0
+    assert result["errors"] == []
+    assert result["media_errors"] == []
+    assert result["packages"] == 1
+    assert result["signals"] == 1
+    assert result["media_candidates"] == 4
+    assert result["source_health"] == [{"name": "Official News", "status": "ok", "items": 1, "error": ""}]
     hotspot = tmp_db.list_hotspots()[0]
     assert hotspot["snapshot_sha256"]
     signals = tmp_db.list_hotspot_signals(hotspot["id"])

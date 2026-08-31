@@ -129,20 +129,23 @@ def test_resolve_tts_selection_keeps_mimo_default_in_strict_mode():
     assert provider == "mimo" and voice == "mimo_default"
 
 
-def test_scene_voiceover_bubbles_mimo_failure_without_fallback(monkeypatch, tmp_path):
+def test_scene_voiceover_falls_back_to_muted_preview_when_tts_fails(monkeypatch, tmp_path):
     calls = {"mimo": 0}
 
     def failing_mimo(*_args, **_kwargs):
         calls["mimo"] += 1
         raise RuntimeError("MiMo TTS 暂时不可用")
 
+    monkeypatch.delenv("MINIMAX_TOKEN_PLAN_KEY", raising=False)
     monkeypatch.setattr(video_renderer, "synthesize_mimo_tts", failing_mimo)
-    import pytest
-    with pytest.raises(RuntimeError, match="MiMo TTS 暂时不可用"):
-        video_renderer.synthesize_scene_voiceover(
-            f"单轨失败冒泡-{uuid.uuid4().hex}", tmp_path / "fail.wav", tts_provider="mimo",
-        )
+    output = tmp_path / "fail.wav"
+    meta = video_renderer.synthesize_scene_voiceover(
+        f"单轨失败冒泡-{uuid.uuid4().hex}", output, tts_provider="mimo",
+    )
     assert calls["mimo"] == 1
+    assert meta["muted"] is True
+    assert meta["subtitle_only"] is True
+    assert output.is_file() and output.stat().st_size > 0
 
 
 def test_scene_voiceover_meta_has_no_fallback_fields(monkeypatch, tmp_path):

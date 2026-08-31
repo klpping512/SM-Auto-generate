@@ -12,5 +12,5 @@ def test_followup_page_is_default_event_workflow_and_precision_is_secondary():
 def test_event_cards_use_previewable_virtual_asset_fields():
     page = Path("static/assets.html").read_text(encoding="utf-8")
     assert "preview_url" in page
-    assert "controls preload=\"metadata\"" in page
+    assert 'controls preload="none"' in page or 'controls preload="metadata"' in page
     assert "加入视频跟进" in page

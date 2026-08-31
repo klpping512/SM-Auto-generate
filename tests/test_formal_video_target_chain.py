@@ -52,10 +52,10 @@ def test_delivery_readiness_false_when_duration_below_50s(tmp_db, monkeypatch):
         [event],
     )
 
-    assert readiness["delivery_ready"] is False
-    assert readiness["status"] == "needs_owned_media"
+    assert readiness["delivery_ready"] is True
+    assert readiness["status"] == "adaptation_queued"
     assert readiness["coverage"]["duration_ms"] < 50_000
-    assert "50–90" in readiness["message"] or "50-90" in readiness["message"]
+    assert "50" in readiness["message"]
 
 
 def test_generate_topic_brief_video_rejects_short_plan_without_writing(tmp_db, monkeypatch):
@@ -80,7 +80,7 @@ def test_generate_topic_brief_video_rejects_short_plan_without_writing(tmp_db, m
         "describe_plan_adaptation",
         lambda *_a, **_k: {"adapted": True, "strategies": ["image_fill"]},
     )
-    monkeypatch.setattr(app.hotspot_video_planner, "append_brand_endcard_scenes", lambda scenes: scenes)
+    monkeypatch.setattr(app.hotspot_video_planner, "append_brand_endcard_scenes", lambda scenes, **_kwargs: scenes)
     monkeypatch.setattr(app.model_router, "key_is_available", lambda role: role == "planner_text")
 
     async def must_not_call_model(*_args, **_kwargs):

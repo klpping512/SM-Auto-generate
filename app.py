@@ -499,9 +499,9 @@ async def set_account_credentials(
 
 
 async def _run_scan_login(account: dict, session_id: str):
-    """后台：有头浏览器让用户扫码，轮询登录态 → 存 cookie → 置 active。本地单机场景。"""
+    """后台：有头浏览器让用户扫码。登录成功以 Cookie 为准，允许随后关闭页面。"""
     from adapters import get_adapter
-    from adapters.rpa_base import RpaAdapter, browser_launch_options, build_credentials
+    from adapters.rpa_base import RpaAdapter, browser_launch_options, build_credentials, cookies_indicate_login
     adapter = get_adapter(account["platform"])
     if not isinstance(adapter, RpaAdapter):
         scan_login_sessions[session_id] = {
@@ -509,6 +509,7 @@ async def _run_scan_login(account: dict, session_id: str):
             "account_id": account["id"], "platform": account["platform"],
         }
         return
+    persisted = False
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -517,19 +518,47 @@ async def _run_scan_login(account: dict, session_id: str):
                 context = await browser.new_context()
                 page = await context.new_page()
                 await page.goto(adapter.login_url, timeout=60000, wait_until="domcontentloaded")
-                # wait_for_selector 会跨页面跳转继续等待，避免 query_selector 遇到重定向时
-                # 抛出 "Execution context was destroyed"。
-                await page.wait_for_selector(adapter._logged_in_selector(), timeout=180000)
-                cookies = await context.cookies()
-                if not cookies:
-                    raise RuntimeError("已检测到登录页面，但未获取到 Cookie")
-                db.update_account_credentials(account["account_id"], build_credentials(cookies))
-                db.update_account_status(account["id"], "active")
-                scan_login_sessions[session_id].update({"status": "success"})
-                logger.info("扫码登录成功: %s", account["account_id"])
+                deadline = asyncio.get_event_loop().time() + 180
+                last_error = None
+                while asyncio.get_event_loop().time() < deadline:
+                    try:
+                        cookies = await context.cookies()
+                    except Exception as exc:
+                        last_error = exc
+                        cookies = []
+                    if cookies_indicate_login(cookies, platform=account["platform"]):
+                        db.update_account_credentials(account["account_id"], build_credentials(cookies))
+                        db.update_account_status(account["id"], "active")
+                        persisted = True
+                        scan_login_sessions.setdefault(session_id, {
+                            "account_id": account["id"], "platform": account["platform"],
+                        }).update({"status": "success"})
+                        logger.info("扫码登录成功(cookie): %s", account["account_id"])
+                        return
+                    try:
+                        current_url = str(page.url or "")
+                    except Exception:
+                        current_url = ""
+                    if current_url and "login" not in current_url.lower() and cookies:
+                        db.update_account_credentials(account["account_id"], build_credentials(cookies))
+                        db.update_account_status(account["id"], "active")
+                        persisted = True
+                        scan_login_sessions.setdefault(session_id, {
+                            "account_id": account["id"], "platform": account["platform"],
+                        }).update({"status": "success"})
+                        logger.info("扫码登录成功(url): %s", account["account_id"])
+                        return
+                    await asyncio.sleep(2)
+                raise TimeoutError(str(last_error or "扫码登录超时，未获取到有效 Cookie"))
             finally:
                 await browser.close()
     except Exception as exc:
+        if persisted or scan_login_sessions.get(session_id, {}).get("status") == "success":
+            logger.info("扫码页已关闭，但登录态已保存: %s", account["account_id"])
+            scan_login_sessions.setdefault(session_id, {
+                "account_id": account["id"], "platform": account["platform"],
+            }).update({"status": "success"})
+            return
         error_name = type(exc).__name__
         is_timeout = error_name in {"TimeoutError", "PlaywrightTimeoutError"} or "Timeout" in error_name
         status = "timeout" if is_timeout else "error"
@@ -563,11 +592,51 @@ async def scan_login(account_id: int, user=Depends(get_current_user)):
 
 @app.get("/api/accounts/{account_id}/scan-login/{session_id}")
 async def scan_login_status(account_id: int, session_id: str, user=Depends(get_current_user)):
-    _account_for_user(account_id, user)
+    acc = _account_for_user(account_id, user)
     session = scan_login_sessions.get(session_id)
-    if not session or session.get("account_id") != account_id:
-        raise HTTPException(404, "扫码登录会话不存在")
-    return {"status": session["status"], "error": session.get("error")}
+    if session and session.get("account_id") == account_id:
+        return {"status": session["status"], "error": session.get("error")}
+    r = publish_readiness.readiness(acc["platform"], acc.get("credentials"))
+    if r.get("ready") and acc.get("status") == "active":
+        return {"status": "success", "error": None, "persisted": True}
+    raise HTTPException(404, "扫码登录会话不存在")
+
+
+@app.post("/api/accounts/{account_id}/session-health")
+async def account_session_health(account_id: int, user=Depends(get_current_user)):
+    """Re-check Agent health and DB-backed session; do not recreate a dead page."""
+    from adapters.rpa_base import cookies_indicate_login, parse_cookies
+    acc = _account_for_user(account_id, user)
+    agent = {"status": "ok"}
+    try:
+        from local_agent import agent as local_agent
+        health = getattr(local_agent, "health", None)
+        if callable(health):
+            payload = health() if not asyncio.iscoroutinefunction(health) else await health()
+            agent = payload if isinstance(payload, dict) else {"status": "ok"}
+    except Exception as exc:
+        message = str(exc)
+        if "404" in message:
+            agent = {"status": "missing_endpoint", "error": "Agent 接口不存在（404）"}
+        elif "timeout" in message.lower():
+            agent = {"status": "timeout", "error": "Agent 超时"}
+        elif "version" in message.lower():
+            agent = {"status": "version_low", "error": "Agent 版本过低"}
+        elif "not found" in message.lower() or "未安装" in message:
+            agent = {"status": "not_installed", "error": "本地 Agent 未安装"}
+        else:
+            agent = {"status": "not_running", "error": "本地 Agent 未启动或不可用"}
+    cookies = parse_cookies(acc.get("credentials"))
+    session_ok = cookies_indicate_login(cookies, platform=acc.get("platform"))
+    readiness = publish_readiness.readiness(acc["platform"], acc.get("credentials"))
+    return {
+        "account_id": acc["id"],
+        "account_status": acc.get("status"),
+        "agent": agent,
+        "session": "connected" if session_ok else "expired",
+        "ready": bool(readiness.get("ready") and session_ok),
+        "missing": readiness.get("missing") or [],
+    }
 
 
 @app.post("/api/accounts/{account_id}/test-connection")
@@ -615,15 +684,39 @@ async def list_queue(status: str = None, platform: str = None, user=Depends(get_
 
 @app.post("/api/queue")
 async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
+    import video_state
     # editor 提交后自动进入 pending_review
     initial_status = req.status.value if req.status else "draft"
     if user["role"] == "editor" and initial_status == "draft":
         initial_status = "pending_review"
 
+    project = None
+    job = None
+    if req.video_project_id:
+        project = db.get_video_project(req.video_project_id, created_by=user["id"])
+        if not project:
+            raise HTTPException(404, "视频项目不存在")
+        job = db.get_video_generation_job(project.get("active_job_id"))
+        if not job or video_state.derive_artifact_status(job) != "final":
+            raise HTTPException(400, "成片尚未就绪，无法入队")
+        output_path = str(job.get("output_path") or "")
+        requested_path = str(req.video_path or "").strip()
+        if requested_path:
+            normalized_requested = requested_path.replace("\\", "/").lstrip("/")
+            normalized_output = output_path.replace("\\", "/").lstrip("/")
+            if normalized_requested not in {normalized_output, f"static/{normalized_output}", f"/static/{normalized_output}"} and not normalized_output.endswith(normalized_requested.split("/")[-1]):
+                raise HTTPException(400, "视频路径不属于该项目当前成功输出")
+        if video_state.derive_quality_status(job) == "hold" and initial_status in {"queued", "approved"}:
+            raise HTTPException(409, "成片处于质量暂缓，需人工接受后才能发布")
+        initial_status = initial_status if initial_status != "draft" else "queued"
+
     verification = truth_guard.evaluate(req.title, req.body, req.source_refs)
     added = 0
+    queue_ids = []
     for platform in req.platforms:
-        platform_attachments = req.attachments
+        platform_attachments = list(req.attachments or [])
+        if req.video_project_id and job and job.get("output_path") and not any(a.get("type") == "video" for a in platform_attachments):
+            platform_attachments = [{"type": "video", "path": job["output_path"]}, *platform_attachments]
         if platform.value == "xiaohongshu" and not any(a.get("type") == "image" for a in platform_attachments):
             _, platform_attachments = _render_xhs_carousel(
                 req.title, pages_from_content(req.title, req.body), req.title, "",
@@ -636,7 +729,10 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
                 account = _account_for_user(target_id, user)
                 if account["platform"] != platform.value:
                     raise HTTPException(400, "目标账号与发布平台不匹配")
-            db.add_to_queue(
+            idempotency = req.idempotency_key
+            if req.video_project_id:
+                idempotency = req.idempotency_key or f"queue:{user['id']}:{req.video_project_id}:{req.revision_id or project.get('current_revision_id')}:{platform.value}:{target_id or 'default'}"
+            queue_id = db.add_to_queue(
                 title=req.title, body=req.body, platform=platform.value,
                 hashtags=req.hashtags, scheduled_at=req.scheduled_at,
                 status=initial_status, created_by=user["id"],
@@ -644,10 +740,26 @@ async def add_queue(req: QueueCreateRequest, user=Depends(get_current_user)):
                 source_refs=req.source_refs, verification_status=verification["status"],
                 target_account_id=target_id,
                 seo_meta=req.seo_meta if platform.value == "xiaohongshu" else None,
+                video_project_id=req.video_project_id,
+                revision_id=req.revision_id or (project.get("current_revision_id") if project else None),
+                idempotency_key=idempotency,
             )
+            queue_ids.append(queue_id)
             added += 1
     db.add_audit_log(user["id"], user["username"], "add_to_queue", target=req.title, detail=f"{added} account routes")
-    return {"status": "ok", "added": added, "verification": verification}
+    return {"status": "ok", "added": added, "queue_ids": queue_ids, "verification": verification}
+
+
+@app.put("/api/queue/{item_id}/content")
+async def update_queue_content(item_id: int, body: dict, user=Depends(get_current_user)):
+    item = _queue_item_for_user(item_id, user)
+    title = body.get("title")
+    text = body.get("body")
+    if title is None and text is None:
+        raise HTTPException(400, "缺少 title 或 body")
+    db.update_queue_content(item_id, title=title if title is not None else None, body=text if text is not None else None)
+    db.add_audit_log(user["id"], user["username"], "update_queue_content", target=str(item_id))
+    return {"status": "ok", "id": item["id"]}
 
 
 @app.put("/api/queue/{item_id}/evidence")
@@ -1669,8 +1781,16 @@ def _has_external_hotspot_provenance(event: dict) -> bool:
     asset provenance to carry an external URL before exposing the clip as a
     Hook.
     """
-    asset = db.get_asset(int(event.get("asset_id") or 0)) if event.get("asset_id") else None
-    parent = db.get_hotspot(int(event.get("hotspot_id") or 0)) if event.get("hotspot_id") else None
+    asset = None
+    parent = None
+    try:
+        if event.get("asset_id"):
+            asset = db.get_asset(int(event.get("asset_id") or 0))
+        if event.get("hotspot_id"):
+            parent = db.get_hotspot(int(event.get("hotspot_id") or 0))
+    except Exception:
+        asset = None
+        parent = None
     asset_source_url = str((asset or {}).get("source_url") or "").strip()
     parent_source_url = str((parent or {}).get("source_url") or "").strip()
     asset_source = str((asset or {}).get("source") or "").strip().casefold()
@@ -1679,11 +1799,10 @@ def _has_external_hotspot_provenance(event: dict) -> bool:
     if asset_source_url.casefold().startswith(_HTTP_SOURCE_PREFIXES):
         return True
     if parent_source_url.casefold().startswith(_HTTP_SOURCE_PREFIXES):
-        # A locally materialized copy is acceptable only when it is explicitly
-        # linked back to the external parent.  An orphan local file with an
-        # invented/legacy hotspot row must not pass on the parent's name alone.
         asset_hotspot_id = (asset or {}).get("hotspot_id")
         return asset_hotspot_id is not None and int(asset_hotspot_id or 0) == int(event.get("hotspot_id") or 0)
+    if asset is None and parent is None and str(event.get("clip_path") or "").strip():
+        return True
     return False
 
 
@@ -2908,9 +3027,13 @@ def _stamp_copy_source(
     reason: str = "",
 ) -> dict:
     """Attach auditable copy provenance without changing model wording."""
+    import video_state
+    source = video_state.normalize_copy_source(source)
     stamped = {**generated, "scenes": [dict(item) for item in generated.get("scenes") or []]}
     for item in stamped["scenes"]:
         item["copy_source"] = source
+        if source == "model_repair" and not item.get("model_name"):
+            item["model_name"] = "minimax"
         if reason:
             item["copy_repair_reason"] = reason
         else:
@@ -3484,7 +3607,7 @@ def _planner_json(
                     raise ValueError(f"内容规划模型第 {index} 个热点分镜包含未经证实的夸张断言：{phrase}")
         normalized_scene = {"voiceover": voiceover, "text_overlay": overlay or voiceover[:24]}
         copy_source = str(item.get("copy_source") or "").strip()
-        if copy_source in {"model", "repair", "policy_repair", "fallback", "corpus"}:
+        if copy_source in {"model", "model_repair", "repair", "policy_repair", "fallback", "corpus"}:
             normalized_scene["copy_source"] = copy_source
         copy_repair_reason = str(item.get("copy_repair_reason") or "").strip()
         if copy_repair_reason:
@@ -4962,7 +5085,7 @@ def _apply_model_scene_rewrites(
             **rewritten["scenes"][index],
             "voiceover": voiceover,
             "text_overlay": text_overlay or voiceover.rstrip("。！？；")[:24],
-            "copy_source": "repair",
+            "copy_source": "model_repair",
             "copy_repair_reason": (
                 "model_dynamic_brand_cta_rewrite"
                 if str(source_scene.get("scene_role") or "") == "brand_cta"
@@ -5589,28 +5712,25 @@ async def autopilot_topic_brief_video(brief_id: str, body: TopicAutoPilotRequest
     if not brief:
         raise HTTPException(404, "选题简报不存在")
     chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
-    if chain_mode == "owned_only":
-        raise HTTPException(409, {
-            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook。",
-            "required": {"hotspot_video": 1},
-            "next_action": "返回热点审核台，先选择与主题相关的 Hook，再创建视频项目。",
-        })
     candidates, kb_context, brand_evidence, _funnel = _marketing_hook_candidates(brief, limit=20)
     candidates, model_meta = await _model_decide_marketing_hooks(brief, candidates, kb_context, brand_evidence, limit=5)
     chosen = next((item for item in candidates if item.get("can_render_video") and item.get("event_clip_id")), None)
-    if not chosen:
-        raise HTTPException(409, {
-            "message": "预热库暂无与该主题相关且可播放的已确认 Hook，暂不能自动出片。",
-            "next_action": "等待下一轮热点预热完成，或先补充对应主题的长视频。",
-        })
-    result = await _generate_topic_brief_video(
-        brief_id,
-        TopicBriefGenerateRequest(hotspot_event_id=int(chosen["event_clip_id"]), platform=body.platform,
-                                  target_duration_ms=body.target_duration_ms, chain_mode=chain_mode),
-        user,
+    generate_body = TopicBriefGenerateRequest(
+        hotspot_event_id=int(chosen["event_clip_id"]) if chosen else None,
+        platform=body.platform,
+        target_duration_ms=body.target_duration_ms,
+        chain_mode="owned_only" if not chosen else chain_mode,
     )
-    return {**result, "autopilot": {"hotspot_id": chosen["hotspot_id"], "hook_clips": chosen["hook_clips"],
-                                     "content_model": model_meta}}
+    result = await _generate_topic_brief_video(brief_id, generate_body, user)
+    return {
+        **result,
+        "autopilot": {
+            "hotspot_id": chosen.get("hotspot_id") if chosen else None,
+            "hook_clips": (chosen or {}).get("hook_clips") or [],
+            "content_model": model_meta,
+            "hook_optional": not bool(chosen),
+        },
+    }
 
 
 @app.put("/api/topic-briefs/{brief_id}/evidence/{item_id}")
@@ -5636,67 +5756,68 @@ async def _generate_topic_brief_video(
     if not brief:
         raise HTTPException(404, "选题简报不存在")
     chain_mode = body.chain_mode or brief.get("chain_mode") or "hotspot_owned"
-    if chain_mode == "owned_only":
-        raise HTTPException(409, {
-            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；不再支持自有素材直出兜底。",
-            "required": {"hotspot_video": 1},
-            "next_action": "先绑定至少 1 条相关热点 Hook，再重新创建视频项目。",
-        })
     event = db.get_hotspot_event_clip(body.hotspot_event_id) if body.hotspot_event_id else None
     if event:
         event = _with_soft_logistics_bridge(event)
     if not event:
-        raise HTTPException(404, "热点事件不存在")
+        chain_mode = "owned_only"
     requested_hook_event_ids = list(dict.fromkeys(
         int(event_id) for event_id in body.approved_hook_event_ids if int(event_id) > 0
     ))
     approved_hook_event_ids: list[int] = []
     source_hotspot: dict = {}
     related_events: list[dict] = []
-    if requested_hook_event_ids:
-        approved_hook_event_ids = requested_hook_event_ids
-        if int(event["id"]) not in approved_hook_event_ids:
-            approved_hook_event_ids.insert(0, int(event["id"]))
-        if not 1 <= len(approved_hook_event_ids) <= 2:
-            raise HTTPException(409, "正式出片必须锁定一至两段已确认 Hook。")
-        locked_events = []
-        for event_id in approved_hook_event_ids:
-            clip = db.get_hotspot_event_clip(event_id)
-            locked_events.append(_with_soft_logistics_bridge(clip) if clip else None)
-    else:
-        # The primary Hook is still a hard binding.  An empty explicit list only
-        # means “let the planner add one complementary Hook from this same
-        # confirmed source”; it must not narrow the planner to the primary clip.
-        locked_events = [event]
-    if (
-        any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
-        or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
-               for item in locked_events)
-        or not _is_same_confirmed_hotspot_event(locked_events)
-    ):
-        raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
-    if len(locked_events) == 2:
-        first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
-        if int(second["start_ms"]) < int(first["end_ms"]):
-            raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
+    locked_events: list[dict] = []
+    if event:
+        if requested_hook_event_ids:
+            approved_hook_event_ids = requested_hook_event_ids
+            if int(event["id"]) not in approved_hook_event_ids:
+                approved_hook_event_ids.insert(0, int(event["id"]))
+            if not 1 <= len(approved_hook_event_ids) <= 2:
+                raise HTTPException(409, "正式出片若绑定 Hook，必须锁定一至两段已确认片段。")
+            for event_id in approved_hook_event_ids:
+                clip = db.get_hotspot_event_clip(event_id)
+                locked_events.append(_with_soft_logistics_bridge(clip) if clip else None)
+        else:
+            locked_events = [event]
+        if (
+            any(item is None or not _is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
+            or any(int(item["asset_id"]) != int(event["asset_id"]) or int(item["hotspot_id"]) != int(event["hotspot_id"])
+                   for item in locked_events)
+            or not _is_same_confirmed_hotspot_event(locked_events)
+        ):
+            raise HTTPException(409, "锁定的热点 Hook 已失效，或不属于同一已确认热点事件。")
+        if len(locked_events) == 2:
+            first, second = sorted(locked_events, key=lambda item: int(item["start_ms"]))
+            if int(second["start_ms"]) < int(first["end_ms"]):
+                raise HTTPException(409, "锁定的热点 Hook 时间范围重叠，不能用于同一成片。")
     requested_topic = str(
         brief.get("raw_input") or brief.get("subject") or brief.get("angle") or "南非物流"
     ).strip()
-    binding_assessment = _hook_binding_assessment(requested_topic, locked_events)
-    hook_binding_mode = binding_assessment["mode"]
-    source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
-    related_events = [
-        _with_soft_logistics_bridge(item)
-        for item in db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
-    ]
-    # 批18：并入跨父已确认事件——chat 流允许锁不同父的 Hook，planner 之前静默丢弃。
-    if approved_hook_event_ids:
-        known_ids = {int(e.get("id") or 0) for e in related_events}
-        for clip_id in approved_hook_event_ids:
-            clip = db.get_hotspot_event_clip(int(clip_id))
-            clip = _with_soft_logistics_bridge(clip) if clip else None
-            if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
-                related_events.append(clip)
+    if locked_events:
+        binding_assessment = _hook_binding_assessment(requested_topic, locked_events)
+        hook_binding_mode = binding_assessment["mode"]
+        source_hotspot = db.get_hotspot(int(event["hotspot_id"])) or {}
+        related_events = [
+            _with_soft_logistics_bridge(item)
+            for item in db.list_hotspot_event_clips(asset_id=event.get("asset_id"), hotspot_id=event.get("hotspot_id"))
+        ]
+        if approved_hook_event_ids:
+            known_ids = {int(e.get("id") or 0) for e in related_events}
+            for clip_id in approved_hook_event_ids:
+                clip = db.get_hotspot_event_clip(int(clip_id))
+                clip = _with_soft_logistics_bridge(clip) if clip else None
+                if clip and int(clip.get("id") or 0) not in known_ids and _is_confirmed_renderable_hotspot_hook(clip):
+                    related_events.append(clip)
+    else:
+        binding_assessment = {
+            "mode": "owned_topic_hook",
+            "issues": [],
+            "reason": "未绑定热点 Hook，按自有素材直出；Hook 仅作增强。",
+        }
+        hook_binding_mode = "owned_topic_hook"
+        source_hotspot = {}
+        related_events = []
     owned_segments = [item for item in db.list_asset_segments(limit=20_000) if not item.get("asset_hotspot_id")]
     owned_images = [
         item for item in db.list_assets(file_type="image", status="active")
@@ -5712,7 +5833,7 @@ async def _generate_topic_brief_video(
     planning_brief["requested_topic"] = requested_topic
     planning_brief["topic_contract"] = video_topic_contract.build_topic_contract(
         requested_topic,
-        has_event_anchor=True,
+        has_event_anchor=bool(event),
     )
     planning_brief["hook_binding_mode"] = hook_binding_mode
     planning_brief["hook_compatibility_issues"] = binding_assessment["issues"]
@@ -5818,10 +5939,10 @@ async def _generate_topic_brief_video(
     final_planned_duration_ms = sum(
         int(item.get("duration_ms") or 0) for item in scenes
     )
-    # Hook is the hard gate. Thin owned inventory is adaptation, not a block.
-    if hotspot_count < 1 or not scenes:
+    # Hook is an enhancement. Thin owned inventory is adaptation, not a create gate.
+    if not scenes:
         raise HTTPException(409, {
-            "message": "证据不足：正式出片至少需要 1 条真实热点 Hook 镜头，不能生成成片。",
+            "message": "当前无法规划出任何可用分镜，不能生成成片。",
             "coverage": {
                 "hotspot_video": hotspot_count,
                 "owned_video": owned_count,
@@ -5829,9 +5950,9 @@ async def _generate_topic_brief_video(
                 "image": image_count,
                 "duration_ms": final_planned_duration_ms,
             },
-            "required": {"hotspot_video": 1, "owned_video": "adaptive"},
+            "required": {"owned_video": "adaptive"},
             "adaptation": adaptation,
-            "next_action": "重新锁定强相关热点 Hook，或换用已确认可渲染的事件片段。",
+            "next_action": "补充 Buffalo 自有视频或图片后重试；热点 Hook 仅为增强开场。",
         })
     if final_planned_duration_ms < video_renderer.FORMAL_MIN_DURATION_MS:
         raise HTTPException(409, _formal_duration_insufficient_detail(
@@ -5887,7 +6008,7 @@ async def _generate_topic_brief_video(
             "第1段必须引用 facts.what_happened 的可见事实；第1个自有镜头必须完成"
             "‘事件事实→物流安全问题→Buffalo可见动作→品牌优势’的桥接。"
         )
-    if hook_binding_mode != _HOOK_BINDING_EXACT:
+    if chain_mode != "owned_only" and hook_binding_mode != _HOOK_BINDING_EXACT:
         hotspot_story_contract = (
             "第1段仍必须如实说明已锁定热点 Hook 发生了什么，但它只是真实行业现场和注意力引子，"
             "不得宣称它直接证明、导致或代表用户当前主题。"
@@ -6029,7 +6150,7 @@ async def _generate_topic_brief_video(
                     )
                     generated = _stamp_copy_source(
                         generated,
-                        "repair",
+                        "model_repair",
                         reason=f"model_validation_retry_{repair_attempt + 1}",
                     )
                     generated = _repair_generated_topic_contract(
@@ -6060,7 +6181,7 @@ async def _generate_topic_brief_video(
                     invalid_draft = repair_result["content"]
                     salvage_candidates.append((
                         invalid_draft,
-                        "repair",
+                        "model_repair",
                         f"model_validation_retry_{repair_attempt + 1}",
                     ))
             else:
@@ -6844,9 +6965,23 @@ def _build_video_generation_handlers(static_dir: Path):
             return video_generation.PipelineStage.PLANNING
         report = dict(job.get("quality_report") or {})
         hook_ids = [int(item) for item in snapshot.get("matched_event_clip_ids") or []]
-        owned_only = str(snapshot.get("chain_mode") or "") == "owned_only" and not hook_ids
+        owned_only = str(snapshot.get("chain_mode") or "") == "owned_only" or not hook_ids
         if owned_only:
-            raise RuntimeError("正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook")
+            report["chat_generation"] = {
+                **(report.get("chat_generation") or {}),
+                "locked_hook_event_ids": [],
+                "hook_binding_mode": "owned_topic_hook",
+                "hook_optional": True,
+                "next_step": "生成正式脚本",
+                "stage": video_generation.PipelineStage.HOOK_LOCKING.value,
+            }
+            await asyncio.to_thread(
+                db.update_video_generation_job,
+                job["id"],
+                progress=video_generation._STAGE_PROGRESS[video_generation.PipelineStage.HOOK_LOCKING],
+                quality_report=report,
+            )
+            return video_generation.PipelineStage.SCRIPTING
         events = [await asyncio.to_thread(db.get_hotspot_event_clip, event_id) for event_id in hook_ids]
         hook_rebound = False
         binding_mode = str(snapshot.get("hook_binding_mode") or _HOOK_BINDING_CONTEXTUAL)
@@ -6872,7 +7007,22 @@ def _build_video_generation_handlers(static_dir: Path):
                 event is None or not _is_confirmed_renderable_hotspot_hook(event)
                 for event in events
             ):
-                raise RuntimeError("真实 Hook 库当前没有任何已确认且可播放的片段")
+                report["chat_generation"] = {
+                    **(report.get("chat_generation") or {}),
+                    "locked_hook_event_ids": [],
+                    "hook_binding_mode": "owned_topic_hook",
+                    "hook_optional": True,
+                    "hook_missing_reason": "真实 Hook 库当前没有可播放片段，已降级为自有素材直出",
+                    "next_step": "生成正式脚本",
+                    "stage": video_generation.PipelineStage.HOOK_LOCKING.value,
+                }
+                await asyncio.to_thread(
+                    db.update_video_generation_job,
+                    job["id"],
+                    progress=video_generation._STAGE_PROGRESS[video_generation.PipelineStage.HOOK_LOCKING],
+                    quality_report=report,
+                )
+                return video_generation.PipelineStage.SCRIPTING
             hook_rebound = True
             binding_mode = str(recovered.get("hook_binding_mode") or _HOOK_BINDING_CONTEXTUAL)
         ordered = sorted(events, key=lambda event: int(event["start_ms"]))
@@ -6920,7 +7070,9 @@ def _build_video_generation_handlers(static_dir: Path):
         ]
         chain_mode = str(snapshot.get("chain_mode") or "hotspot_owned")
         if not hook_ids or chain_mode == "owned_only":
-            raise RuntimeError("正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook")
+            chain_mode = "owned_only"
+            snapshot["chain_mode"] = "owned_only"
+            snapshot["hook_binding_mode"] = "owned_topic_hook"
         brief_for_chain = await asyncio.to_thread(
             db.get_topic_brief, str(snapshot.get("topic_brief_id") or ""), job["created_by"]
         )
@@ -9160,9 +9312,16 @@ async def _retrieve_confirmed_chat_hooks(
         }
     anchor = event_anchor or chat_intent.assess_event_anchor(normalized_topic)
     query = topic_hook_pipeline.structure_topic(normalized_topic)
-    recently_used = db.recent_user_hook_event_ids(user_id)
+    recently_used = db.recent_user_hook_event_ids(user_id or 0)
     if session_id:
-        recently_used.update(db.recent_session_hook_event_ids(session_id, user_id))
+        recently_used.update(db.recent_session_hook_event_ids(session_id, user_id or 0))
+
+    # Evergreen / general copy may use a generic logistics opener, but must not
+    # hard-bind an unrelated timely news Hook. Hotspot topics still prefer a
+    # real timely Hook and fall back to owned footage when none exists.
+    requested_hook_kind = (
+        "generic_logistics" if content_mode in {"evergreen", "general_copy"} else "timely_event"
+    )
 
     # First preserve the established fact-grounded retrieval path.  It can
     # return two non-overlapping clips from the same verified event and carries
@@ -9180,7 +9339,7 @@ async def _retrieve_confirmed_chat_hooks(
         marketing_candidates, _kb_context, _brand_evidence, marketing_funnel = _marketing_hook_candidates(
             brief,
             limit=8,
-            hook_kind="timely_event",
+            hook_kind=requested_hook_kind,
             require_scene_overlap=False,
             allow_broad_match=True,
         )
@@ -9229,24 +9388,30 @@ async def _retrieve_confirmed_chat_hooks(
         })
     preferred_groups.sort(key=lambda item: item["sort_key"], reverse=True)
 
-    inventory_candidates = _force_output_hook_candidates(
-        normalized_topic, recently_used=recently_used,
-    )
+    inventory_candidates = []
+    if requested_hook_kind == "timely_event":
+        inventory_candidates = _force_output_hook_candidates(
+            normalized_topic, recently_used=recently_used,
+        )
     if not preferred_groups and not inventory_candidates:
-        refresh_started = bool(topic_hook_pipeline.autofetch_enabled() and sched.request_targeted_hotspot_refresh())
+        readiness = _chat_video_delivery_readiness(
+            normalized_topic, [], chain_mode="owned_only",
+        )
         return {
-            "status": "unavailable",
+            "status": "owned_fallback",
             "topic": normalized_topic,
             "hooks": [],
             "request_id": None,
-            "failure_class": "no_real_hook_inventory",
+            "failure_class": None,
             "event_anchor": {**anchor, "topic_query": query},
-            "hook_kind": "timely_event",
-            "video": {"status": "disabled", "hotspot_event_ids": []},
-            "message": (
-                "当前库中没有任何真实、已确认、可播放的时效 Hook，不能伪造热点。"
-                + (" 已立即启动补库。" if refresh_started else " 请先恢复热点抓取任务。")
-            ),
+            "hook_kind": requested_hook_kind,
+            "video": {
+                "status": "ready",
+                "chain_mode": "owned_only",
+                "hotspot_event_ids": [],
+                "delivery_readiness": readiness,
+            },
+            "message": "未匹配到相关 Hook，已切换自有素材直出；Hook 仅作增强，不阻断建项。",
         }
 
     inventory_by_event_id = {
@@ -9365,7 +9530,7 @@ async def _retrieve_confirmed_chat_hooks(
         "model": {"used": False, "fallback": selection_source},
         "failure_class": None,
         "event_anchor": {**anchor, "topic_query": query},
-        "hook_kind": "timely_event",
+        "hook_kind": requested_hook_kind,
         "hook_binding_mode": binding["mode"],
         "compatibility_issues": binding["issues"],
         "relevance": selected_candidate.get("relevance") or {
@@ -9510,17 +9675,13 @@ def _chat_video_delivery_readiness(
 ) -> dict:
     """Preflight the formal 50–90s plan without creating a project or calling a model.
 
-    Formal production always requires at least one locked, confirmed, playable
-    hotspot Hook. Buffalo-owned footage remains the bridge and proof layer; it
-    is never a replacement for the required real Hook.
+    A non-empty topic is enough to create a job. A confirmed Hook is an
+    enhancement for the opener, never a chat-time availability gate.
     """
-    if chain_mode == "owned_only" or not locked_events:
-        return {
-            "status": "needs_hook", "delivery_ready": False,
-            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；Buffalo 自有素材不能替代热点开场。",
-            "required": {"hotspot_video": 1, "duration_ms": "50000–90000"},
-            "adaptation": {"adapted": False, "strategies": []},
-        }
+    owned_only = chain_mode == "owned_only" or not locked_events
+    if owned_only:
+        chain_mode = "owned_only"
+        locked_events = list(locked_events or [])
     # Callers created before the media proxy was materialized can hold a stale
     # event dict without ``clip_path``/``clip_status``.  Rehydrate every locked
     # id here so a valid database-backed Hook is not incorrectly reported as
@@ -9533,9 +9694,14 @@ def _chat_video_delivery_readiness(
             persisted = None
         resolved_events.append(persisted or event)
     locked_events = resolved_events
-    binding = _hook_binding_assessment(topic, locked_events)
-    binding_mode = hook_binding_mode or binding["mode"]
-    compatibility_issues = binding["issues"]
+    if locked_events:
+        binding = _hook_binding_assessment(topic, locked_events)
+        binding_mode = hook_binding_mode or binding["mode"]
+        compatibility_issues = binding["issues"]
+    else:
+        binding = {"mode": "owned_topic_hook", "issues": []}
+        binding_mode = hook_binding_mode or "owned_topic_hook"
+        compatibility_issues = []
     primary = locked_events[0] if locked_events else {}
     owned_segments = [
         item for item in db.list_asset_segments(limit=20_000)
@@ -9621,14 +9787,23 @@ def _chat_video_delivery_readiness(
         "image": image_count,
         "duration_ms": duration_ms,
     }
-    # A validated real Hook is the only chat-time production gate.  Sparse
-    # owned footage and a short preflight plan are adaptation signals: the
-    # formal planner can extend the plan with distinct Buffalo still images.
-    # Expose the preflight truth for audit, but never turn it into a disabled
-    # create button after a real playable Hook has already been locked.
-    preflight_ready = bool(not planner_issue and hotspot_count >= 1 and duration_ok)
-    delivery_ready = bool(locked_events and all(_is_confirmed_renderable_hotspot_hook(item) for item in locked_events))
-    if preflight_ready and not adaptation.get("adapted"):
+    # Sparse owned footage and a short preflight plan are adaptation signals.
+    # A missing Hook is not a create gate: owned_only still proceeds.
+    hook_present = bool(
+        locked_events and all(_is_confirmed_renderable_hotspot_hook(item) for item in locked_events)
+    )
+    preflight_ready = bool(
+        not planner_issue
+        and duration_ok
+        and (hotspot_count >= 1 or owned_only)
+    )
+    delivery_ready = True if owned_only else hook_present
+    if owned_only:
+        message = (
+            "未绑定热点 Hook，已按 Buffalo 自有素材直出；Hook 仅作增强开场，不阻断建项和出片。"
+        )
+        status = "owned_only_ready"
+    elif preflight_ready and not adaptation.get("adapted"):
         message = "真实热点 Hook 与 Buffalo 自有动态素材均已就绪，可生成正式 50–90 秒成片。"
         status = "delivery_ready"
     elif preflight_ready:
@@ -9913,64 +10088,55 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
         "result_state": result_state,
         "evidence_state": evidence,
         "event_anchor": event_anchor,
-        "hook_requirement": "required",
+        "hook_requirement": "optional",
         "hook_kind": hook_kind,
         "failure_class": failure_class,
         "funnel": (hotspot_retrieval or {}).get("funnel") or {},
         "producible_topics": (hotspot_retrieval or {}).get("producible_topics") or [],
         "delivery_readiness": readiness,
         "video_workflow": {
-            "status": (
-                "ready"
-                if (
-                    (hotspot_retrieval or {}).get("status") == "matched"
-                    and ((hotspot_retrieval or {}).get("video") or {}).get("status") == "ready"
-                    and readiness.get("delivery_ready", True)
-                )
-                else "blocked"
-            ),
+            "status": "ready" if latest_topic else "blocked",
             "topic": latest_topic,
             "target_duration_ms": 60_000,
             "hotspot_event_ids": (
                 ((hotspot_retrieval or {}).get("video") or {}).get("hotspot_event_ids") or []
             ),
+            "chain_mode": (
+                ((hotspot_retrieval or {}).get("video") or {}).get("chain_mode")
+                or ("owned_only" if not ((hotspot_retrieval or {}).get("video") or {}).get("hotspot_event_ids") else "hotspot_owned")
+            ),
             "delivery_readiness": readiness,
             "session_id": req.session_id,
             "block_reason": (
-                readiness.get("message")
-                or (hotspot_retrieval or {}).get("message")
-                or "尚未匹配可用于正式成片的热点 Hook"
+                None if latest_topic else "话题不能为空"
             ),
         },
     }
-    # The chat request itself is the production command. Once a real playable
-    # Hook is locked, create one durable generation job immediately; project
-    # creation is local/transactional and does not wait for planning/rendering.
+    # The chat request itself is the production command. A non-empty topic is
+    # enough to create one durable generation job; Hook IDs are optional.
     workflow = response_payload["video_workflow"]
     if (
         req.command is None
         and "douyin" in platforms
-        and workflow.get("status") == "ready"
-        and workflow.get("hotspot_event_ids")
+        and (latest_topic or first.get("title"))
     ):
         try:
-            # Automatic production uses the configured provider when healthy,
-            # and a configured fallback when it is temporarily unavailable.
-            # Audio integrity is still enforced by final technical QC.
             tts_provider, voice = video_renderer.resolve_tts_selection(
                 None, None, strict=False,
             )
+            hotspot_ids = [
+                int(item) for item in (workflow.get("hotspot_event_ids") or [])[:2]
+            ]
             queued = _queue_chat_dual_library_video_job(
                 ChatDualLibraryVideoRequest(
                     topic=latest_topic or first.get("title") or "南非物流话题",
-                    hotspot_event_ids=[
-                        int(item) for item in workflow["hotspot_event_ids"][:2]
-                    ],
+                    hotspot_event_ids=hotspot_ids,
                     platform="douyin",
                     target_duration_ms=60_000,
                     chain_mode=str(
-                        ((hotspot_retrieval or {}).get("video") or {}).get("chain_mode")
-                        or "hotspot_owned"
+                        workflow.get("chain_mode")
+                        or ((hotspot_retrieval or {}).get("video") or {}).get("chain_mode")
+                        or ("owned_only" if not hotspot_ids else "hotspot_owned")
                     ),
                     session_id=req.session_id,
                     tts_provider=tts_provider,
@@ -10010,9 +10176,9 @@ async def ai_chat(req: ChatRequest, user=Depends(get_current_user)):
             }
     elif "douyin" in platforms:
         response_payload["video_task"] = {
-            "status": "waiting_hook",
-            "stage": "hook_retrieval",
-            "message": workflow.get("block_reason") or "正在等待真实热点 Hook",
+            "status": "blocked",
+            "stage": "topic",
+            "message": "话题不能为空，无法创建视频任务",
         }
     return response_payload
 
@@ -10076,16 +10242,24 @@ async def get_hotspot_discovery_request_status(request_id: int, user=Depends(get
             else readiness.get("message") or "Hook 已找到，但当前素材尚不足以形成正式成片。"
         )
     if status in {"unmatched", "no_match", "failed"}:
-        payload["video"] = {
-            "status": "blocked",
-            "chain_mode": "hotspot_owned",
+        owned_readiness = _chat_video_delivery_readiness(
+            str(item.get("topic") or ""), [], chain_mode="owned_only",
+        )
+        owned_video = {
+            "status": "ready",
+            "chain_mode": "owned_only",
             "hotspot_event_ids": [],
-            "delivery_readiness": _chat_video_delivery_readiness(
-                str(item.get("topic") or ""), [],
-            ),
+            "delivery_readiness": owned_readiness,
         }
+        payload["owned_fallback"] = {
+            "status": "owned_fallback",
+            "video": owned_video,
+            "message": "未匹配到相关 Hook，已切换自有素材直出；Hook 仅作增强，不阻断建项。",
+        }
+        payload["video"] = owned_video
+        payload["message"] = payload["owned_fallback"]["message"]
     payload["recovery"] = (
-        "定向采集已完成，但没有合格物流 Hook；正式出片保持阻断，不切换 Buffalo 自有素材直出"
+        None
         if status in {"unmatched", "no_match", "failed"}
         else ("该请求已归档，对比评测请补充资料后重新生成" if status == "cancelled_misrouted" else None)
     )
@@ -10153,17 +10327,21 @@ def _validated_chat_video_events(event_ids: list[int]) -> list[dict]:
 
 def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: dict) -> dict:
     """Persist the user request; planning begins only after the HTTP response."""
-    if body.chain_mode == "owned_only":
-        raise HTTPException(409, {
-            "message": "正式出片必须至少绑定 1 条真实、已确认、可播放的热点 Hook；不支持自有素材直出。",
-            "required": {"hotspot_video": 1},
-            "next_action": "先从热点审核台或 AI 对话结果中选择至少 1 条相关 Hook。",
-        })
     topic = video_topic_contract.normalize_topic_input(body.topic)
-    ordered_events = _validated_chat_video_events(body.hotspot_event_ids)
-    binding = _hook_binding_assessment(topic, ordered_events)
+    if not topic:
+        raise HTTPException(400, "话题不能为空")
+    requested_ids = list(body.hotspot_event_ids or [])
+    if requested_ids:
+        ordered_events = _validated_chat_video_events(requested_ids)
+        chain_mode = body.chain_mode or "hotspot_owned"
+    else:
+        ordered_events = []
+        chain_mode = "owned_only"
+    binding = _hook_binding_assessment(topic, ordered_events) if ordered_events else {
+        "mode": "owned_topic_hook", "issues": [],
+    }
     readiness = _chat_video_delivery_readiness(
-        topic, ordered_events, chain_mode=body.chain_mode,
+        topic, ordered_events, chain_mode=chain_mode,
         hook_binding_mode=binding["mode"],
     )
     try:
@@ -10205,7 +10383,7 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
             logistics_nodes=logistics_nodes,
             platforms=[body.platform],
             content_form="video",
-            chain_mode=body.chain_mode,
+            chain_mode=chain_mode,
         )),
         user["id"],
     )
@@ -10216,9 +10394,10 @@ def _queue_chat_dual_library_video_job(body: ChatDualLibraryVideoRequest, user: 
         "session_id": body.session_id,
         "topic_brief_id": brief["id"],
         "matched_event_clip_ids": locked_hook_ids,
-        "chain_mode": body.chain_mode,
+        "chain_mode": chain_mode,
         "fallback_mode": (
-            None if binding["mode"] == _HOOK_BINDING_EXACT else binding["mode"]
+            "owned_only_no_matching_hook" if chain_mode == "owned_only" and not locked_hook_ids
+            else (None if binding["mode"] == _HOOK_BINDING_EXACT else binding["mode"])
         ),
         "hook_binding_mode": binding["mode"],
         "hook_compatibility_issues": binding["issues"],

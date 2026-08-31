@@ -207,12 +207,31 @@ def test_project_status_tracks_job_terminal_and_review_states(tmp_db):
     assert loaded["status"] == "needs_review"
     assert loaded["active_job_id"] == job["id"]
 
-    expected = {"succeeded": "ready", "failed": "failed", "canceled": "canceled"}
+    expected = {"succeeded": "draft", "failed": "failed", "canceled": "canceled"}
     for terminal, project_status in expected.items():
         tmp_db.update_video_generation_job(job["id"], status=terminal, stage=terminal)
         loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
         assert loaded["status"] == project_status
         assert loaded["active_job_id"] == job["id"]
+
+
+def test_needs_review_does_not_block_new_job_with_same_idempotency_key(tmp_db):
+    user_id = _user(tmp_db)
+    project, revision = _project_and_revision(tmp_db, user_id)
+    first, _ = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "review-key"
+    )
+    tmp_db.update_video_generation_job(first["id"], status="needs_review", stage="preview_quality_check")
+
+    second, created = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "review-key"
+    )
+
+    assert created is True
+    assert second["id"] != first["id"]
+    active_ids = {job["id"] for job in tmp_db.list_active_video_generation_jobs(user_id)}
+    assert first["id"] not in active_ids
+    assert second["id"] in active_ids
 
 
 def test_cancel_pending_job_sets_project_canceled(tmp_db):
@@ -225,6 +244,21 @@ def test_cancel_pending_job_sets_project_canceled(tmp_db):
     loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
     assert loaded["status"] == "canceled"
     assert loaded["active_job_id"] == job["id"]
+
+
+def test_succeeded_without_mp4_is_not_ready(tmp_db):
+    user_id = _user(tmp_db)
+    project, revision = _project_and_revision(tmp_db, user_id)
+    job, _ = tmp_db.create_or_get_video_generation_job(
+        project["id"], revision["id"], user_id, "no-file-key"
+    )
+    tmp_db.update_video_generation_job(
+        job["id"], status="succeeded", stage="succeeded", progress=100, output_path="",
+    )
+    loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
+    assert loaded["status"] == "draft"
+    assert loaded["artifact_status"] == "absent"
+    assert loaded["publish_allowed"] is False
 
 
 def test_revision_payload_update_does_not_force_generating_for_terminal_job(tmp_db):
@@ -241,5 +275,6 @@ def test_revision_payload_update_does_not_force_generating_for_terminal_job(tmp_
         title="改标题",
     )
     loaded = tmp_db.get_video_project(project["id"], created_by=user_id)
-    assert loaded["status"] == "ready"
+    assert loaded["status"] == "draft"
+    assert loaded["artifact_status"] == "absent"
     assert loaded["active_job_id"] == job["id"]

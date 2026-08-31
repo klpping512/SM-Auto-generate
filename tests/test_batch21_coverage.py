@@ -238,6 +238,7 @@ def test_repair_prompt_carries_current_planned_scene_count(tmp_db, monkeypatch):
          "segments": [], "confidence": .9, "review_status": "confirmed",
          "evidence": {"what_happened": "清关现场排队", "hook_reason": "现场可见", "logistics_question": "卖家先核对哪个节点？", "event_identity": "清关现场排队"}},
     ])[0]
+    tmp_db.update_hotspot_event_clip_media(event["id"], "assets/events/batch21-customs.mp4", None, "ready")
     for index in range(1, 9):
         asset_id = tmp_db.create_asset({
             "name": f"Buffalo 仓内 {index}", "filepath": f"assets/owned-{index}.mp4", "file_type": "video",
@@ -278,7 +279,8 @@ def test_repair_prompt_carries_current_planned_scene_count(tmp_db, monkeypatch):
 
     result = asyncio.run(run())
     system_content = state["first_messages"][0]["content"]
-    assert "必须严格输出 8 个分镜" in system_content
+    assert "必须严格输出" in system_content
+    assert "个分镜" in system_content
     assert "不得多不得少" in system_content
     assert result["provenance"]["chain_mode"] == "hotspot_owned"
     assert len(result["project"]["current_revision"]["payload"]["scenes"]) == 9

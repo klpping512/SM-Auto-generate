@@ -155,7 +155,8 @@ def normalize_topic_input(topic: str) -> str:
     deliberately deterministic and keeps the original input out of the
     semantic subject field.
     """
-    text = " ".join(str(topic or "").split())[:500]
+    original = " ".join(str(topic or "").split())[:500]
+    text = original
     if not text:
         return ""
     instruction_mode = False
@@ -177,7 +178,7 @@ def normalize_topic_input(topic: str) -> str:
                 text = prefix
         else:
             about = re.search(
-                r"(?:关于|围绕)\s*[「『“\"]?(.+?)[」』”\"]?\s*"
+                r"(?:关于|围绕|关乎)\s*[「『“\"]?(.+?)[」』”\"]?\s*"
                 r"(?:的)?(?:介绍|相关)?(?:视频|内容|文案)",
                 text,
                 flags=re.IGNORECASE,
@@ -199,7 +200,8 @@ def normalize_topic_input(topic: str) -> str:
         r"\s*(?:请帮我|帮我)\s*(?:生成|创作|制作).*$", "", text, flags=re.IGNORECASE
     )
     instruction_mode = instruction_mode or bool(command_removed)
-    return (text.strip(" ：:，,。；;！？?!") if instruction_mode else text.strip(" ：:，,。；;"))[:300]
+    cleaned = (text.strip(" ：:，,。；;！？?!") if instruction_mode else text.strip(" ：:，,。；;"))[:300]
+    return cleaned or original[:300]
 
 
 def _custom_topic_nodes(subject: str) -> list[str]:

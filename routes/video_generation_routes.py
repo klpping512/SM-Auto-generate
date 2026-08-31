@@ -220,7 +220,54 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
                 if active_job.get("output_path"):
                     active_job["output_url"] = "/static/" + active_job["output_path"]
                 project["active_job"] = active_job
+        import video_state
+        project["diagnostics"] = video_state.build_diagnostics(project, project.get("active_job"))
         return project
+
+    @router.get("/api/video-projects/{project_id}/publication-draft")
+    async def video_project_publication_draft(project_id: str, user=Depends(get_current_user)):
+        project = db.get_video_project(project_id, created_by=user["id"])
+        if not project:
+            raise HTTPException(404, "视频项目不存在")
+        job = db.get_video_generation_job(project.get("active_job_id"), created_by=user["id"]) or {}
+        payload = ((project.get("current_revision") or {}).get("payload") or {})
+        script = ((job.get("quality_report") or {}).get("script") or {})
+        scenes = list(script.get("scenes") or payload.get("scenes") or [])
+        body = "\n".join(
+            str(scene.get("voiceover") or "").strip()
+            for scene in scenes
+            if str(scene.get("voiceover") or "").strip()
+        )
+        video_path = job.get("output_path") or job.get("preview_path") or ""
+        rendered = None
+        if video_path:
+            rendered = {
+                "type": "video",
+                "path": video_path,
+                "url": "/static/" + str(video_path).lstrip("/"),
+                "filename": str(video_path).split("/")[-1],
+            }
+        return {
+            "platform": project.get("platform") or "douyin",
+            "title": payload.get("title") or script.get("title") or project.get("title") or "",
+            "body": payload.get("body") or body,
+            "hashtags": payload.get("hashtags") or [],
+            "attachments": [rendered] if rendered else [],
+            "rendered_video": rendered,
+            "copy_source": "video_project_narrative",
+            "duration_target": round(int(project.get("target_duration_ms") or 60000) / 1000),
+            "artifact_status": project.get("artifact_status") or (job.get("artifact_status") if job else "absent"),
+            "quality_status": project.get("quality_status") or (job.get("quality_status") if job else "unknown"),
+            "scenes": [
+                {
+                    "scene": scene.get("scene") or index,
+                    "voiceover": scene.get("voiceover") or "",
+                    "copy_source": scene.get("copy_source") or "fallback",
+                    "model_name": scene.get("model_name") or "",
+                }
+                for index, scene in enumerate(scenes, 1)
+            ],
+        }
 
     @router.put("/api/video-projects/{project_id}/revision")
     async def update_video_project_revision(
@@ -321,6 +368,9 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
             job["preview_url"] = "/static/" + job["preview_path"]
         if job.get("output_path"):
             job["output_url"] = "/static/" + job["output_path"]
+        import video_state
+        project = db.get_video_project(job.get("project_id"), created_by=user["id"])
+        job["diagnostics"] = video_state.build_diagnostics(project, job)
         return job
 
     @router.post("/api/video-generation/jobs/{job_id}/cancel")
@@ -558,36 +608,41 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
         )
         return result
 
-    # P3: 发布队列入队入口
+    # P3: 发布队列入队入口 — 转发到统一 POST /api/queue 语义
     @router.post("/api/video-projects/{project_id}/enqueue")
     async def enqueue_video_project(
         project_id: str,
         request: VideoProjectEnqueueRequest,
         user=Depends(get_current_user),
     ) -> dict:
-        """将已完成渲染的视频项目加入发布队列（立即或定时）。"""
+        """Forward project enqueue onto the single POST /api/queue path."""
+        import video_state
         project = db.get_video_project(project_id, created_by=user["id"])
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
         job = db.get_video_generation_job(project.get("active_job_id"))
-        if not job or job.get("status") != "succeeded" or not job.get("output_path"):
+        if not job or video_state.derive_artifact_status(job) != "final":
             raise HTTPException(status_code=400, detail="成片尚未就绪，无法入队")
-        publication = dict((job.get("quality_report") or {}).get("publication") or {})
-        if publication.get("publish_allowed") is False:
+        if video_state.derive_quality_status(job) == "hold":
             raise HTTPException(
                 status_code=409,
                 detail="成片已完成，但当前处于质量暂缓状态；人工复核通过前不能进入发布队列",
             )
-
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        scheduled_at = request.scheduled_at or now_str
+        payload = (project.get("current_revision") or {}).get("payload") or {}
+        script = ((job.get("quality_report") or {}).get("script") or {})
+        title = request.title or project.get("title") or payload.get("title") or script.get("title") or ""
+        body = str(payload.get("body") or "") or "\n".join(
+            str(scene.get("voiceover") or "").strip()
+            for scene in (script.get("scenes") or [])
+            if str(scene.get("voiceover") or "").strip()
+        )
         platforms = request.platforms or [project.get("platform", "douyin")]
         valid_platforms = {p.value for p in Platform}
         for platform in platforms:
             if platform not in valid_platforms:
                 raise HTTPException(status_code=400, detail=f"不支持的平台：{platform}")
-
         created_ids = []
+        revision_id = project.get("current_revision_id") or job.get("revision_id")
         for platform in platforms:
             target_ids = request.account_targets.get(platform) or [None]
             for target_id in target_ids:
@@ -597,22 +652,38 @@ def create_router(static_dir: Path | Callable[[], Path]) -> APIRouter:
                         raise HTTPException(status_code=403, detail="不能操作其他用户的账号")
                     if account.get("platform") != platform:
                         raise HTTPException(status_code=400, detail="目标账号与发布平台不匹配")
+                idempotency = f"queue:{user['id']}:{project_id}:{revision_id}:{platform}:{target_id or 'default'}"
                 queue_id = db.add_to_queue(
-                    title=request.title or project.get("title") or "",
-                    body="",
+                    title=title,
+                    body=body,
                     platform=platform,
-                    scheduled_at=scheduled_at,
+                    scheduled_at=request.scheduled_at,
                     status="queued",
                     created_by=user["id"],
                     attachments=[{"type": "video", "path": job["output_path"]}],
                     target_account_id=target_id,
+                    video_project_id=project_id,
+                    revision_id=revision_id,
+                    idempotency_key=idempotency,
                 )
                 created_ids.append(queue_id)
-
         db.add_audit_log(
             user["id"], user["username"], "enqueue_video_project",
             target=project_id, detail=json.dumps({"queue_ids": created_ids}),
         )
-        return {"status": "queued", "queue_ids": created_ids, "message": f"已入队 {len(created_ids)} 条"}
+        return {
+            "status": "queued",
+            "queue_ids": created_ids,
+            "message": f"已入队 {len(created_ids)} 条，请到发布队列确认后发布",
+        }
+
+    @router.get("/api/video-projects/{project_id}/diagnostics")
+    async def video_project_diagnostics(project_id: str, user=Depends(get_current_user)) -> dict:
+        import video_state
+        project = db.get_video_project(project_id, created_by=user["id"])
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        job = db.get_video_generation_job(project.get("active_job_id"), created_by=user["id"])
+        return video_state.build_diagnostics(project, job)
 
     return router

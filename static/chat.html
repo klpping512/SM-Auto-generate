@@ -89,7 +89,7 @@ async function init(){
   document.getElementById('app').innerHTML=`${renderSidebar(PAGE_ID)}
   <main class="main-content chat-main">
     <header class="page-header chat-page-header"><div class="chat-title"><h1 class="page-title">AI 对话</h1><span class="current-chat-title" id="currentChatTitle"></span></div><div class="header-actions"><button id="historyBtn" class="btn btn-secondary btn-sm" onclick="openHistory()">历史对话</button><button id="newChatBtn" class="btn btn-primary btn-sm" onclick="startNewChat()">＋ 新对话</button></div></header>
-    ${getPlatformContext() === 'wechat_mp' ? `<div class="card" style="border-left:4px solid #07C160;margin:0 24px 12px;"><div class="card-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;">当前生产平台：<b>微信公众号</b> —— 图文长文请在<a href="/articles.html" style="color:#2563EB;font-weight:600;">「公众号图文」工作台</a>生产</div></div>` : ''}
+    ${getPlatformContext() === 'wechat_mp' ? `<div class="card" style="border-left:4px solid #07C160;margin:0 24px 12px;"><div class="card-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;">当前生产平台：<b>微信公众号</b> —— 本工作台仍按短视频链路出片；图文入口已从主导航下线。</div></div>` : ''}
     <section class="chat-shell is-empty" id="chatShell">
       <div id="chatMessages" class="chat-stage">
         ${welcomeMarkup()}
@@ -196,7 +196,7 @@ function hotspotRetrievalMarkup(result, resultId){
     const ready=readiness?.delivery_ready===true;
     const actionText=ready
       ? '将围绕当前主题和 Buffalo 可见物流动作生成，可直接创建 60 秒视频项目。'
-      : (readiness?.message||'Buffalo 自有素材正式成片门禁尚未通过，暂不可创建视频项目。');
+      : (readiness?.message||'未匹配到相关 Hook，将按当前主题用自有素材继续出片。');
     return `<div class="result-warning"><strong>未匹配到相关 Hook，已切换自有素材直出</strong><p>${escapeHtml(retrieval.message||readiness?.message||'本片不伪装成热点追更，也不使用无关新闻。')}</p><p>${escapeHtml(actionText)}</p></div>`;
   }
   if(retrieval.status==='matched'){
@@ -208,7 +208,7 @@ function hotspotRetrievalMarkup(result, resultId){
     const swap=producibleTopicsMarkup(result?.producible_topics||retrieval.producible_topics||[], resultId, true);
     const actionText=readiness?.delivery_ready===true
       ? `已绑定当前主题的${hookLabel}，可直接创建 60 秒视频项目。`
-      : (readiness?.message||'已匹配 Hook，但正式成片素材门禁尚未通过，暂不可创建视频项目。');
+      : (readiness?.message||`已匹配 ${hookLabel}。即使素材门禁未齐，也可以先创建视频项目继续出片。`);
     return `<div class="result-warning"><strong>${hookLabel} 已自动锁定</strong><p>${escapeHtml(retrieval.relevance?.reason||retrieval.message||'')}</p><ul>${hooks}</ul>${readinessText}<p>${escapeHtml(actionText)}</p>${swap}<a class="btn btn-secondary btn-sm" href="/assets.html?library=hotspot">查看已确认 Hook</a></div>`;
   }
   if(retrieval.status==='not_requested')return '';
@@ -449,20 +449,13 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
   }
   const deliveryReadiness=hotspotRetrieval?.video?.delivery_readiness;
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||hotspotRetrieval?.video?.chain_mode==='owned_only';
-  const readinessStatus=String(deliveryReadiness?.status||'').trim();
-  const readinessMessage=String(deliveryReadiness?.message||'');
-  const readinessBlocked=['needs_owned_media','blocked','failed','pending'].includes(readinessStatus)
-    || /素材不足|无法形成|门禁尚未通过|暂不可创建|未产出可用/.test(readinessMessage);
-  // Formal delivery readiness is mandatory.  An absent readiness object is
-  // unknown (typically an old/stale chat result), never an implicit approval.
-  const videoReady=(hotspotRetrieval?.status==='matched'||ownedFallback)&&hotspotRetrieval?.video?.status==='ready'&&deliveryReadiness?.delivery_ready===true&&!readinessBlocked;
-  const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
+  const topic=String(hotspotRetrieval?.topic || selectedTopic || output?.title || '').trim();
   const scriptState=classifyDouyinScriptState({
     durationTarget: output.duration_target,
     scenes: output.scenes||[],
     videoWorkflow: {
-      status: videoReady ? 'ready' : 'blocked',
-      block_reason: deliveryReadiness?.message || (ownedFallback?'Buffalo 自有素材直出规划未通过':(hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过':'等待热点 Hook')),
+      status: topic ? 'ready' : 'blocked',
+      block_reason: topic ? '' : '请先输入非空话题',
       target_duration_ms: 60000,
     },
     importedFromChat: true,
@@ -471,23 +464,23 @@ function douyinVideoEntryMarkup(output, resultId, index, hotspotRetrieval, resul
     return `<div class="douyin-video-entry"><p class="result-state-hint">${escapeHtml(scriptState.blockReason)}</p>
       <a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center" href="/video-migrate.html?from=chat&result=${encodeURIComponent(resultId)}&index=${index}">打开历史草稿迁移</a></div>`;
   }
-  if (!videoReady || !scriptState.canProduce) {
-    const reason=deliveryReadiness?.message || scriptState.blockReason || (ownedFallback?'Buffalo 自有素材直出规划未通过，暂不可创建':(hotspotRetrieval?.status==='matched'?'热点 Hook 规划未通过，暂不可创建':'等待热点 Hook 就绪后再创建视频项目'));
+  if (!topic || !scriptState.canProduce) {
+    const reason=scriptState.blockReason || '请先输入非空话题后再创建视频项目';
     return `<div class="douyin-video-entry"><p class="result-state-hint">${escapeHtml(reason)}</p></div>`;
   }
+  const adapted=Boolean(deliveryReadiness?.adaptation?.adapted);
   const adaptHint=ownedFallback
     ? (deliveryReadiness?.message || '未匹配到相关 Hook，将只使用 Buffalo 自有素材直出')
     : adapted
     ? (deliveryReadiness?.adaptation?.message || deliveryReadiness?.message || '将按现有库存自适应规划并继续出片')
     : (hotspotRetrieval?.hook_kind==='generic_logistics'
       ? '主题结论已生成 · 常青物流 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划'
-      : '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划');
-  const optionalAssets=adapted
-    ? `<a class="btn btn-secondary btn-sm" style="min-height:44px;display:inline-flex;align-items:center;margin-left:8px" href="/assets.html">可选：补充素材</a>`
-    : '';
+      : hotspotRetrieval?.status==='matched'
+        ? '主题结论已生成 · 热点 Hook 已就绪 · 正式成片将在视频工作台按 60 秒双素材规划'
+        : '将按当前话题直接创建视频项目并开始生成');
   return `<div class="douyin-video-entry">
     <p class="result-state-hint">${escapeHtml(adaptHint)}</p>
-    <button class="btn btn-primary" style="min-height:44px;margin-top:8px" id="generate-video-${resultId}-${index}" onclick="createSixtySecondVideoProject('${resultId}', ${index})">创建60秒视频项目</button>${optionalAssets}
+    <button class="btn btn-primary" style="min-height:44px;margin-top:8px" id="generate-video-${resultId}-${index}" onclick="createSixtySecondVideoProject('${resultId}', ${index})">创建60秒视频项目</button>
     <div id="render-status-${resultId}-${index}" class="render-status" style="display:none;margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
   </div>`;
 }
@@ -596,16 +589,9 @@ async function createSixtySecondVideoProject(resultId, index) {
     return;
   }
   const ownedFallback=hotspotRetrieval?.status==='owned_fallback'||dualLibraryVideo?.chain_mode==='owned_only';
-  const readiness=dualLibraryVideo?.delivery_readiness||{};
-  const readinessMessage=String(readiness.message||'');
-  const readinessBlocked=['needs_owned_media','blocked','failed','pending'].includes(String(readiness.status||'').trim())
-    || /素材不足|无法形成|门禁尚未通过|暂不可创建|未产出可用/.test(readinessMessage);
-  if ((!ownedFallback && hotspotRetrieval?.status !== 'matched') || dualLibraryVideo?.status !== 'ready' || readiness.delivery_ready !== true || readinessBlocked) {
-    showToast(dualLibraryVideo?.delivery_readiness?.message || (ownedFallback?'Buffalo 自有素材直出规划未就绪':'正在补采相关热点素材；至少一段相关、已确认 Hook 入库后才能创建视频项目'), 'error');
-    return;
-  }
-  if (dualLibraryVideo.delivery_readiness && !dualLibraryVideo.delivery_readiness.delivery_ready) {
-    showToast(dualLibraryVideo.delivery_readiness.message || '当前 Buffalo 自有素材不足以形成正式成片', 'error');
+  const topic=String(hotspotRetrieval?.topic || selectedTopic || output.title || '').trim();
+  if (!topic) {
+    showToast('话题不能为空', 'error');
     return;
   }
 
@@ -626,15 +612,14 @@ async function createSixtySecondVideoProject(resultId, index) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        topic: hotspotRetrieval.topic || selectedTopic || output.title || '南非物流热点',
-        hotspot_event_ids: dualLibraryVideo.hotspot_event_ids||[],
+        topic,
+        hotspot_event_ids: dualLibraryVideo?.hotspot_event_ids||[],
         platform: 'douyin',
         target_duration_ms: 60000,
-        chain_mode: dualLibraryVideo.chain_mode || (ownedFallback ? 'owned_only' : 'hotspot_owned'),
+        chain_mode: dualLibraryVideo?.chain_mode || (ownedFallback ? 'owned_only' : 'hotspot_owned'),
         tts_provider: selection.tts_provider,
         voice: selection.voice,
         session_id: currentSessionId,
-        idempotency_key: `chat-video-${currentSessionId}-${resultId}-${index}`,
       })
     });
     const taskResult = await taskResponse.json();
@@ -694,7 +679,7 @@ async function sendMessage(topic=''){
   const input=document.getElementById('chatInput');const msg=input.value.trim();if(!msg)return;
   if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}
   if(selectedPlatforms.has('wechat_mp')){
-    if(selectedPlatforms.size===1){showToast('公众号图文走图文长文工作台，请进入「公众号图文」页投喂资料包生成','error');return;}
+    if(selectedPlatforms.size===1){showToast('公众号图文入口已下线，请改选抖音等短视频平台','error');return;}
     showToast('公众号不会生成短文案，已忽略该平台','info');selectedPlatforms.delete('wechat_mp');
   }
   const chosenTopic=topic||selectedTopic;input.value='';autoResize(input);selectedTopic='';document.getElementById('selectedTopicLabel').classList.remove('show');document.getElementById('composerHint').textContent='Enter 发送 · Shift + Enter 换行';appendMessage('user',msg);chatHistory.push({role:'user',content:msg});saveSessions();addTyping();const typingTimers=[window.setTimeout(()=>setTypingStatus('正在生成内容，请稍候…'),8000),window.setTimeout(()=>setTypingStatus('仍在生成；完成后会显示框架或正式内容状态，无需重复提交。'),30000)];setSending(true);
@@ -703,7 +688,7 @@ async function sendMessage(topic=''){
 }
 async function sendCommand(command){if(!lastResult?.body){showToast('请先生成一段内容','error');return;}if(!selectedPlatforms.size){showToast('请先选择至少一个目标平台','error');return;}
   if(selectedPlatforms.has('wechat_mp')){
-    if(selectedPlatforms.size===1){showToast('公众号图文走图文长文工作台，请进入「公众号图文」页投喂资料包生成','error');return;}
+    if(selectedPlatforms.size===1){showToast('公众号图文入口已下线，请改选抖音等短视频平台','error');return;}
     showToast('公众号不会生成短文案，已忽略该平台','info');selectedPlatforms.delete('wechat_mp');
   }
   appendMessage('user',command);chatHistory.push({role:'user',content:command});saveSessions();addTyping();setSending(true);try{const r=await apiFetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(({role,content})=>({role,content})),context:lastResult.content||lastResult.body,command,tone:document.getElementById('toneSelect').value,length:document.getElementById('lengthSelect').value,platforms:Array.from(selectedPlatforms),session_id:currentSessionId})});const data=await r.json();lastResult=data;document.getElementById('typingRow')?.remove();appendMessage('assistant',data.content,data);chatHistory.push({role:'assistant',content:data.content,result:data});saveSessions();}catch(e){document.getElementById('typingRow')?.remove();showToast(e.message,'error');}finally{setSending(false);}}

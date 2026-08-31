@@ -26,11 +26,20 @@ const statusMap = { draft:{label:'草稿',cls:'badge-gray',border:'#9CA3AF'}, pe
 
 let items = [];
 let filterPlatform = '';
-let filterStatus = new URLSearchParams(location.search).get('status') || '';
+let params = new URLSearchParams(location.search);
+let highlightId = Number(params.get('highlight') || 0) || 0;
+let filterStatus = (highlightId && params.get('status') === 'pending_review') ? '' : (params.get('status') || '');
 
 async function init() {
     const resp = await apiFetch('/api/queue');
     items = await resp.json();
+    if (highlightId) {
+        const hit = items.find(i => Number(i.id) === highlightId);
+        if (hit && filterStatus && hit.status !== filterStatus) filterStatus = '';
+        setTimeout(() => {
+            document.getElementById(`queue-item-${highlightId}`)?.scrollIntoView({behavior:'smooth', block:'center'});
+        }, 50);
+    }
     render();
 }
 
@@ -88,7 +97,7 @@ function render() {
                         : item.verification_status === 'not_required'
                             ? '<span class="badge badge-neutral">无需事实来源</span>'
                             : '<span class="badge badge-warning">缺少事实证据</span>';
-                    return `<div class="card fade-in" style="border-left:4px solid ${s.border};overflow:hidden;">
+                    return `<div class="card fade-in" id="queue-item-${item.id}" style="border-left:4px solid ${s.border};overflow:hidden;${Number(item.id)===highlightId?'outline:2px solid var(--primary);':''}">
                         <div style="padding:16px 20px;display:flex;align-items:center;gap:16px;">
                             <div style="flex:1;min-width:0;">
                                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -115,7 +124,7 @@ function render() {
                                 <button class="btn btn-ghost btn-sm" onclick="copyContent('${copyText}')" title="复制文案"><iconify-icon icon="mdi:content-copy" width="16"></iconify-icon></button>
                                 ${videoUrl?`<button class="btn btn-ghost btn-sm" style="color:#6366f1;" onclick="window.open('${videoUrl}','_blank')" title="预览视频"><iconify-icon icon="mdi:video-outline" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='pending_review' && canReview?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="reviewItem(${item.id},'approve')" title="通过审核"><iconify-icon icon="mdi:check-circle-outline" width="16"></iconify-icon></button><button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="openRejectModal(${item.id})" title="驳回"><iconify-icon icon="mdi:close-circle-outline" width="16"></iconify-icon></button>`:''}
-                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="publishItem(${item.id})" title="自动发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
+                                ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--success);" onclick="openPublishConfirm(${item.id})" title="确认后发布"><iconify-icon icon="mdi:send" width="16"></iconify-icon></button>`:''}
                                 ${(item.platform==='xiaohongshu'||item.platform==='douyin') && (item.status==='queued'||item.status==='failed')?`<button class="btn btn-ghost btn-sm" style="color:#8B5CF6;" onclick="manualPublish(${item.id})" title="打开浏览器手动发布"><iconify-icon icon="mdi:open-in-new" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='queued'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'published')" title="标记已发布"><iconify-icon icon="mdi:check-bold" width="16"></iconify-icon></button>`:''}
                                 ${item.status==='failed'?`<button class="btn btn-ghost btn-sm" style="color:var(--primary);" onclick="updateStatus(${item.id},'queued')" title="重试"><iconify-icon icon="mdi:refresh" width="16"></iconify-icon></button>`:''}
@@ -124,6 +133,20 @@ function render() {
                         </div>
                     </div>`;
                 }).join('')}
+            </div>
+        </div>
+    </div>
+
+    <!-- 发布确认弹窗 -->
+    <div id="publishModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+        <div class="card" style="width:480px;padding:24px;">
+            <h3 style="font-size:16px;font-weight:700;margin-bottom:12px;">确认发布</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">不会自动发布。确认后才会调用真实发布接口，标题和正文可改。</p>
+            <input id="publishTitle" class="input" placeholder="标题" style="margin-bottom:8px;"/>
+            <textarea id="publishBody" class="input" rows="6" placeholder="正文" style="resize:vertical;margin-bottom:8px;"></textarea>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="closePublishConfirm()">取消</button>
+                <button class="btn btn-primary btn-sm" onclick="confirmPublish()">确认发布</button>
             </div>
         </div>
     </div>
@@ -170,7 +193,43 @@ function confirmReject() {
 async function copyContent(text) { try{await navigator.clipboard.writeText(decodeURIComponent(text));showToast('已复制');}catch(e){showToast('复制失败','error');}}
 async function updateSchedule(id,dt) { const s=dt?dt.replace('T',' ')+':00':null; try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'queued',scheduled_at:s})});showToast('已更新');}catch(e){showToast('更新失败','error');}}
 async function updateStatus(id,status) { try{await apiFetch(`/api/queue/${id}/status`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});init();}catch(e){showToast('操作失败','error');}}
-async function publishItem(id) { if(!confirm('确定发布？'))return; try{const r=await apiFetch(`/api/publish/${id}`,{method:'POST'});const d=await r.json();showToast(d.success?'发布成功':'发布失败: '+(d.error||''),d.success?'success':'error');init();}catch(e){showToast('发布失败','error');}}
+let publishItemId = null;
+function openPublishConfirm(id) {
+    const item = items.find(i => Number(i.id) === Number(id));
+    if (!item) { showToast('队列项不存在','error'); return; }
+    publishItemId = item.id;
+    document.getElementById('publishTitle').value = item.title || '';
+    document.getElementById('publishBody').value = item.body || '';
+    document.getElementById('publishModal').style.display = 'flex';
+}
+function closePublishConfirm() {
+    document.getElementById('publishModal').style.display = 'none';
+    publishItemId = null;
+}
+async function confirmPublish() {
+    const id = publishItemId;
+    if (!id) return;
+    const title = document.getElementById('publishTitle').value.trim();
+    const body = document.getElementById('publishBody').value;
+    closePublishConfirm();
+    try {
+        await apiFetch(`/api/queue/${id}/content`, {
+            method: 'PUT',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ title, body }),
+        });
+    } catch (e) { /* title/body 更新失败时仍允许确认发布 */ }
+    await publishItem(id, true);
+}
+async function publishItem(id, confirmed) {
+    if (!confirmed && !confirm('确定发布？')) return;
+    try {
+        const r = await apiFetch(`/api/publish/${id}`, {method:'POST'});
+        const d = await r.json();
+        showToast(d.success ? '发布成功' : '发布失败: ' + (d.error||''), d.success?'success':'error');
+        init();
+    } catch(e) { showToast('发布失败','error'); }
+}
 
 // 手动发布：后端弹出有头浏览器自动填好内容，停在发布页，用户核对话题后手动点「发布」
 async function manualPublish(id) {

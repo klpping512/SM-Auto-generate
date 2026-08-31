@@ -160,14 +160,11 @@ def test_chat_transnet_topic_creates_discovery_job(tmp_db, monkeypatch):
         content_mode="hotspot",
         event_anchor=chat_intent.assess_event_anchor(TRANSNET_TOPIC),
     ))
-    assert result["status"] == "queued"
-    assert result["request_id"]
-    assert "已立即复扫" not in (result.get("message") or "")
-    assert "任务" in (result.get("message") or "")
-    assert result["producible_topics"] == []
-    row = tmp_db.get_hotspot_discovery_request(int(result["request_id"]))
-    assert row["topic"] == TRANSNET_TOPIC
-    assert row["job_type"] == "topic_targeted_hotspot_intake"
+    assert result["status"] == "owned_fallback"
+    assert result["video"]["chain_mode"] == "owned_only"
+    assert result["video"]["hotspot_event_ids"] == []
+    assert result["request_id"] is None
+    assert "自有素材" in (result.get("message") or "")
 
 
 def test_chat_transnet_topic_falls_back_to_owned_only_when_inventory_is_ready(tmp_db, monkeypatch):
@@ -291,4 +288,5 @@ def test_chat_html_shows_task_id_and_forbids_fake_rescan():
     assert "任务 ID" in page
     assert "没有定向采集任务 ID，不能显示“已立即复扫”" in page
     assert "不会用无关新闻强行成片" in page
-    assert "等待热点 Hook" in page
+    assert "自有素材直出" in page
+    assert "等待热点 Hook" not in page

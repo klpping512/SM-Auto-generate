@@ -108,10 +108,8 @@ function platformName(id) {
 const NAV_ITEMS = [
     { section: '核心' },
     { id: 'chat', label: 'AI 对话', href: '/chat.html' },
-    { id: 'hotspots', label: '热点审核台', href: '/hotspots.html' },
     { id: 'assets', label: '内容资产', href: '/assets.html' },
     { id: 'video-project', label: '视频项目', href: '/video-project.html' },
-    { id: 'articles', label: '公众号图文', href: '/articles.html' },
     { id: 'editor', label: '内容编辑器', href: '/editor.html' },
     { id: 'queue', label: '发布队列', href: '/queue.html' },
     { section: '分析' },

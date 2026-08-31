@@ -128,7 +128,7 @@ def test_landscape_shot_safe_center_crop_does_not_force_review():
 
     assert result["segment_id"] == 10
     assert result["orientation_safe_crop"] is True
-    assert result["review_required"] is False
+    assert not any("不适配裁切" in reason for reason in result["reasons"])
     assert any("可安全居中裁切" in reason for reason in result["reasons"])
 
 

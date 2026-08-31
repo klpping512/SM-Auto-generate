@@ -30,7 +30,7 @@ async def test_dispatch_unknown_platform():
     assert result["success"] is False and "unknown" in result["error"]
 
 
-async def test_dispatch_routes_to_registered_adapter(monkeypatch):
+async def test_dispatch_routes_to_registered_adapter(tmp_db, monkeypatch):
     monkeypatch.setitem(adapters.ADAPTERS, "dummy", _Dummy())
     result = await publisher.dispatch(platform="dummy", title="T", content="B")
     assert result == {"success": True, "platform": "dummy", "output": "T:B"}

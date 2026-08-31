@@ -463,7 +463,7 @@ def test_scheduler_uses_model_gate_for_three_day_hook_intake_and_ten_day_rotatio
     assert "hotspot_hook_intake.select_for_hook_ingestion" not in source
     assert '"interval",\n        days=3' in source
     assert 'id="hotspot_hook_library_sync"' in source
-    assert 'id="hotspot_hook_library_cleanup"' in source
+    assert 'id="hotspot_hook_cycle_cleanup"' in source
     assert "HOTSPOT_HOOK_RETENTION_DAYS" in source
     assert "HOTSPOT_HOOK_PROTECT_DAYS" in source
 

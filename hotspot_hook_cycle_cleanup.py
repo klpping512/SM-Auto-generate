@@ -189,7 +189,7 @@ def _project_reference_reasons(conn: sqlite3.Connection, event_clip_id: int, ass
                 """
                 SELECT 1 FROM video_generation_jobs j
                 JOIN video_project_revisions r ON r.id=j.revision_id
-                WHERE j.status IN ('pending','running','needs_review','cancel_requested')
+                WHERE j.status IN ('pending','running','cancel_requested')
                   AND (r.payload LIKE ? OR r.payload LIKE ?)
                 LIMIT 1
                 """,

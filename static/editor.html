@@ -228,6 +228,134 @@ let publishingAccounts = [];
 let lightboxImages = [], lightboxIndex = 0, renderPoller = null;
 let activeVideoProject = null;
 
+// 成片项目进入编辑器时，URL 项目是唯一事实来源；不能被旧 localStorage 草稿覆盖。
+function getVideoProjectId() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        return params.get('video_project_id')?.trim() || params.get('import_project')?.trim() || '';
+    } catch (e) {
+        return '';
+    }
+}
+
+function decodeObject(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+        try {
+            const decoded = JSON.parse(value);
+            return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? decoded : {};
+        } catch (e) { /* 忽略坏的历史 payload */ }
+    }
+    return {};
+}
+
+function normalizeVideoUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/^(https?:|blob:|data:)/i.test(raw) || raw.startsWith('/')) return raw;
+    return `/static/${raw.replace(/^\/+/, '')}`;
+}
+
+function projectTopic(project, payload) {
+    const brief = decodeObject(payload.brief);
+    const snapshot = decodeObject(project.source_snapshot);
+    const chat = decodeObject(snapshot.chat);
+    return String(
+        brief.logistics_topic || brief.requested_topic || brief.topic ||
+        chat.topic || snapshot.topic || payload.title || project.title || '南非物流'
+    ).replace(/\s*[｜|]\s*(?:生成中|\d+\s*秒(?:动态)?视频)\s*$/, '').trim();
+}
+
+function buildProjectFallbackBody(topic, scenes) {
+    const lines = (Array.isArray(scenes) ? scenes : [])
+        .filter(scene => scene && !['hotspot_evidence', 'hook', 'brand_endcard'].includes(scene.scene_role))
+        .map(scene => String(scene.voiceover || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+    if (lines.length) return lines.slice(0, 6).join('\n\n');
+    return `${topic}：围绕货值、时效和承接节点，把这件事讲清楚。`;
+}
+
+async function loadVideoProjectDraft(projectId) {
+    try {
+        const response = await apiFetch(`/api/video-projects/${encodeURIComponent(projectId)}?editor_load=${Date.now()}`, {
+            cache: 'no-store',
+        });
+        const project = await response.json();
+        activeVideoProject = project;
+        const revision = project?.current_revision || {};
+        const payload = decodeObject(revision.payload);
+        const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+        const topic = projectTopic(project, payload);
+
+        // publication-draft 负责把已生成项目转成可发布文案；失败时仍使用 revision，避免整条链路被一个辅助接口阻断。
+        let publication = {};
+        try {
+            const draftResponse = await apiFetch(`/api/video-projects/${encodeURIComponent(projectId)}/publication-draft?editor_load=${Date.now()}`, {
+                cache: 'no-store',
+            });
+            publication = decodeObject(await draftResponse.json());
+        } catch (e) { /* 项目内容仍可从 revision 恢复 */ }
+
+        const job = decodeObject(project.active_job);
+        const videoCandidate = publication.rendered_video
+            || (Array.isArray(publication.attachments) ? publication.attachments.find(item => item?.type === 'video') : null)
+            || (job.output_url || job.output_path ? {
+                type: 'video', path: job.output_path || '', url: normalizeVideoUrl(job.output_url || job.output_path),
+                filename: String(job.output_path || job.output_url || '').split('/').pop(),
+            } : null);
+        const selectedAssetIds = Array.from(new Set([
+            ...(Array.isArray(payload.selected_asset_ids) ? payload.selected_asset_ids : []),
+            ...scenes.map(scene => scene?.asset_id).filter(id => id !== null && id !== undefined && id !== ''),
+        ].map(Number).filter(Number.isFinite)));
+        const platform = project.platform || payload.platform || publication.platform || 'douyin';
+        const qualityHold = project.quality_status === 'hold' || job.result === 'quality_hold' || job.quality_status === 'hold';
+        const content = {
+            platform,
+            project_id: project.id || projectId,
+            revision_id: revision.id || project.current_revision_id || null,
+            title: publication.title || payload.title || project.title || `${topic}｜物流动作拆解`,
+            body: publication.body || payload.body || payload.copy || buildProjectFallbackBody(topic, scenes),
+            hashtags: Array.isArray(publication.hashtags) ? publication.hashtags : (Array.isArray(payload.hashtags) ? payload.hashtags : []),
+            scenes,
+            selected_asset_ids: selectedAssetIds,
+            asset_selection_mode: payload.asset_selection_mode === 'auto' ? 'auto' : 'manual',
+            attachments: Array.isArray(publication.attachments) ? publication.attachments : [],
+            rendered_video: videoCandidate ? {
+                ...videoCandidate,
+                url: normalizeVideoUrl(videoCandidate.url || videoCandidate.path),
+                preview_only: qualityHold || project.publish_allowed === false,
+                quality_status: project.quality_status || job.quality_status || 'unknown',
+            } : null,
+            duration_target: publication.duration_target || Math.round(Number(payload.target_duration_ms || project.target_duration_ms || 60000) / 1000),
+            voice: payload.voice || null,
+            ai_topic: topic,
+            copy_source: payload.copy_source || publication.copy_source || 'video_project_narrative',
+            tts_source: payload.tts_source || 'ai',
+            subtitle_source: payload.subtitle_source || 'ai',
+            music_suggestion: payload.music_suggestion || '',
+            artifact_status: project.artifact_status || job.artifact_status || 'absent',
+            quality_status: project.quality_status || job.quality_status || 'unknown',
+        };
+
+        generatedContents = { [platform]: content };
+        currentPreview = platform;
+        importedFromChat = false;
+        refreshPreviewTabs();
+        loadPlatformToEditor(currentPreview);
+        renderPreview(currentPreview);
+        const holdHint = qualityHold ? '（质量暂缓，需人工确认后才能发布）' : '';
+        showToast(`已加载视频项目：${content.title}${holdHint}`, 'info');
+        return true;
+    } catch (error) {
+        // 项目 URL 失败时绝不回退到旧草稿，避免用户再次看到另一条视频。
+        generatedContents = {};
+        importedFromChat = false;
+        currentPreview = 'douyin';
+        showToast(`视频项目加载失败：${error.message || '项目不存在'}`, 'error');
+        return false;
+    }
+}
+
 function parseSourceEvidence() {
     return (document.getElementById('sourceEvidence')?.value || '').split('\n').map(line => line.trim()).filter(Boolean).map(line => {
         const parts = line.split('|').map(value => value.trim());
@@ -375,18 +503,18 @@ async function init() {
     renderKbRefs();
     renderTemplateOptions();
 
-    // 加载本地草稿
-    const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
+    const videoProjectId = getVideoProjectId();
     const linkedProjectId = new URLSearchParams(location.search).get('project_id');
-    const importProjectId = new URLSearchParams(location.search).get('import_project');
     if (linkedProjectId) {
         location.replace(`/video-project.html?id=${encodeURIComponent(linkedProjectId)}&stage=brief`);
         return;
     }
-    if (importProjectId) {
-        loadVideoProjectDraft(importProjectId);
+    if (videoProjectId) {
+        await loadVideoProjectDraft(videoProjectId);
         return;
     }
+    // 只有没有项目 URL 的普通编辑器入口，才允许读取本地草稿。
+    const selectedAssets = JSON.parse(localStorage.getItem('selectedMediaAssets') || '[]');
     loadDraft();
     try {
         const hotspotEvidence = JSON.parse(localStorage.getItem('hotspotSourceEvidence') || '[]');
@@ -717,42 +845,6 @@ function loadDraft() {
         }
     } else if (draft.source === 'chat') {
         showToast('AI 内容导入失败，草稿已保留，可刷新后重试', 'error');
-    }
-}
-
-async function loadVideoProjectDraft(projectId) {
-    try {
-        const response = await apiFetch(`/api/video-projects/${projectId}`);
-        activeVideoProject = await response.json();
-        const payload = activeVideoProject.current_revision?.payload || {};
-        generatedContents.douyin = {platform:'douyin', hashtags:[], scenes:[], ...payload};
-        const linkedJob = activeVideoProject.active_job;
-        const previewUrl = linkedJob?.preview_url || linkedJob?.output_url;
-        if (previewUrl) {
-            const previewVideo = {
-                type:'video', url:previewUrl,
-                path:linkedJob.preview_path || linkedJob.output_path || previewUrl,
-                filename:(activeVideoProject.title || 'douyin') + '-preview.mp4',
-                preview_only: linkedJob.status !== 'succeeded' || linkedJob.quality_report?.publication?.publish_allowed === false,
-                quality_status: linkedJob.status === 'succeeded' ? (linkedJob.quality_report?.final_quality?.status || 'passed') : 'preview',
-                quality_report: linkedJob.quality_report?.preview_quality || linkedJob.quality_report?.final_quality || {},
-            };
-            generatedContents.douyin.rendered_video = previewVideo;
-            generatedContents.douyin.attachments = [...(generatedContents.douyin.attachments || []).filter(item => item.type !== 'video'), previewVideo];
-        }
-        const script = linkedJob?.quality_report?.script || {};
-        const revPayload = payload.brief || {};
-        generatedContents.douyin.title = activeVideoProject.title || script.title || '';
-        generatedContents.douyin.body = (script.scenes || []).map(s => (s || {}).voiceover).filter(Boolean).join('\n');
-        generatedContents.douyin.hashtags = buildImportHashtags(activeVideoProject, revPayload, script);
-        importedFromChat = true;
-        currentPreview = 'douyin';
-        refreshPreviewTabs();
-        loadPlatformToEditor('douyin');
-        renderPreview('douyin');
-        showToast(previewUrl ? '已载入视频项目与预览' : '已载入视频项目内容', 'info');
-    } catch (error) {
-        showToast(error.message, 'error');
     }
 }
 
@@ -1219,40 +1311,57 @@ function removeAttachment(index) {
     renderAttachments();
 }
 
-async function submitToQueue() {
-    // 提交前先把编辑器最新内容写回当前平台
-    syncEditorToContent();
-    if (draftEvidenceInsufficient || localStorage.getItem('evidence_status') === 'insufficient') {
-        showToast('证据不足的对比框架不可发布，请先补充带来源的评测资料', 'error');
-        return;
+function buildQueuePayload(platform, c) {
+    const platformAttachments = platform === 'xiaohongshu'
+        ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
+        : platform === 'douyin'
+            ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
+            : attachments;
+    const targets = Array.isArray(c.account_target_ids) ? c.account_target_ids : [];
+    const videoProjectId = c.project_id || getVideoProjectId() || activeVideoProject?.id || null;
+    const revisionId = c.revision_id || activeVideoProject?.current_revision?.id || activeVideoProject?.current_revision_id || null;
+    const videoPath = c.rendered_video?.path || (platformAttachments.find(item => item?.type === 'video') || {}).path || '';
+    const payload = {
+        title: c.title, body: c.body, platforms: [platform], hashtags: c.hashtags || [],
+        status: videoProjectId ? 'queued' : 'pending_review',
+        attachments: platformAttachments,
+        source_refs: parseSourceEvidence(),
+        account_targets: targets.length ? { [platform]: targets } : {},
+    };
+    if (videoProjectId) {
+        payload.video_project_id = videoProjectId;
+        payload.revision_id = revisionId;
+        payload.video_path = videoPath;
+        payload.idempotency_key = `queue:${videoProjectId}:${revisionId || 'rev'}:${platform}`;
     }
-    const entries = Object.entries(generatedContents).filter(([, c]) => c && c.title && c.body);
-    if (!entries.length) { showToast('请先生成或输入内容', 'error'); return; }
+    return payload;
+}
 
-    if (generatedContents.xiaohongshu) await ensureXhsAssets('xiaohongshu');
-
+async function enqueueContentToQueue(entries) {
     let added = 0;
+    let lastQueueId = 0;
     const failed = [];
     for (const [platform, c] of entries) {
         try {
-            const platformAttachments = platform === 'xiaohongshu'
-                ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
-                : platform === 'douyin'
-                    ? [...(Array.isArray(c.attachments) ? c.attachments : []), ...attachments]
-                    : attachments;
-            const targets=Array.isArray(c.account_target_ids)?c.account_target_ids:[];
-            await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ title:c.title, body:c.body, platforms:[platform], hashtags:c.hashtags||[], status:'pending_review', attachments: platformAttachments, source_refs:parseSourceEvidence(), account_targets:targets.length?{[platform]:targets}:{} }) });
-            added+=Math.max(1,targets.length);
+            if (platform === 'xiaohongshu') await ensureXhsAssets('xiaohongshu');
+            const payload = buildQueuePayload(platform, c);
+            const resp = await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify(payload) });
+            const data = await resp.json();
+            const ids = Array.isArray(data.queue_ids) ? data.queue_ids : [];
+            added += Math.max(1, ids.length || 1);
+            if (ids[0]) lastQueueId = ids[0];
         } catch(e) {
             failed.push(platformInfo[platform]?.name || platform);
         }
     }
-
-    // P0-2: 显示真实提交结果
     if (failed.length === 0) {
-        showToast(`已提交 ${added} 个平台到审核队列`);
+        showToast(`已提交 ${added} 条到发布队列`);
         attachments = []; renderAttachments();
+        const jump = lastQueueId
+            ? `/queue.html?highlight=${encodeURIComponent(lastQueueId)}`
+            : '/queue.html';
+        setTimeout(() => { window.location.href = jump; }, 350);
     } else if (added === 0) {
         showToast(`提交失败：${failed.join('、')}`, 'error');
     } else {
@@ -1260,7 +1369,17 @@ async function submitToQueue() {
     }
 }
 
-// 抖音一键发布：视频 + 文案一起进审核队列
+async function submitToQueue() {
+    syncEditorToContent();
+    if (draftEvidenceInsufficient || localStorage.getItem('evidence_status') === 'insufficient') {
+        showToast('证据不足的对比框架不可发布，请先补充带来源的评测资料', 'error');
+        return;
+    }
+    const entries = Object.entries(generatedContents).filter(([, c]) => c && c.title && c.body);
+    if (!entries.length) { showToast('请先生成或输入内容', 'error'); return; }
+    await enqueueContentToQueue(entries);
+}
+
 async function publishDouyinVideo() {
     syncEditorToContent();
     if (draftEvidenceInsufficient) {
@@ -1270,16 +1389,8 @@ async function publishDouyinVideo() {
     const c = generatedContents.douyin;
     if (!c?.rendered_video) { showToast('没有可发布的视频', 'error'); return; }
     if (c.rendered_video.preview_only) { showToast('当前是预览视频，完成发布级质检后才能发布', 'error'); return; }
-    try {
-        await apiFetch('/api/queue', { method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({
-                title: c.title, body: c.body, platforms: ['douyin'],
-                hashtags: c.hashtags || [], status: 'pending_review',
-                attachments: [c.rendered_video, ...(c.attachments || []).filter(a => a.type !== 'video')],
-                source_refs: parseSourceEvidence(),
-            }) });
-        showToast('已提交抖音发布队列（视频 + 文案）');
-    } catch (e) { showToast('提交失败：' + e.message, 'error'); }
+    if (!c.title || !c.body) { showToast('请先填写标题和正文', 'error'); return; }
+    await enqueueContentToQueue([['douyin', c]]);
 }
 
 async function saveDraft() {

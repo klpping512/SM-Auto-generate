@@ -8,7 +8,7 @@ import logging
 import os
 import socket
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -17,6 +17,7 @@ from uuid import uuid4
 import database as db
 import semantic_matching
 import video_renderer
+import video_state
 import video_topic_contract
 from video_composition_policy import is_explanation_scene, source_usage_report
 import video_quality.service as video_quality_service
@@ -150,18 +151,21 @@ def _normalized_copy(value: object) -> str:
     return "".join(char for char in str(value or "") if char.isalnum())
 
 
+def _utc_now_sql() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def copy_provenance_report(scenes: list[dict] | None) -> list[dict]:
     """Expose the final per-scene narration origin in every generation report."""
     rows = []
     for index, scene in enumerate(scenes or [], 1):
-        source = str(scene.get("copy_source") or "fallback")
-        if source not in {"model", "repair", "policy_repair", "fallback", "corpus"}:
-            source = "fallback"
+        source = video_state.normalize_copy_source(scene.get("copy_source"))
         rows.append({
             "scene": index,
             "scene_role": str(scene.get("scene_role") or scene.get("evidence_type") or ""),
             "source": source,
-            "reason": str(scene.get("copy_repair_reason") or ""),
+            "reason": str(scene.get("copy_repair_reason") or scene.get("repair_reason") or ""),
+            "model_name": str(scene.get("model_name") or ""),
             "voiceover": str(scene.get("voiceover") or ""),
         })
     return rows
@@ -630,13 +634,16 @@ async def _schedule_automatic_video_retry(
         "scheduled": True,
         "completed_attempts": attempt,
         "remaining_retries": max(0, retry_limit - attempt + 1),
-        "restart_stage": PipelineStage.QUEUED.value,
+        "restart_stage": failed_stage or PipelineStage.QUEUED.value,
     }
+    restart = failed_stage if failed_stage in {stage.value for stage in PipelineStage} else PipelineStage.QUEUED.value
+    if restart in {PipelineStage.SUCCEEDED.value, PipelineStage.FAILED.value, PipelineStage.CANCELED.value}:
+        restart = PipelineStage.QUEUED.value
     await asyncio.to_thread(
         db.update_video_generation_job,
         job["id"],
         status=JobStatus.PENDING.value,
-        stage=PipelineStage.QUEUED.value,
+        stage=restart,
         progress=0,
         lease_owner=None,
         lease_expires_at=None,
@@ -720,7 +727,7 @@ async def run_claimed_job(
                         quality_report=merged_report,
                     ):
                         return
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now = _utc_now_sql()
                     await asyncio.to_thread(
                         db.update_video_generation_job,
                         job["id"],
@@ -746,17 +753,47 @@ async def run_claimed_job(
                 if target != current:
                     validate_transition(current, target)
                     if target is PipelineStage.SUCCEEDED:
-                        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        latest_for_success = await asyncio.to_thread(
+                            db.get_video_generation_job, job["id"]
+                        ) or latest
+                        probe = video_state.probe_video_artifact(
+                            latest_for_success.get("output_path") or latest_for_success.get("preview_path")
+                        )
+                        now = _utc_now_sql()
+                        if not probe.get("ok"):
+                            await asyncio.to_thread(
+                                db.update_video_generation_job,
+                                job["id"], status=JobStatus.FAILED.value,
+                                stage=PipelineStage.FAILED.value, finished_at=now,
+                                lease_owner=None, lease_expires_at=None,
+                                heartbeat_at=None, error_code="MissingArtifact",
+                                error_message="任务结束但没有可读取的 MP4",
+                            )
+                            return
+                        report = dict(latest_for_success.get("quality_report") or {})
+                        publication = dict(report.get("publication") or {})
+                        quality_hold = (
+                            publication.get("tier") == "quality_hold"
+                            or publication.get("publish_allowed") is False
+                        )
+                        if quality_hold:
+                            publication.setdefault("tier", "quality_hold")
+                            publication["publish_allowed"] = False
+                            publication["manual_acceptance_required"] = True
+                            report["publication"] = publication
                         await asyncio.to_thread(
                             db.update_video_generation_job,
                             job["id"], status=JobStatus.SUCCEEDED.value,
                             stage=target.value, progress=100, finished_at=now,
                             lease_owner=None, lease_expires_at=None,
                             heartbeat_at=None, error_code=None, error_message=None,
+                            quality_report=report,
                         )
                         await asyncio.to_thread(
                             db.add_video_generation_event,
-                            job["id"], "succeeded", "视频已通过全部质量检查",
+                            job["id"],
+                            "quality_hold" if quality_hold else "succeeded",
+                            "成片已生成，质量暂缓，需人工确认后才能发布" if quality_hold else "视频已通过全部质量检查",
                         )
                         return
                     await asyncio.to_thread(
@@ -770,7 +807,7 @@ async def run_claimed_job(
                     )
             current = target
     except GenerationCanceled:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = _utc_now_sql()
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
@@ -793,14 +830,22 @@ async def run_claimed_job(
             PipelineStage.CANCELED.value,
         }:
             fail_stage = current.value
-        if await _schedule_automatic_video_retry(
+        retryable = fail_stage in {
+            PipelineStage.ASSET_MATCHING.value,
+            PipelineStage.MATCH_QUALITY_CHECK.value,
+            PipelineStage.PREVIEW_RENDERING.value,
+            PipelineStage.PREVIEW_QUALITY_CHECK.value,
+            PipelineStage.FINAL_RENDERING.value,
+            PipelineStage.FINAL_QUALITY_CHECK.value,
+        }
+        if retryable and await _schedule_automatic_video_retry(
             latest,
             error_code=type(exc).__name__,
             error_message=str(exc),
             failed_stage=fail_stage,
         ):
             return
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = _utc_now_sql()
         await asyncio.to_thread(
             db.update_video_generation_job,
             job["id"],
@@ -817,6 +862,161 @@ async def run_claimed_job(
             db.add_video_generation_event, job["id"], "failed", "视频生成失败",
             {"error": str(exc)[:500], "stage": fail_stage},
         )
+
+
+def _scene_is_locked_visual(scene: dict) -> bool:
+    evidence = str(scene.get("evidence_type") or "")
+    role = str(scene.get("scene_role") or "")
+    return (
+        evidence == "brand_endcard"
+        or role in {"brand_endcard", "brand_close", "cta"}
+        or bool(scene.get("event_clip_id"))
+        or bool(scene.get("brand_endcard_fallback"))
+    )
+
+
+def diversify_repeated_asset_sequence(
+    scenes: list[dict],
+    recent_signatures: list[str],
+    *,
+    alternate_segments: dict[int, list[dict]] | None = None,
+) -> dict:
+    """Rematch or explicitly degrade when the owned sequence repeats a recent job.
+
+    ``alternate_segments`` maps scene index to candidate dicts with
+    ``asset_id`` / ``asset_segment_id`` / optional timing and score fields.
+    """
+    recent = {item for item in recent_signatures if item}
+    signature = video_state.scene_asset_signature(scenes)
+    result = {
+        "signature": signature,
+        "rematch_applied": False,
+        "strategy": None,
+        "inventory_limited": False,
+        "quality_hold": False,
+        "notes": [],
+    }
+    if not signature or signature not in recent:
+        return result
+
+    used_assets: set[int] = set()
+    used_segments: set[int] = set()
+    for scene in scenes:
+        try:
+            asset_id = int(scene.get("asset_id") or 0)
+        except (TypeError, ValueError):
+            asset_id = 0
+        try:
+            segment_id = int(scene.get("asset_segment_id") or 0)
+        except (TypeError, ValueError):
+            segment_id = 0
+        if asset_id > 0:
+            used_assets.add(asset_id)
+        if segment_id > 0:
+            used_segments.add(segment_id)
+
+    for index, scene in enumerate(scenes):
+        if _scene_is_locked_visual(scene):
+            continue
+        current_segment = 0
+        try:
+            current_segment = int(scene.get("asset_segment_id") or 0)
+        except (TypeError, ValueError):
+            current_segment = 0
+        for alt in (alternate_segments or {}).get(index) or []:
+            try:
+                alt_asset = int(alt.get("asset_id") or 0)
+                alt_segment = int(alt.get("asset_segment_id") or alt.get("segment_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if alt_asset <= 0 or alt_segment <= 0:
+                continue
+            if alt_segment == current_segment:
+                continue
+            if alt_segment in used_segments or alt_asset in used_assets:
+                continue
+            old_asset = 0
+            try:
+                old_asset = int(scene.get("asset_id") or 0)
+            except (TypeError, ValueError):
+                old_asset = 0
+            used_assets.discard(old_asset)
+            used_segments.discard(current_segment)
+            scene.update({
+                "asset_id": alt_asset,
+                "asset_segment_id": alt_segment,
+                "asset_start_ms": alt.get("asset_start_ms", alt.get("start_ms", scene.get("asset_start_ms"))),
+                "asset_end_ms": alt.get("asset_end_ms", alt.get("end_ms", scene.get("asset_end_ms"))),
+                "match_score": alt.get("match_score", scene.get("match_score")),
+                "match_reasons": alt.get("reasons") or alt.get("match_reasons") or ["近 20 条序列重复，已更换未使用镜头"],
+                "asset_source": alt.get("asset_source") or scene.get("asset_source") or "owned_rematch",
+            })
+            used_assets.add(alt_asset)
+            used_segments.add(alt_segment)
+            current_segment = alt_segment
+            result["rematch_applied"] = True
+            result["strategy"] = "alternate_segment"
+            signature = video_state.scene_asset_signature(scenes)
+            if signature not in recent:
+                result["signature"] = signature
+                result["notes"].append("近 20 条完整素材序列重复，已重新选片")
+                return result
+            break
+
+    for index in range(len(scenes) - 1, -1, -1):
+        scene = scenes[index]
+        if _scene_is_locked_visual(scene):
+            continue
+        _apply_text_card_fallback(scene, index, "完整序列与近 20 条重复，已强制替换为文字卡")
+        scene["asset_source"] = "diversity_text_card"
+        result["rematch_applied"] = True
+        result["strategy"] = "text_card_degrade"
+        result["inventory_limited"] = True
+        signature = video_state.scene_asset_signature(scenes)
+        result["signature"] = signature
+        if signature not in recent:
+            result["notes"].append("近 20 条序列重复且无可用替代镜头，已降级为文字卡")
+            return result
+
+    result["inventory_limited"] = True
+    result["quality_hold"] = True
+    result["signature"] = video_state.scene_asset_signature(scenes)
+    result["notes"].append("库存无法给出不同素材序列，进入质量暂缓，禁止按相同画面出片")
+    return result
+
+
+def _apply_text_card_fallback(scene: dict, index: int, reason: str) -> dict:
+    """Last-resort visual: keep a renderable brand/text card instead of failing the job."""
+    scene.update({
+        "asset_id": None,
+        "asset_segment_id": None,
+        "event_clip_id": None,
+        "evidence_type": "brand_endcard",
+        "scene_role": scene.get("scene_role") or "owned_context_image",
+        "asset_source": "text_card_fallback",
+        "brand_endcard_fallback": True,
+        "match_score": 40,
+        "match_reasons": [reason],
+        "cooldown": False,
+        "usage_count": 0,
+    })
+    return {
+        "scene": index + 1,
+        "score": 40,
+        "hard_failures": [],
+        "issues": [reason],
+        "library_origin": "text_card_fallback",
+        "asset_id": None,
+        "usage_count": 0,
+        "cooldown": False,
+    }
+
+
+def _asset_is_cooled(asset_id, usage_counts: dict[str, int], *, limit: int = 3) -> bool:
+    key = str(asset_id or "").strip()
+    if not key:
+        return False
+    return int(usage_counts.get(key) or 0) >= limit
 
 
 _STAGE_PROGRESS = {
@@ -1003,15 +1203,24 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 )
         empty_voiceovers = [index + 1 for index, scene in enumerate(scenes) if not str(scene.get("voiceover") or "").strip()]
         if empty_voiceovers:
-            hard_failures.append("存在无旁白分镜：" + "、".join(map(str, empty_voiceovers)))
+            for index in empty_voiceovers:
+                scene = scenes[index - 1]
+                scene["voiceover"] = video_state.fallback_voiceover_for_role(
+                    scene, str(job.get("project_id") or script.get("title") or ""), index,
+                )
+                scene["copy_source"] = "fallback"
+                scene["repair_reason"] = f"第{index}镜旁白为空，已使用确定性镜头模板"
+                issues.append(scene["repair_reason"])
+            script["scenes"] = scenes
+            report["script"] = script
         infographic_scenes = [index + 1 for index, scene in enumerate(scenes) if is_explanation_scene(scene)]
         if infographic_scenes:
-            hard_failures.append(
-                "信息图、流程图和 PPT 卡片已禁用：第" + "、".join(map(str, infographic_scenes)) + "镜"
+            issues.append(
+                "信息图镜头将降级为文字卡/品牌兜底：第" + "、".join(map(str, infographic_scenes)) + "镜"
             )
         source_usage = source_usage_report(scenes)
         if not source_usage["passed"]:
-            hard_failures.extend(source_usage["issues"])
+            issues.extend(source_usage["issues"])
         if str(script.get("source_type") or "") == "topic_brief_dual_library":
             hard_failures.extend(formal_content_repetition_issues(content_scenes))
             brief = script.get("brief") if isinstance(script.get("brief"), dict) else {}
@@ -1060,7 +1269,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 sentence_errors = video_topic_contract.incomplete_sentence_issues(script)
                 recoverable = contract_errors and all(
                     str(error).startswith("标题缺少主题要素") for error in contract_errors
-                ) and not sentence_errors
+                )
                 if recoverable:
                     script["title"] = repaired_title or str(contract.get("safe_title") or topic)
                     report["script"] = script
@@ -1070,8 +1279,16 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     contract_errors = video_topic_contract.validate_generated_topic_contract(
                         script, contract,
                     )
+                if sentence_errors:
+                    script, repair_notes = video_state.repair_incomplete_scenes(
+                        script, seed=str(job.get("id") or job.get("project_id") or topic),
+                    )
+                    report["script"] = script
+                    issues.extend(repair_notes or sentence_errors)
+                    remaining_sentences = video_topic_contract.incomplete_sentence_issues(script)
+                    if remaining_sentences:
+                        issues.extend(remaining_sentences)
                 hard_failures.extend(contract_errors)
-                hard_failures.extend(sentence_errors)
                 if contract.get("opening_mode") == "owned_topic_hook" and hook_binding_mode == "exact":
                     if any(str(scene.get("evidence_type") or "") == "hotspot_video" for scene in content_scenes):
                         hard_failures.append("非事件主题禁止使用热点新闻画面")
@@ -1137,6 +1354,10 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
         used_owned_asset_ids: set[int] = set()
         used_segment_ids: set[int] = set()
         used_image_asset_ids: set[int] = set()
+        recent_signatures = await asyncio.to_thread(db.list_recent_succeeded_asset_signatures, 20)
+        usage_counts = await asyncio.to_thread(db.recent_asset_usage_counts, 10)
+        inventory_limited = False
+        last_evidence_type = ""
         for index, scene in enumerate(scenes):
             if str(scene.get("evidence_type") or "") == "brand_endcard":
                 if resolve_brand_endcard_path(static_dir, scene):
@@ -1150,11 +1371,11 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                         "hard_failures": ["品牌 CTA 结尾图不存在或路径不安全"], "issues": [],
                     })
                 continue
-            if is_explanation_scene(scene):
-                scene_reports.append({
-                    "scene": index + 1, "score": 0,
-                    "hard_failures": ["信息图、流程图和 PPT 卡片已禁用"], "issues": [],
-                })
+            if is_explanation_scene(scene) and str(scene.get("asset_source") or "") != "text_card_fallback":
+                scene_reports.append(_apply_text_card_fallback(
+                    scene, index, "信息图镜头已降级为文字卡/品牌兜底",
+                ))
+                last_evidence_type = "brand_endcard"
                 continue
             if scene.get("evidence_type") == "image":
                 asset_id = int(scene.get("asset_id") or 0)
@@ -1236,6 +1457,7 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
             candidates = assignment.get("candidates") or []
             selected = None
             segment = None
+            cooled_skipped = 0
             for candidate in candidates:
                 candidate_segment = await asyncio.to_thread(db.get_asset_segment, candidate["segment_id"])
                 if not candidate_segment:
@@ -1244,6 +1466,9 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 segment_id = int(candidate_segment.get("id") or 0)
                 if asset_id in used_owned_asset_ids or segment_id in used_segment_ids:
                     continue
+                if _asset_is_cooled(asset_id, usage_counts):
+                    cooled_skipped += 1
+                    continue
                 selected, segment = candidate, candidate_segment
                 break
             if not selected or not segment:
@@ -1251,9 +1476,20 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                     (
                         item for item in owned_images
                         if int(item.get("id") or 0) not in used_image_asset_ids
+                        and not _asset_is_cooled(item.get("id"), usage_counts)
                     ),
                     None,
                 )
+                if not fallback_image:
+                    fallback_image = next(
+                        (
+                            item for item in owned_images
+                            if int(item.get("id") or 0) not in used_image_asset_ids
+                        ),
+                        None,
+                    )
+                    if fallback_image:
+                        inventory_limited = True
                 if fallback_image:
                     image_id = int(fallback_image["id"])
                     used_image_asset_ids.add(image_id)
@@ -1267,20 +1503,62 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                         "asset_source": "owned_image_fallback",
                         "match_score": 70,
                         "match_reasons": ["动态素材不足，使用唯一 Buffalo 自有图片兜底"],
+                        "usage_count": usage_counts.get(str(image_id), 0),
+                        "cooldown": _asset_is_cooled(image_id, usage_counts),
                     })
                     scene_reports.append({
                         "scene": index + 1, "score": 70,
                         "hard_failures": [],
                         "issues": ["动态素材不足，已自动使用 Buffalo 自有图片"],
                         "library_origin": "owned_context_image",
+                        "asset_id": image_id,
+                        "usage_count": usage_counts.get(str(image_id), 0),
+                        "cooldown": _asset_is_cooled(image_id, usage_counts),
                     })
+                    last_evidence_type = "image"
                 else:
-                    scene_reports.append({
-                        "scene": index + 1, "score": 0,
-                        "hard_failures": ["没有未被使用且符合约束的本地素材"],
-                        "issues": ["Buffalo 自有视频和静态图片均已用尽"],
-                    })
+                    inventory_limited = True
+                    scene_reports.append(_apply_text_card_fallback(
+                        scene, index,
+                        "相关视频和图片均不可用，已使用文字卡/品牌兜底" + (
+                            f"；跳过 {cooled_skipped} 个冷却素材" if cooled_skipped else ""
+                        ),
+                    ))
+                    last_evidence_type = "brand_endcard"
                 continue
+            if last_evidence_type == "video" and str(segment.get("asset_file_type") or "video") == "video":
+                # Prefer type rotation when a still image remains.
+                rotated = next(
+                    (
+                        item for item in owned_images
+                        if int(item.get("id") or 0) not in used_image_asset_ids
+                        and not _asset_is_cooled(item.get("id"), usage_counts)
+                    ),
+                    None,
+                )
+                if rotated:
+                    image_id = int(rotated["id"])
+                    used_image_asset_ids.add(image_id)
+                    scene.update({
+                        "asset_id": image_id,
+                        "asset_segment_id": None,
+                        "evidence_type": "image",
+                        "scene_role": "owned_context_image",
+                        "asset_source": "type_rotation",
+                        "match_score": 72,
+                        "usage_count": usage_counts.get(str(image_id), 0),
+                        "cooldown": False,
+                    })
+                    scene_reports.append({
+                        "scene": index + 1, "score": 72, "hard_failures": [],
+                        "issues": ["为避免连续视频镜头，已轮换为图片"],
+                        "library_origin": "owned_context_image",
+                        "asset_id": image_id,
+                        "usage_count": usage_counts.get(str(image_id), 0),
+                        "cooldown": False,
+                    })
+                    last_evidence_type = "image"
+                    continue
             used_owned_asset_ids.add(int(segment["asset_id"]))
             used_segment_ids.add(int(segment["id"]))
             scene.update({
@@ -1290,25 +1568,103 @@ def build_default_handlers(static_dir: Path) -> dict[PipelineStage, StageHandler
                 "asset_end_ms": segment["end_ms"],
                 "match_score": selected["match_score"],
                 "match_reasons": selected["reasons"],
+                "usage_count": usage_counts.get(str(segment["asset_id"]), 0),
+                "cooldown": _asset_is_cooled(segment["asset_id"], usage_counts),
             })
             scene_reports.append({
                 "scene": index + 1,
                 "score": selected["match_score"],
                 "hard_failures": [],
                 "issues": ["匹配证据偏弱"] if selected.get("review_required") else [],
+                "asset_id": segment["asset_id"],
+                "usage_count": usage_counts.get(str(segment["asset_id"]), 0),
+                "cooldown": _asset_is_cooled(segment["asset_id"], usage_counts),
             })
+            last_evidence_type = "video"
         script["scenes"] = scenes
+        signature = video_state.scene_asset_signature(scenes)
+        rematch = {
+            "signature": signature,
+            "rematch_applied": False,
+            "strategy": None,
+            "inventory_limited": False,
+            "quality_hold": False,
+            "notes": [],
+        }
+        if signature and signature in recent_signatures:
+            alternate_segments: dict[int, list[dict]] = {}
+            for index, scene in enumerate(scenes):
+                assignment = assignment_by_scene.get(index, {"candidates": []})
+                alts = []
+                for candidate in assignment.get("candidates") or []:
+                    candidate_segment = await asyncio.to_thread(
+                        db.get_asset_segment, candidate["segment_id"]
+                    )
+                    if not candidate_segment:
+                        continue
+                    alts.append({
+                        "asset_id": candidate_segment.get("asset_id"),
+                        "asset_segment_id": candidate_segment.get("id"),
+                        "asset_start_ms": candidate_segment.get("start_ms"),
+                        "asset_end_ms": candidate_segment.get("end_ms"),
+                        "match_score": candidate.get("match_score"),
+                        "reasons": candidate.get("reasons"),
+                    })
+                if alts:
+                    alternate_segments[index] = alts
+            rematch = diversify_repeated_asset_sequence(
+                scenes, recent_signatures, alternate_segments=alternate_segments,
+            )
+            signature = rematch["signature"]
+            script["scenes"] = scenes
+            inventory_limited = inventory_limited or bool(rematch.get("inventory_limited"))
+            for note in rematch.get("notes") or []:
+                scene_reports.append({
+                    "scene": "全片",
+                    "score": 40 if rematch.get("quality_hold") else 70,
+                    "hard_failures": [],
+                    "issues": [note],
+                })
+            if rematch.get("quality_hold"):
+                report["quality_hold_reason"] = "asset_sequence_exhausted"
         usage = source_usage_report(scenes)
         if not usage["passed"]:
+            # Repeated source is a quality hold, not a reason to discard an already
+            # matched timeline. The renderer still has a concrete shot list.
             scene_reports.append({
-                "scene": "全片", "score": 0, "hard_failures": usage["issues"], "issues": [],
+                "scene": "全片", "score": 40, "hard_failures": [],
+                "issues": usage["issues"],
             })
+            inventory_limited = True
         report.update({
             "script": script,
             "matches": assignments,
             "match_scenes": scene_reports,
             "source_usage": usage,
             "copy_provenance": copy_provenance_report(scenes),
+            "scene_asset_signature": signature,
+            "asset_diversity": {
+                "signature": signature,
+                "recent_signature_hit": bool(
+                    rematch.get("quality_hold")
+                    or (signature and signature in recent_signatures and not rematch.get("rematch_applied"))
+                ),
+                "rematch_applied": bool(rematch.get("rematch_applied")),
+                "rematch_strategy": rematch.get("strategy"),
+                "inventory_limited": inventory_limited,
+                "quality_hold": bool(rematch.get("quality_hold")),
+                "notes": rematch.get("notes") or [],
+                "scenes": [
+                    {
+                        "scene": item.get("scene"),
+                        "asset_id": item.get("asset_id"),
+                        "library_origin": item.get("library_origin"),
+                        "usage_count": item.get("usage_count"),
+                        "cooldown": item.get("cooldown"),
+                    }
+                    for item in scene_reports if item.get("scene") != "全片"
+                ],
+            },
         })
         await asyncio.to_thread(
             db.update_video_generation_job, job["id"],

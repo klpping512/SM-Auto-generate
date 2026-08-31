@@ -7,6 +7,8 @@ from pathlib import Path
 from contextlib import contextmanager
 from uuid import uuid4
 
+import video_state
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "data" / "logiflow.db"
@@ -301,7 +303,7 @@ def init_db():
 
             CREATE UNIQUE INDEX IF NOT EXISTS uq_video_generation_active_key
             ON video_generation_jobs(created_by,idempotency_key)
-            WHERE status IN ('pending','running','needs_review','cancel_requested');
+            WHERE status IN ('pending','running','cancel_requested');
 
             CREATE TABLE IF NOT EXISTS video_generation_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -896,8 +898,19 @@ def init_db():
         conn.execute(
             """CREATE UNIQUE INDEX uq_video_generation_active_key
                ON video_generation_jobs(created_by,idempotency_key)
-               WHERE status IN ('pending','running','needs_review','cancel_requested')"""
+               WHERE status IN ('pending','running','cancel_requested')"""
         )
+        _ensure_column(conn, "queue", "video_project_id", "TEXT")
+        _ensure_column(conn, "queue", "revision_id", "TEXT")
+        _ensure_column(conn, "queue", "idempotency_key", "TEXT")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_idempotency
+               ON queue(created_by, idempotency_key)
+               WHERE idempotency_key IS NOT NULL AND idempotency_key != ''"""
+        )
+        _ensure_column(conn, "video_projects", "artifact_status", "TEXT DEFAULT 'absent'")
+        _ensure_column(conn, "video_projects", "quality_status", "TEXT DEFAULT 'unknown'")
+        _ensure_column(conn, "video_projects", "publication_status", "TEXT DEFAULT 'not_queued'")
         # 迁移：为旧数据库添加缺失的列
         _ensure_column(conn, "queue", "created_by", "INTEGER")
         _ensure_column(conn, "queue", "reviewer_id", "INTEGER")
@@ -1559,19 +1572,50 @@ def get_queue_item_by_id(item_id: int) -> dict | None:
         return _parse_queue_row(row) if row else None
 
 
-def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None, attachments=None, source_refs=None, verification_status="not_checked", target_account_id=None, seo_meta=None):
+def get_queue_by_idempotency(created_by: int, idempotency_key: str) -> dict | None:
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM queue WHERE created_by=? AND idempotency_key=?
+               ORDER BY id DESC LIMIT 1""",
+            (created_by, key),
+        ).fetchone()
+        return _parse_queue_row(row) if row else None
+
+
+def add_to_queue(title, body, platform, hashtags=None, scheduled_at=None, status="draft", created_by=None, attachments=None, source_refs=None, verification_status="not_checked", target_account_id=None, seo_meta=None, video_project_id=None, revision_id=None, idempotency_key=None):
+    key = str(idempotency_key or "").strip() or None
+    if created_by is not None and key:
+        existing = get_queue_by_idempotency(created_by, key)
+        if existing:
+            return existing["id"]
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by, attachments, source_refs, verification_status, target_account_id, seo_meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO queue (title, body, platform, hashtags, status, scheduled_at, created_by, attachments, source_refs, verification_status, target_account_id, seo_meta, video_project_id, revision_id, idempotency_key)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 title, body, platform, json.dumps(hashtags or []), status, scheduled_at, created_by,
                 json.dumps(attachments or [], ensure_ascii=False),
                 json.dumps(source_refs or [], ensure_ascii=False),
                 verification_status, target_account_id,
                 json.dumps(seo_meta or {}, ensure_ascii=False),
+                video_project_id, revision_id, key,
             ),
         )
-        return cur.lastrowid
+        queue_id = cur.lastrowid
+        if video_project_id:
+            job_row = conn.execute(
+                """SELECT j.* FROM video_generation_jobs j
+                   JOIN video_projects p ON p.active_job_id=j.id
+                   WHERE p.id=?""",
+                (video_project_id,),
+            ).fetchone()
+            _persist_derived_project_state(
+                conn, video_project_id, dict(job_row) if job_row else None,
+            )
+        return queue_id
 
 
 def update_queue_evidence(item_id: int, source_refs: list[dict], verification_status: str):
@@ -1606,6 +1650,14 @@ def update_queue_review(item_id: int, reviewer_id: int, status: str, review_note
             "UPDATE queue SET status=?, reviewer_id=?, review_note=?, reviewed_at=? WHERE id=?",
             (status, reviewer_id, review_note, datetime.now().strftime("%Y-%m-%d %H:%M"), item_id),
         )
+
+
+def update_queue_content(item_id: int, title: str | None = None, body: str | None = None):
+    with get_conn() as conn:
+        if title is not None:
+            conn.execute("UPDATE queue SET title=? WHERE id=?", (title, item_id))
+        if body is not None:
+            conn.execute("UPDATE queue SET body=? WHERE id=?", (body, item_id))
 
 
 def increment_retry_count(item_id: int):
@@ -3422,7 +3474,7 @@ def asset_active_reference_reasons(asset_id: int) -> list[str]:
         if conn.execute(
             """SELECT 1 FROM video_generation_jobs j
                JOIN video_project_revisions r ON r.id=j.revision_id
-               WHERE j.status IN ('pending','running','needs_review','cancel_requested')
+               WHERE j.status IN ('pending','running','cancel_requested')
                  AND (r.payload LIKE ? OR r.payload LIKE ?) LIMIT 1""",
             (spaced, compact),
         ).fetchone():
@@ -3891,25 +3943,46 @@ def bump_asset_usage(asset_ids: list[int], used_at: str) -> None:
 
 # ==================== Quality-gated Video Generation ====================
 
-_ACTIVE_VIDEO_JOB_STATUSES = ("pending", "running", "needs_review", "cancel_requested")
+_ACTIVE_VIDEO_JOB_STATUSES = video_state._ACTIVE_VIDEO_JOB_STATUSES
 _TERMINAL_VIDEO_JOB_STATUSES = ("succeeded", "failed", "canceled")
-_GENERATING_VIDEO_JOB_STATUSES = ("pending", "running", "cancel_requested")
+_GENERATING_VIDEO_JOB_STATUSES = video_state._GENERATING_VIDEO_JOB_STATUSES
 
 
-def _project_status_for_job_status(job_status: str) -> str:
+def _publication_status_for_project(conn, project_id: str) -> str:
+    row = conn.execute(
+        """SELECT status FROM queue
+           WHERE video_project_id=?
+           ORDER BY id DESC LIMIT 1""",
+        (project_id,),
+    ).fetchone()
+    return video_state.map_queue_status(row["status"] if row else None)
+
+
+def _persist_derived_project_state(conn, project_id: str, job: dict | None) -> None:
+    parsed = dict(job) if job else None
+    if parsed and isinstance(parsed.get("quality_report"), str):
+        try:
+            parsed["quality_report"] = json.loads(parsed.get("quality_report") or "{}")
+        except (TypeError, ValueError):
+            parsed["quality_report"] = {}
+    publication_status = _publication_status_for_project(conn, project_id)
+    artifact_status = video_state.derive_artifact_status(parsed)
+    quality_status = video_state.derive_quality_status(parsed)
+    project_status = video_state.project_status_for_job(parsed, artifact_status=artifact_status)
+    conn.execute(
+        """UPDATE video_projects
+           SET status=?, artifact_status=?, quality_status=?, publication_status=?,
+               updated_at=datetime('now')
+           WHERE id=?""",
+        (project_status, artifact_status, quality_status, publication_status, project_id),
+    )
+
+
+def _project_status_for_job_status(job_status: str, job: dict | None = None) -> str:
     """Map generation job status onto video_projects.status."""
-    status = str(job_status or "").strip()
-    if status in _GENERATING_VIDEO_JOB_STATUSES:
-        return "generating"
-    if status == "needs_review":
-        return "needs_review"
-    if status == "succeeded":
-        return "ready"
-    if status == "failed":
-        return "failed"
-    if status == "canceled":
-        return "canceled"
-    return "ready"
+    if job is None:
+        job = {"status": job_status}
+    return video_state.project_status_for_job(job)
 
 
 def _sync_video_project_for_job(conn, job_row) -> None:
@@ -3921,17 +3994,22 @@ def _sync_video_project_for_job(conn, job_row) -> None:
     if not job_row:
         return
     job = dict(job_row)
+    if job.get("quality_report") and isinstance(job.get("quality_report"), str):
+        try:
+            job["quality_report"] = json.loads(job["quality_report"])
+        except (TypeError, ValueError):
+            job["quality_report"] = {}
     job_id = job.get("id")
     project_id = job.get("project_id")
     if not job_id or not project_id:
         return
-    project_status = _project_status_for_job_status(job.get("status"))
-    conn.execute(
-        """UPDATE video_projects
-           SET status=?, updated_at=datetime('now')
-           WHERE id=? AND active_job_id=?""",
-        (project_status, project_id, job_id),
-    )
+    pointer = conn.execute(
+        "SELECT active_job_id FROM video_projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
+    if not pointer or str(pointer["active_job_id"] or "") != str(job_id):
+        return
+    _persist_derived_project_state(conn, project_id, job)
 
 
 def _decode_video_revision(row) -> dict | None:
@@ -3947,7 +4025,29 @@ def _decode_video_job(row) -> dict | None:
         return None
     item = dict(row)
     item["quality_report"] = json.loads(item.get("quality_report") or "{}")
-    return item
+    return video_state.enrich_job(item)
+
+
+def recent_user_hook_event_ids(created_by: int, limit: int = 20) -> set[int]:
+    """Recently locked Hook ids for this user, used only to de-rank repeats."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT source_snapshot FROM video_projects
+               WHERE created_by=? ORDER BY created_at DESC LIMIT ?""",
+            (created_by, max(1, int(limit))),
+        ).fetchall()
+    used: set[int] = set()
+    for row in rows:
+        try:
+            snapshot = json.loads(row["source_snapshot"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        for event_id in snapshot.get("matched_event_clip_ids") or []:
+            try:
+                used.add(int(event_id))
+            except (TypeError, ValueError):
+                continue
+    return used
 
 
 def recent_session_hook_event_ids(session_id: str, created_by: int, limit: int = 5) -> set[int]:
@@ -4028,10 +4128,17 @@ def create_video_project_revision(project_id: str, payload: dict, created_by: in
             ),
         )
         conn.execute(
-            """UPDATE video_projects SET current_revision_id=?,status='ready',
+            """UPDATE video_projects SET current_revision_id=?,
                updated_at=datetime('now') WHERE id=?""",
             (revision_id, project_id),
         )
+        job_row = conn.execute(
+            """SELECT j.* FROM video_generation_jobs j
+               JOIN video_projects p ON p.active_job_id=j.id
+               WHERE p.id=?""",
+            (project_id,),
+        ).fetchone()
+        _persist_derived_project_state(conn, project_id, dict(job_row) if job_row else None)
         row = conn.execute(
             "SELECT * FROM video_project_revisions WHERE id=?", (revision_id,)
         ).fetchone()
@@ -4064,31 +4171,28 @@ def update_video_project_revision_payload(
             (row["project_id"],),
         ).fetchone()
         active_job_id = str((project_row["active_job_id"] if project_row else None) or "").strip()
-        project_status = "ready"
+        job_row = None
         if active_job_id:
             job_row = conn.execute(
-                "SELECT status FROM video_generation_jobs WHERE id=?",
+                "SELECT * FROM video_generation_jobs WHERE id=?",
                 (active_job_id,),
             ).fetchone()
-            if job_row:
-                project_status = _project_status_for_job_status(job_row["status"])
-            else:
-                project_status = "ready"
-        assignments = [
-            "status=?",
-            "updated_at=datetime('now')",
-        ]
-        params: list = [project_status]
+        assignments = ["updated_at=datetime('now')"]
+        params: list = []
         if title is not None:
             assignments.append("title=?")
             params.append(title)
         if target_duration_ms is not None:
             assignments.append("target_duration_ms=?")
             params.append(int(target_duration_ms))
-        params.append(row["project_id"])
-        conn.execute(
-            f"UPDATE video_projects SET {','.join(assignments)} WHERE id=?",
-            params,
+        if params:
+            params.append(row["project_id"])
+            conn.execute(
+                f"UPDATE video_projects SET {','.join(assignments)} WHERE id=?",
+                params,
+            )
+        _persist_derived_project_state(
+            conn, row["project_id"], dict(job_row) if job_row else None,
         )
         updated = conn.execute(
             "SELECT * FROM video_project_revisions WHERE id=?", (revision_id,)
@@ -4114,7 +4218,15 @@ def get_video_project(project_id: str, created_by: int | None = None) -> dict | 
                 (item["current_revision_id"],),
             ).fetchone()
         item["current_revision"] = _decode_video_revision(revision)
-        return item
+        job = None
+        if item.get("active_job_id"):
+            job_row = conn.execute(
+                "SELECT * FROM video_generation_jobs WHERE id=?",
+                (item["active_job_id"],),
+            ).fetchone()
+            job = _decode_video_job(job_row)
+        publication_status = _publication_status_for_project(conn, item["id"])
+        return video_state.enrich_project(item, job, publication_status=publication_status)
 
 
 def list_video_projects(created_by: int, *, limit: int = 50) -> list[dict]:
@@ -4442,6 +4554,62 @@ def recover_expired_video_generation_jobs() -> int:
             ).fetchone()
             _sync_video_project_for_job(conn, job)
         return running.rowcount + canceled.rowcount
+
+
+def list_recent_succeeded_asset_signatures(limit: int = 20) -> list[str]:
+    """Return scene_asset_signature values from the latest successful jobs."""
+    capped = max(1, min(50, int(limit or 20)))
+    signatures: list[str] = []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT quality_report FROM video_generation_jobs
+               WHERE status='succeeded'
+               ORDER BY datetime(finished_at) DESC, datetime(created_at) DESC
+               LIMIT ?""",
+            (capped,),
+        ).fetchall()
+    for row in rows:
+        try:
+            report = json.loads(row["quality_report"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        signature = str(report.get("scene_asset_signature") or "").strip()
+        if not signature:
+            script = report.get("script") if isinstance(report.get("script"), dict) else {}
+            signature = video_state.scene_asset_signature(script.get("scenes") or [])
+        if signature:
+            signatures.append(signature)
+    return signatures
+
+
+def recent_asset_usage_counts(limit: int = 10) -> dict[str, int]:
+    """Count how often each asset appears in the latest successful projects."""
+    capped = max(1, min(30, int(limit or 10)))
+    counts: dict[str, int] = {}
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT quality_report FROM video_generation_jobs
+               WHERE status='succeeded'
+               ORDER BY datetime(finished_at) DESC, datetime(created_at) DESC
+               LIMIT ?""",
+            (capped,),
+        ).fetchall()
+    for row in rows:
+        try:
+            report = json.loads(row["quality_report"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        script = report.get("script") if isinstance(report.get("script"), dict) else {}
+        seen: set[str] = set()
+        for scene in script.get("scenes") or []:
+            token = str((scene or {}).get("asset_id") or "").strip()
+            if not token or token in seen:
+                continue
+            if str((scene or {}).get("evidence_type") or "") == "brand_endcard":
+                continue
+            seen.add(token)
+            counts[token] = counts.get(token, 0) + 1
+    return counts
 
 
 # ==================== Semantic Media Assets ====================

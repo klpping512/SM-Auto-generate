@@ -162,7 +162,7 @@ function projectShell(listMode=false){
                 onchange="onPlatformRouteChange(this.value)">
           ${PLATFORMS.map(p=>`<option value="${p.id}" ${getPlatformContext()===p.id?'selected':''}>${p.name}</option>`).join('')}
         </select>
-        <span style="font-size:12px;color:var(--text-muted);">视频工作台只生产短视频（抖音竖屏流程）；公众号图文请到「公众号图文」工作台</span>
+        <span style="font-size:12px;color:var(--text-muted);">视频工作台只生产短视频（抖音竖屏流程）</span>
       </div>
     </div>
     ${listMode?'':`<nav class="wb-stages" id="stageNav" aria-label="视频生产阶段"></nav>
@@ -183,8 +183,7 @@ function stageIndex(id){return STAGES.findIndex(s=>s.id===id)}
 function onPlatformRouteChange(id){
   setPlatformContext(id);
   if(id==='wechat_mp'){
-    showToast('视频工作台只生产短视频（抖音竖屏），公众号图文请到「公众号图文」工作台','info');
-    window.location.href='/articles.html';
+    showToast('视频工作台只生产短视频（抖音竖屏）','info');
     return;
   }
   location.reload();
@@ -598,7 +597,7 @@ function renderReview(){
       <h3 style="margin-bottom:12px;font-size:14px;color:#25613a">📤 发布入口</h3>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button id="toEditorBtn" class="btn btn-primary" style="min-height:44px;min-width:180px"
-          onclick="location.href='/editor.html?import_project=' + encodeURIComponent(project?.id || '')">
+          onclick="location.href='/editor.html?video_project_id=' + encodeURIComponent(project?.id || '')">
           去内容编辑器（写文案·选标签·发布）
         </button>
         <button id="enqueueBtn" class="btn btn-secondary" style="min-height:44px;min-width:150px" onclick="enqueueToPublishQueue()">
@@ -767,20 +766,31 @@ async function loadJob(){
 async function enqueueToPublishQueue(){
   if(!project?.id){showToast('项目 ID 无效','error');return;}
   try{
+    const jobOutput = job?.output_path || '';
     const payload={
+      title: project.title || '',
+      body: (scenes()||[]).map(s=>String(s.voiceover||'').trim()).filter(Boolean).join('\n'),
       platforms:[project?.platform || 'douyin'],
       account_targets:{},
-      scheduled_at:null,
+      status:'queued',
+      video_project_id: project.id,
+      revision_id: project.current_revision_id || job?.revision_id,
+      video_path: jobOutput,
+      idempotency_key: `queue:${project.id}:${project.current_revision_id || job?.revision_id || 'rev'}:${project.platform || 'douyin'}`,
+      attachments: jobOutput ? [{type:'video', path: jobOutput}] : [],
     };
-    const response=await apiFetch(`/api/video-projects/${project.id}/enqueue`,{
+    const response=await apiFetch('/api/queue',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(payload),
     });
     const result=await response.json();
     if(response.ok){
-      showToast('✅ 已成功加入发布队列，系统将在 1 分钟内自动发布');
-      setTimeout(()=>location.reload(),1500);
+      const queueId=(result.queue_ids||[])[0];
+      showToast('已加入发布队列，请确认后再发布');
+      setTimeout(()=>{
+        location.href = queueId ? `/queue.html?highlight=${encodeURIComponent(queueId)}` : '/queue.html';
+      },400);
     }else{
       showToast('❌ '+(result.detail||'入队失败'),'error');
     }

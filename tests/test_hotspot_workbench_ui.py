@@ -4,16 +4,16 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_sidebar_places_assets_next_to_hotspot_workbench():
+def test_sidebar_places_assets_in_core_without_retired_entries():
     common = (ROOT / "static" / "common.js").read_text(encoding="utf-8")
 
-    assert "{ id: 'hotspots', label: '热点审核台', href: '/hotspots.html' }" in common
+    assert "{ id: 'hotspots', label: '热点审核台', href: '/hotspots.html' }" not in common
+    assert "{ id: 'articles', label: '公众号图文', href: '/articles.html' }" not in common
     core = common.index("{ section: '核心' }")
     analysis = common.index("{ section: '分析' }")
-    hotspots = common.index("id: 'hotspots'")
     assets = common.index("id: 'assets'")
     editor = common.index("id: 'editor'")
-    assert core < hotspots < assets < editor < analysis
+    assert core < assets < editor < analysis
 
 
 def test_assets_page_contains_only_asset_and_inspiration_actions():

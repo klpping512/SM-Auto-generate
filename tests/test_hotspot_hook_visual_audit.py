@@ -321,7 +321,7 @@ def test_curator_confirms_only_after_visual_and_text_accept(tmp_db, monkeypatch,
     assert hooks[0]["review_status"] == "confirmed"
     assert hooks[0]["evidence"]["visual_audit"]["status"] == "accepted"
     assert hooks[0]["evidence"]["text_audit"]["status"] == "accepted"
-    assert hooks[0]["evidence"]["text_audit"]["prompt_version"] == "hotspot-hook-grounding-audit-v6"
+    assert hooks[0]["evidence"]["text_audit"]["prompt_version"] == "hotspot-hook-grounding-audit-v7-overlay-neutral-facts"
     assert meta["status"] == "curated"
 
 
@@ -402,7 +402,7 @@ def test_audit_prompt_no_longer_claims_source_title_is_verified_fact():
     assert "母片标题是已验证事件事实" not in prompt
     assert "只是待核对的来源线索" in prompt
     assert "visual_scene_type" in prompt
-    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v6"
+    assert hotspot_hook_curator.AUDIT_PROMPT_VERSION == "hotspot-hook-grounding-audit-v7-overlay-neutral-facts"
 
 
 def test_title_contradicts_visual_hard_gate():

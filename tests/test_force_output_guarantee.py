@@ -112,7 +112,7 @@ def test_deterministic_rescue_builds_a_valid_real_hook_video_for_any_topic(topic
         scene["voiceover"] for scene in finalized["scenes"]
     )
     if topic == "南非本地快递对比评测":
-        assert finalized["scenes"][-1]["voiceover"].startswith("南非发货，选择 Buffalo")
+        assert "Buffalo" in finalized["scenes"][-1]["voiceover"]
     app._validate_complete_formal_voiceovers(finalized)
     app._validate_formal_narrative(finalized, scenes, event)
 

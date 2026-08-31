@@ -92,6 +92,7 @@ function render() {
                                         ${a.credential_kind==='cookie' && a.status!=='expired' ? `<button class="btn btn-ghost btn-sm" title="连接账号" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:qrcode-scan" width="16"></iconify-icon></button>` : ''}
                                         ${a.status==='expired' && a.credential_kind==='cookie' ? `<button class="btn btn-ghost btn-sm" style="color:var(--error);" title="重新连接" onclick="openWizard(${a.id},'${a.platform}')"><iconify-icon icon="mdi:login-variant" width="16"></iconify-icon></button>` : ''}
                                         ${a.ready ? `<button class="btn btn-ghost btn-sm" title="测试连接" onclick="testConnection(${a.id})"><iconify-icon icon="mdi:lan-connect" width="16"></iconify-icon></button>` : ''}
+                                        <button class="btn btn-ghost btn-sm" title="重新检测" onclick="redetectSession(${a.id})"><iconify-icon icon="mdi:cached" width="16"></iconify-icon></button>
                                         <button class="btn btn-ghost btn-sm" style="color:var(--error);" onclick="deleteAccount(${a.id})"><iconify-icon icon="mdi:delete-outline" width="16"></iconify-icon></button>
                                     </td>
                                 </tr>`;
@@ -447,6 +448,21 @@ function showAddComplete(accId, platform, success) {
 async function deleteAccount(id) { if (!confirm('确定删除？')) return; try { await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' }); init(); showToast('已删除'); } catch (e) { showToast('删除失败', 'error'); } }
 
 // 测试连接：cookie 平台实际打开浏览器校验登录态，可能需数秒
+async function redetectSession(id) {
+    showToast('正在重新检测 Agent 与登录态…', 'info');
+    try {
+        const r = await apiFetch(`/api/accounts/${id}/session-health`, { method: 'POST' });
+        const d = await r.json();
+        const agent = d.agent || {};
+        if (agent.status && agent.status !== 'ok') {
+            showToast(agent.error || '本地 Agent 不可用', 'error');
+            return;
+        }
+        showToast(d.ready ? '登录态有效' : '登录态已失效，请重新扫码（不会重建失效页）', d.ready ? 'success' : 'error');
+        init();
+    } catch (e) { showToast('重新检测失败：' + e.message, 'error'); }
+}
+
 async function testConnection(id) {
     showToast('正在测试连接，请稍候…', 'info');
     try {

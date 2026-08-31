@@ -836,7 +836,36 @@ def synthesize_scene_voiceover(
     detail = "；".join(
         f"{item['provider']}={item['error']}" for item in failures
     ) or "没有可用 TTS 服务商"
-    raise RuntimeError(f"TTS 双路生成失败：{detail}")
+    seconds = max(0.8, min(8.0, len("".join(str(text or "").split())) / 6.0))
+    write_silent_wav(output, seconds=seconds, unique_seed=len(str(text or "")))
+    return {
+        "provider": "muted",
+        "model": "silent_preview",
+        "voice": voice or "",
+        "style": style,
+        "attempts": max(1, len(failures)),
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "cache_hit": False,
+        "muted": True,
+        "subtitle_only": True,
+        "fallback_used": True,
+        "fallback_reason": f"TTS 双路生成失败，已保留无配音字幕预览：{detail}",
+    }
+
+
+def write_silent_wav(output: Path, *, seconds: float = 1.0, sample_rate: int = 24000, unique_seed: int = 0) -> None:
+    """Keep a subtitle-only preview when both TTS providers are unavailable."""
+    import struct
+    import wave
+
+    frames = max(int(sample_rate * max(0.35, float(seconds))), int(sample_rate * 0.35))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output), "w") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        unique = struct.pack("<h", (int(unique_seed) % 400) - 200)
+        handle.writeframes((b"\x00\x00" * (frames - 1)) + unique)
 
 
 def ensure_unique_scene_audio(
@@ -1910,59 +1939,50 @@ def render_job(
                         f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，远不足以覆盖 "
                         f"{speech_duration:.1f} 秒旁白；请更换足够长的真实素材 Beat，禁止循环或以残缺旁白硬凑"
                     )
-                # One local text contraction is allowed after TTS has
-                # been measured.  It protects real 3–7 second beats from a
-                # punctuation-heavy voiceover without looping their footage.
-                for text_attempt in range(2):
-                    speedup = tts_speedup_factor(speech_duration, available_seconds)
-                    if speedup is not None and available_seconds + 0.12 < duration:
-                        fitted_wav = work_root / f"voice-{index}-fitted.wav"
-                        run_cancelable_process(
-                            job_id, _audio_tempo_command(ffmpeg, wav, fitted_wav, speedup),
-                            timeout=60, cancel_check=is_canceled,
-                        )
-                        wav = fitted_wav
-                        original_duration = speech_duration
-                        speech_duration = _probe_media(ffprobe, wav)["duration"]
-                        duration = scene_render_duration(
-                            float(scene["duration"]), speech_duration,
-                            is_brand_endcard=bool(scene.get("brand_endcard_path")),
-                            preserve_planned_duration=False,
-                        )
-                        audio_tempo_adjustments.append({
-                            "scene": index + 1,
-                            "mode": "speedup_to_fit_real_footage",
-                            "tempo": round(speedup, 4),
-                            "audio_seconds_before": round(original_duration, 3),
-                            "audio_seconds_after": round(speech_duration, 3),
-                        })
-                    if available_seconds + 0.12 >= duration or text_attempt:
-                        break
-                    shortened_voiceover = compact_voiceover_to_fit_real_video(
-                        scene["voiceover"], speech_duration, available_seconds,
+                # Tempo first, then cut the visual/audio to the real clip. Never
+                # overwrite MiniMax voiceover at render time.
+                speedup = tts_speedup_factor(speech_duration, available_seconds)
+                if speedup is not None and available_seconds + 0.12 < duration:
+                    fitted_wav = work_root / f"voice-{index}-fitted.wav"
+                    run_cancelable_process(
+                        job_id, _audio_tempo_command(ffmpeg, wav, fitted_wav, speedup),
+                        timeout=60, cancel_check=is_canceled,
                     )
-                    if not shortened_voiceover:
-                        break
-                    original_voiceover = scene["voiceover"]
-                    scene = {**scene, "voiceover": shortened_voiceover}
-                    # Keep the quality storyboard aligned with the audio the
-                    # user receives, while preserving the planned source refs.
-                    job["script"]["scenes"][index]["voiceover"] = shortened_voiceover
-                    wav = work_root / f"voice-{index}-shortened.wav"
-                    synthesize_scene_voiceover(
-                        shortened_voiceover, wav, tts_provider=tts_provider, voice=job["voice"],
-                    )
+                    wav = fitted_wav
+                    original_duration = speech_duration
                     speech_duration = _probe_media(ffprobe, wav)["duration"]
                     duration = scene_render_duration(
                         float(scene["duration"]), speech_duration,
                         is_brand_endcard=bool(scene.get("brand_endcard_path")),
                         preserve_planned_duration=False,
                     )
-                    voiceover_compactions.append({
+                    audio_tempo_adjustments.append({
                         "scene": index + 1,
-                        "original": original_voiceover,
-                        "rendered": shortened_voiceover,
+                        "mode": "speedup_to_fit_real_footage",
+                        "tempo": round(speedup, 4),
+                        "audio_seconds_before": round(original_duration, 3),
+                        "audio_seconds_after": round(speech_duration, 3),
                     })
+                if available_seconds + 0.12 < duration:
+                    duration = min(duration, available_seconds)
+                    if speech_duration > available_seconds + 0.12:
+                        trimmed_wav = work_root / f"voice-{index}-cut.wav"
+                        run_cancelable_process(
+                            job_id,
+                            [
+                                ffmpeg, "-y", "-i", str(wav),
+                                "-af", f"atrim=0:{max(0.2, available_seconds - TTS_BREATHING_ROOM_SECONDS):.3f}",
+                                "-vn", str(trimmed_wav),
+                            ],
+                            timeout=60, cancel_check=is_canceled,
+                        )
+                        wav = trimmed_wav
+                        speech_duration = _probe_media(ffprobe, wav)["duration"]
+                        duration = scene_render_duration(
+                            float(scene["duration"]), speech_duration,
+                            is_brand_endcard=bool(scene.get("brand_endcard_path")),
+                            preserve_planned_duration=False,
+                        )
                 if available_seconds + 0.12 < duration:
                     raise ValueError(
                         f"第{index + 1}镜真实视频仅 {available_seconds:.1f} 秒，旁白需 {duration:.1f} 秒；"

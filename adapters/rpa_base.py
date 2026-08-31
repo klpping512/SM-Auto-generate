@@ -77,6 +77,20 @@ def build_credentials(cookies: list[dict]) -> str:
     return json.dumps({"cookies": cookies}, ensure_ascii=False)
 
 
+def cookies_indicate_login(cookies: list[dict] | None, *, platform: str = "") -> bool:
+    """Treat durable session cookies as login success, not a live page selector."""
+    names = {
+        str(item.get("name") or "").strip().lower()
+        for item in (cookies or [])
+        if isinstance(item, dict)
+    }
+    if platform == "douyin":
+        return bool(names & {"sessionid", "sid_guard", "sid_tt", "uid_tt", "sessionid_ss"})
+    if platform == "xiaohongshu":
+        return bool(names & {"web_session", "websectiga", "a1", "gid"})
+    return any("session" in name or name.endswith("_tt") for name in names)
+
+
 class RpaAdapter(PublishAdapter):
     name = ""
     login_url = ""

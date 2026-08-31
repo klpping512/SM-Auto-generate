@@ -9,12 +9,10 @@ def test_chat_creates_project_and_redirects_to_workbench():
 
     assert "/api/ai/chat/dual-library-video" in page
     assert "createSixtySecondVideoProject" in page
-    assert "/api/ai/chat/dual-library-video/readiness?topic=" in page
-    assert "正在核验正式成片素材" in page
     assert "创建60秒视频项目" in page
     assert "video-project.html?id=" in page
     assert "stage=brief" in page
-    assert "idempotency_key: `chat-video-" in page
+    assert "idempotency_key: `chat-video-" not in page
     assert "tts_provider: selection.tts_provider" in page
     assert "voice: selection.voice" in page
     assert "/api/douyin/render" not in page
@@ -46,14 +44,10 @@ def test_chat_routes_confirmed_hooks_to_dual_library_and_disables_queued_video()
     assert "/api/ai/chat/owned-library-video" not in page
     assert "owned_only" in page
     assert "未匹配到相关 Hook，已切换自有素材直出" in page
-    assert "deliveryReadiness?.delivery_ready===true" in page
-    assert "readinessBlocked" in page
     assert "parseStructuredChatValue" in page
     assert "parseLooseStructuredChatValue" in page
     assert "normalizeChatOutput" in page
-    assert "readiness.delivery_ready !== true" in page
-    assert "正式成片素材门禁尚未通过" in page
-    assert "等待热点 Hook" in page
+    assert "请先输入非空话题" in page
     assert "任务 ID" in page
     assert "bindHookToOriginalTopic" in page
     assert "选择开场 Hook" in page

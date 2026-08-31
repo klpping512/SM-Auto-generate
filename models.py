@@ -135,6 +135,10 @@ class QueueCreateRequest(BaseModel):
     source_refs: list[dict] = Field(default=[], description="逐条事实证据：claim/url/source_title/publisher/excerpt")
     account_targets: dict[str, list[int]] = Field(default={}, description="平台到目标账号主键列表；同平台多账号会各建一条发布任务")
     seo_meta: dict = Field(default_factory=dict, description="小红书 SEO 埋词元数据（main/longtail/positions）")
+    video_project_id: str | None = Field(default=None, max_length=64)
+    revision_id: str | None = Field(default=None, max_length=64)
+    video_path: str | None = Field(default=None, max_length=500)
+    idempotency_key: str | None = Field(default=None, max_length=128)
 
 
 class ReviewRequest(BaseModel):

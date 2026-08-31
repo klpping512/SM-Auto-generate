@@ -26,6 +26,9 @@ class DouyinAdapter(RpaAdapter):
     def _logged_in_selector(self) -> str:
         return self.LOGGED_IN_MARK
 
+    def session_cookie_names(self) -> set[str]:
+        return {"sessionid", "sid_guard", "sid_tt", "uid_tt", "sessionid_ss"}
+
     async def _save_debug_shot(self, page, prefix: str) -> str:
         """把当前页面截图存到 static/debug，返回可访问的相对路径。"""
         try:

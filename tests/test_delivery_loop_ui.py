@@ -43,7 +43,7 @@ def test_common_nav_exposes_video_project_entry():
 
 def test_chat_response_contract_fields_present_in_backend():
     source = (ROOT / "app.py").read_text(encoding="utf-8")
-    assert '"hook_requirement": "required"' in source
+    assert '"hook_requirement": "optional"' in source
     assert '"delivery_readiness": readiness' in source
     assert '"funnel": (hotspot_retrieval or {}).get("funnel")' in source
     assert "voice_options" in source

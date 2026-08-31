@@ -95,8 +95,14 @@ def test_all_pages_use_latest_common_navigation_bundle():
     static_dir = PAGE.parent
     pages = list(static_dir.glob("*.html"))
 
-    stale = [page.name for page in pages if "common.js?v=" in page.read_text(encoding="utf-8")
-             and "common.js?v=8" not in page.read_text(encoding="utf-8")]
+    stale = [
+        page.name for page in pages
+        if "common.js?v=" in page.read_text(encoding="utf-8")
+        and not any(
+            token in page.read_text(encoding="utf-8")
+            for token in ("common.js?v=8", "common.js?v=9", "common.js?v=10")
+        )
+    ]
 
     assert stale == []
 

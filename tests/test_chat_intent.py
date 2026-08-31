@@ -223,11 +223,11 @@ def test_ai_chat_hotspot_topic_still_queues_discovery(tmp_db, monkeypatch):
     payload = response.json()
     assert payload["content_mode"] == "hotspot"
     assert payload["event_anchor"]["has_event_anchor"] is True
-    assert payload["result_state"] == "hotspot_retrieval_pending"
-    assert payload["hotspot_retrieval"]["status"] == "queued"
-    assert payload["failure_class"] == "coverage_gap"
-    assert refresh_calls == [True]
-    assert tmp_db.list_hotspot_discovery_requests(status="pending")[0]["topic"] == topic
+    assert payload["hotspot_retrieval"]["status"] == "owned_fallback"
+    assert payload["hotspot_retrieval"]["video"]["chain_mode"] == "owned_only"
+    assert payload["failure_class"] is None
+    assert refresh_calls == []
+    assert tmp_db.list_hotspot_discovery_requests() == []
 
 
 def test_ai_chat_broad_market_topic_needs_event_anchor_not_discovery(tmp_db, monkeypatch):
@@ -257,13 +257,11 @@ def test_ai_chat_broad_market_topic_needs_event_anchor_not_discovery(tmp_db, mon
     payload = response.json()
     assert payload["content_mode"] == "evergreen"
     assert payload["event_anchor"]["has_event_anchor"] is False
-    assert payload["result_state"] == "topic_needs_event_anchor"
-    assert payload["hotspot_retrieval"]["status"] == "not_requested"
-    assert payload["failure_class"] == "no_event_anchor"
+    assert payload["hotspot_retrieval"]["status"] == "owned_fallback"
+    assert payload["hotspot_retrieval"]["video"]["chain_mode"] == "owned_only"
+    assert payload["failure_class"] is None
     assert refresh_calls == []
     assert tmp_db.list_hotspot_discovery_requests() == []
-    assert "未启动" in (payload["hotspot_retrieval"].get("message") or "") or "点选" in (payload["hotspot_retrieval"].get("message") or "")
-    assert payload["hotspot_retrieval"].get("funnel", {}).get("passed") == 0
 
 
 def test_ai_chat_evergreen_tries_generic_hooks_but_skips_discovery(tmp_db, monkeypatch):
