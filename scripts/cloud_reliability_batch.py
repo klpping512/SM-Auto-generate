@@ -18,18 +18,24 @@ import app  # noqa: E402
 import database as db  # noqa: E402
 from models import ChatDualLibraryVideoRequest  # noqa: E402
 
-TOPICS_30 = [
+REQUIRED_TOPICS_30 = [
+    "空运、海运、直邮怎么选",
+    "同城配送时效怎么比较",
+    "南非清关文件不齐怎么办",
+    "冷链断链后仓库怎么处理",
+    "危险品入仓如何核对",
+    "客户改地址后运单怎么重打",
+    "港口拥堵时如何改走",
+    "跨境小包丢失后如何追踪",
+    "退货反仓如何避免二次错分",
+    "高温天气冷藏车如何预冷",
+]
+
+TOPICS_30 = REQUIRED_TOPICS_30 + [
     "约翰内斯堡仓内如何避免错发漏发",
-    "德班港拥堵时货代怎么改走法",
-    "空运和海运发南非怎么按货值选型",
-    "冷链断链后仓库要先做什么",
-    "跨境清关文件不齐会卡在哪",
     "旺季爆仓时分拣线怎么分流",
-    "同城当日达和次日达怎么排运力",
     "边境延误时客户通知怎么写",
     "超尺寸货进仓前要量哪三处",
-    "退货反仓怎么避免二次错分",
-    "危险品入南非仓的现场核对要点",
     "卡车上货顺序怎么减少压损",
     "末公里派送失败后如何二次预约",
     "港口到内陆仓的时效怎么拆",
@@ -38,7 +44,6 @@ TOPICS_30 = [
     "雨季路况对干线班次的影响",
     "拆柜入仓时如何防止混票",
     "保税仓转一般贸易要过哪些节点",
-    "客户改地址后运单怎么重打",
     "周末值班仓如何处理紧急补货",
     "电池类货物仓储隔离怎么做",
     "派件超时赔偿口径怎么对客户说",
@@ -46,8 +51,6 @@ TOPICS_30 = [
     "集装箱到港后滞箱费怎么控",
     "叉车作业区人车分流怎么落地",
     "盘点差异发现后当天怎么闭环",
-    "跨境小包丢失后轨迹怎么追",
-    "高温天冷藏车预冷要多久",
     "新仓开业前三天的作业检查清单",
 ]
 
@@ -225,6 +228,8 @@ def enqueue(run_id: str, count: int, start: int = 0) -> dict:
 
 
 def inspect_jobs(run_id: str) -> dict:
+    import video_state
+
     manifest_path = _run_dir() / f"{run_id}.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     rows = []
@@ -233,13 +238,15 @@ def inspect_jobs(run_id: str) -> dict:
         job_id = item.get("job_id")
         job = db.get_video_generation_job(job_id) if job_id else None
         project = db.get_video_project(item.get("project_id")) if item.get("project_id") else None
-        output_path = (job or {}).get("output_path") or ""
+        output_path = (job or {}).get("output_path") or (job or {}).get("preview_path") or ""
         abs_output = ""
         exists = False
+        duration_ms = 0
         if output_path:
             abs_output = str(Path(app.STATIC_DIR) / output_path)
             exists = Path(abs_output).is_file()
-        signature = ""
+        probe = video_state.probe_video_artifact(output_path) if output_path else {}
+        duration_ms = int(probe.get("duration_ms") or 0)
         report = (job or {}).get("quality_report") or {}
         if isinstance(report, str):
             try:
@@ -247,9 +254,27 @@ def inspect_jobs(run_id: str) -> dict:
             except json.JSONDecodeError:
                 report = {}
         match = report.get("asset_matching") or report.get("match") or {}
-        signature = str(match.get("asset_signature") or (job or {}).get("asset_signature") or "")
+        diversity = report.get("asset_diversity") or {}
+        contract = report.get("render_contract") or {}
+        provenance = report.get("copy_provenance") or []
+        signature = str(
+            diversity.get("signature")
+            or report.get("scene_asset_signature")
+            or match.get("asset_signature")
+            or (job or {}).get("asset_signature")
+            or ""
+        )
         if signature:
             signatures.append(signature)
+        fallback_reasons = sorted({
+            str(row.get("fallback_reason") or row.get("reason") or "")
+            for row in provenance
+            if row.get("fallback_reason") or row.get("copy_source") in {"deterministic_fallback", "fallback"}
+        } - {""})
+        copy_sources = sorted({
+            str(row.get("copy_source") or row.get("source") or "")
+            for row in provenance if row.get("copy_source") or row.get("source")
+        })
         rows.append({
             "index": item.get("index"),
             "topic": item.get("topic"),
@@ -257,14 +282,24 @@ def inspect_jobs(run_id: str) -> dict:
             "project_id": item.get("project_id"),
             "status": (job or {}).get("status") or item.get("error") or "missing",
             "stage": (job or {}).get("stage"),
-            "quality_status": (project or {}).get("quality_status") or (job or {}).get("quality_status"),
-            "artifact_status": (project or {}).get("artifact_status") or (job or {}).get("artifact_status"),
+            "result_label": video_state.result_label(job) if job else "missing",
+            "quality_status": (project or {}).get("quality_status") or video_state.derive_quality_status(job),
+            "artifact_status": (project or {}).get("artifact_status") or video_state.derive_artifact_status(job),
+            "publication_status": (project or {}).get("publication_status"),
             "output_path": output_path,
             "output_exists": exists,
+            "probe_ok": bool(probe.get("ok")),
+            "duration_ms": duration_ms,
+            "error_code": (job or {}).get("error_code"),
             "error_message": ((job or {}).get("error_message") or item.get("error") or "")[:300],
             "asset_signature": signature,
-            "copy_source": ((job or {}).get("source_snapshot") or {}).get("copy_source")
-            if isinstance((job or {}).get("source_snapshot"), dict) else None,
+            "copy_sources": copy_sources,
+            "fallback_reasons": fallback_reasons,
+            "render_contract": contract,
+            "text_card_count": contract.get("text_card_count") or diversity.get("text_card_count"),
+            "video_scene_count": contract.get("video_count"),
+            "image_scene_count": contract.get("image_count"),
+            "retry_history": list((report.get("automatic_retry_history") or [])[-3:]),
         })
     counts: dict[str, int] = {}
     for row in rows:
@@ -277,11 +312,18 @@ def inspect_jobs(run_id: str) -> dict:
         "counts": counts,
         "terminal": sum(counts.get(key, 0) for key in ("succeeded", "failed", "canceled")),
         "output_exists": sum(1 for row in rows if row.get("output_exists")),
+        "probe_ok": sum(1 for row in rows if row.get("probe_ok")),
         "ready_without_file": sum(
             1 for row in rows
             if row.get("status") in {"succeeded"} and not row.get("output_exists")
         ),
         "repeated_signatures": repeated,
+        "missing_asset_failures": sum(
+            1 for row in rows if "没有对应素材" in str(row.get("error_message") or "")
+        ),
+        "opening_gate_failures": sum(
+            1 for row in rows if "主题型开场" in str(row.get("error_message") or "")
+        ),
         "items": rows,
     }
     out = _run_dir() / f"{run_id}-status.json"
@@ -291,8 +333,11 @@ def inspect_jobs(run_id: str) -> dict:
         "counts": counts,
         "terminal": summary["terminal"],
         "output_exists": summary["output_exists"],
+        "probe_ok": summary["probe_ok"],
         "ready_without_file": summary["ready_without_file"],
         "repeated_signatures": repeated,
+        "missing_asset_failures": summary["missing_asset_failures"],
+        "opening_gate_failures": summary["opening_gate_failures"],
         "status_file": str(out),
     }, ensure_ascii=False))
     return summary
